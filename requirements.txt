@@ -1,0 +1,11 @@
+# Install a CUDA build of PyTorch before this file. This list does not install
+# torch, so it does not replace that wheel with a CPU build.
+diffusers @ git+https://github.com/huggingface/diffusers.git@8c54b38fea3d624d23d0e43c0c96037f080a79f9
+transformers>=5.17.0
+accelerate
+bitsandbytes
+pillow
+sentencepiece
+peft
+protobuf
+numpy
