@@ -30,7 +30,7 @@ The file has no paths, keys, or machine names.
 
 ## Finish or give it back
 
-- Finished tile: `python scripts/publish_png.py --district <slug>` commits only `results/<district>.png`.
+- Finished tile: `python scripts/publish_png.py --district <slug>` commits only `results/<slug>.png`.
 - You cannot finish: `python scripts/claim_district.py --release --district <slug>` deletes your claim. This is refused if the PNG already exists.
 
 Leave other agents' claims and PNGs alone.
