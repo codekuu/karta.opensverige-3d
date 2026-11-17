@@ -1,0 +1,158 @@
+import { env } from 'cloudflare:test';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { approveCell, listQueue, markLive, rejectCell, setBlock, setTrust } from '../src/admin.js';
+import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser, setCell } from './fixtures.js';
+import { minimalPng } from './png.js';
+
+const LATER = '2026-11-17T13:00:00Z';
+
+async function uploaded(col, row, state = 'vantar', owner = { id: 4242, login: 'klang' }) {
+  await setCell('goteborg-norr', col, row, { state, owner_id: owner.id, owner_login: owner.login, uploaded_at: NOW, sha256: 'abc', bytes: 10 });
+  await env.INKORG.put(`goteborg-norr/${col}_${row}.png`, minimalPng(1024, 1024), { httpMetadata: { contentType: 'image/png' } });
+  await env.INKORG.put(`goteborg-norr/${col}_${row}.json`, '{}', { httpMetadata: { contentType: 'application/json' } });
+}
+
+async function inboxKeys() {
+  return (await env.INKORG.list()).objects.map((o) => o.key).sort();
+}
+
+beforeEach(async () => {
+  await clearDb();
+  await insertSheet();
+  await insertCells('goteborg-norr', 4, 3);
+  await insertUser();
+  const list = await env.INKORG.list();
+  await Promise.all(list.objects.map((o) => env.INKORG.delete(o.key)));
+});
+
+describe('approveCell', () => {
+  it('sets godkand and counts for the owner', async () => {
+    await uploaded(1, 1);
+    const r = await approveCell(env.DB, 'goteborg-norr', 1, 1, LATER);
+    expect(r).toEqual({ ok: true });
+    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'godkand', approved_at: LATER, updated_at: LATER });
+    const u = await env.DB.prepare('SELECT approved_count, trusted FROM users WHERE github_id = 4242').first();
+    expect(u).toEqual({ approved_count: 1, trusted: 0 });
+  });
+
+  it('makes the owner trusted at the tenth approval', async () => {
+    await env.DB.prepare('UPDATE users SET approved_count = 9 WHERE github_id = 4242').run();
+    await uploaded(1, 1);
+    await approveCell(env.DB, 'goteborg-norr', 1, 1, LATER);
+    const u = await env.DB.prepare('SELECT approved_count, trusted FROM users WHERE github_id = 4242').first();
+    expect(u).toEqual({ approved_count: 10, trusted: 1 });
+  });
+
+  it('is 409 when the cell is not waiting', async () => {
+    expect(await approveCell(env.DB, 'goteborg-norr', 0, 0, LATER)).toMatchObject({ ok: false, status: 409, code: 'not_waiting' });
+  });
+});
+
+describe('rejectCell', () => {
+  it('frees the cell, keeps the comment and deletes the inbox objects', async () => {
+    await uploaded(1, 1);
+    const r = await rejectCell(env.DB, env.INKORG, 'goteborg-norr', 1, 1, 'vattnet saknar kant', LATER);
+    expect(r).toEqual({ ok: true });
+    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'fri', owner_id: null, owner_login: null, uploaded_at: null, sha256: null, bytes: null, rejected_at: LATER, comment: 'vattnet saknar kant' });
+    expect(await inboxKeys()).toEqual([]);
+  });
+
+  it('keeps the inbox objects of a live cell and logs live-removed', async () => {
+    await uploaded(1, 1, 'live');
+    await rejectCell(env.DB, env.INKORG, 'goteborg-norr', 1, 1, 'fel hus', LATER);
+    expect((await getCell('goteborg-norr', 1, 1)).state).toBe('fri');
+    expect(await inboxKeys()).toEqual(['goteborg-norr/1_1.json', 'goteborg-norr/1_1.png']);
+    const ev = await env.DB.prepare("SELECT detail FROM events WHERE action = 'reject'").first();
+    expect(ev.detail).toContain('live-removed');
+  });
+
+  it('is 409 for a free cell', async () => {
+    expect(await rejectCell(env.DB, env.INKORG, 'goteborg-norr', 0, 0, 'x', LATER)).toMatchObject({ ok: false, status: 409, code: 'nothing_to_reject' });
+  });
+});
+
+describe('trust and block', () => {
+  it('sets and clears trust and block by login', async () => {
+    expect(await setTrust(env.DB, 'klang', 1)).toEqual({ ok: true });
+    expect((await env.DB.prepare('SELECT trusted FROM users WHERE login = ?').bind('klang').first()).trusted).toBe(1);
+    expect(await setBlock(env.DB, 'klang', 1)).toEqual({ ok: true });
+    expect((await env.DB.prepare('SELECT blocked FROM users WHERE login = ?').bind('klang').first()).blocked).toBe(1);
+    expect(await setTrust(env.DB, 'nobody', 1)).toMatchObject({ ok: false, status: 404, code: 'no_user' });
+  });
+});
+
+describe('listQueue', () => {
+  it('lists waiting cells with their eight neighbours', async () => {
+    await uploaded(1, 1);
+    await setCell('goteborg-norr', 0, 0, { state: 'live' });
+    await setCell('goteborg-norr', 2, 2, { state: 'last' });
+    const queue = await listQueue(env.DB, 'vantar');
+    expect(queue).toHaveLength(1);
+    expect(queue[0]).toMatchObject({ sheet: 'goteborg-norr', col: 1, row: 1, state: 'vantar', owner_login: 'klang' });
+    expect(queue[0].neighbours).toHaveLength(8);
+    expect(queue[0].neighbours).toContainEqual([0, 0, 'live']);
+    expect(queue[0].neighbours).toContainEqual([2, 2, 'last']);
+    expect(queue[0].neighbours).toContainEqual([1, 0, 'fri']);
+  });
+});
+
+describe('markLive', () => {
+  it('marks all approved cells live and bumps the sheet revision, or nothing', async () => {
+    await uploaded(1, 1, 'godkand');
+    await uploaded(2, 1, 'godkand');
+    const bad = await markLive(env.DB, 'goteborg-norr', [[1, 1], [0, 0]], 3, LATER);
+    expect(bad).toMatchObject({ ok: false, status: 409, code: 'not_approved' });
+    expect((await getCell('goteborg-norr', 1, 1)).state).toBe('godkand');
+    const ok = await markLive(env.DB, 'goteborg-norr', [[1, 1], [2, 1]], 3, LATER);
+    expect(ok).toEqual({ ok: true, live: 2 });
+    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'live', live_at: LATER });
+    expect(await getCell('goteborg-norr', 2, 1)).toMatchObject({ state: 'live', live_at: LATER });
+    expect((await env.DB.prepare("SELECT rev FROM sheets WHERE id = 'goteborg-norr'").first()).rev).toBe(3);
+  });
+});
+
+describe('admin routes', () => {
+  function as(githubId, path, method = 'POST', body = undefined) {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ id: githubId, login: githubId === 4242 ? 'klang' : 'gustaf' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const init = { method, headers: { Authorization: 'Bearer t', 'Content-Type': 'application/json' } };
+    if (body !== undefined) init.body = JSON.stringify(body);
+    return call(new Request(`https://x/v1/${path}`, init), { ADMIN_GITHUB_ID: '1' });
+  }
+
+  it('refuses a non-admin on every admin route', async () => {
+    for (const [path, method, body] of [
+      ['approve', 'POST', { sheet: 'goteborg-norr', col: 1, row: 1 }],
+      ['reject', 'POST', { sheet: 'goteborg-norr', col: 1, row: 1, comment: 'x' }],
+      ['trust', 'POST', { login: 'klang', trusted: 1 }],
+      ['block', 'POST', { login: 'klang', blocked: 1 }],
+      ['queue?state=vantar', 'GET'],
+      ['live', 'POST', { sheet: 'goteborg-norr', cells: [], rev: 1 }],
+    ]) {
+      const r = await as(4242, path, method, body);
+      expect(r.status, path).toBe(403);
+      expect((await r.json()).error).toBe('not_admin');
+    }
+    vi.unstubAllGlobals();
+  });
+
+  it('approve, reject and queue work for the admin and log events', async () => {
+    await insertUser({ github_id: 1, login: 'gustaf' });
+    await uploaded(1, 1);
+    await uploaded(2, 1);
+    const q = await as(1, 'queue?state=vantar', 'GET');
+    expect(q.status).toBe(200);
+    expect((await q.json()).cells).toHaveLength(2);
+    const a = await as(1, 'approve', 'POST', { sheet: 'goteborg-norr', col: 1, row: 1 });
+    expect(a.status).toBe(200);
+    const noComment = await as(1, 'reject', 'POST', { sheet: 'goteborg-norr', col: 2, row: 1, comment: '' });
+    expect(noComment.status).toBe(400);
+    const rj = await as(1, 'reject', 'POST', { sheet: 'goteborg-norr', col: 2, row: 1, comment: 'suddigt' });
+    expect(rj.status).toBe(200);
+    const live = await as(1, 'live', 'POST', { sheet: 'goteborg-norr', cells: [[1, 1]], rev: 2 });
+    expect(live.status).toBe(200);
+    expect(await live.json()).toEqual({ ok: true, live: 1 });
+    const { results } = await env.DB.prepare("SELECT action FROM events WHERE github_id = 1 ORDER BY id").all();
+    expect(results.map((r) => r.action)).toEqual(['approve', 'reject', 'live']);
+    vi.unstubAllGlobals();
+  });
+});

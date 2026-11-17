@@ -14,6 +14,7 @@
    CORS: GET answers carry Access-Control-Allow-Origin for an origin in ALLOWED_ORIGINS, so
    the build page can read the grid. Other methods are CLI calls and get no CORS headers. */
 
+import { approveRoute, blockRoute, liveRoute, queueRoute, rejectRoute, trustRoute } from './admin.js';
 import { requireUser } from './auth.js';
 import { error, json, nowIso } from './db.js';
 import { claimRoute, releaseRoute } from './cells.js';
@@ -50,6 +51,12 @@ const routes = [
   ['POST', /^\/v1\/release$/, releaseRoute],
   ['PUT', /^\/v1\/upload\/(?<sheet>[a-z0-9-]+)\/(?<col>\d+)_(?<row>\d+)$/, uploadRoute],
   ['GET', /^\/v1\/inkorg\/(?<sheet>[a-z0-9-]+)\/(?<col>\d+)_(?<row>\d+)\.(?<ext>png|json)$/, inkorgRoute],
+  ['POST', /^\/v1\/approve$/, approveRoute],
+  ['POST', /^\/v1\/reject$/, rejectRoute],
+  ['POST', /^\/v1\/trust$/, trustRoute],
+  ['POST', /^\/v1\/block$/, blockRoute],
+  ['GET', /^\/v1\/queue$/, queueRoute],
+  ['POST', /^\/v1\/live$/, liveRoute],
 ];
 
 /**
