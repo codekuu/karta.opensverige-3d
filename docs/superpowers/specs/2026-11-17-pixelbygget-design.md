@@ -15,16 +15,17 @@ Mål
 - En ny bidragsgivare går från tom maskin till uppladdad ruta på en kväll, med bara README och egen Google-nyckel.
 - En godkänd ruta syns på karta.opensverige.se inom tio minuter, utan att Gustaf kör något för hand.
 - Gustafs arbete per ruta är ett klick (godkänn) eller inget alls (betrodd bidragsgivare).
-- En agent klarar hela flödet utan människa utom två steg: GitHub-inloggningen och Google-nyckeln.
+- En agent klarar hela flödet utan människa utom ett steg: GitHub-inloggningen. (Lantmäteriets ortofoto kräver ett Geotorget-konto; v1 kan rendera från OpenStreetMap ensamt, så kontot är valfritt för bidragsgivaren.)
+- Renderaren bygger på öppna data, så varje ny ruta kan publiceras CC BY 4.0 med kreditrader för OpenStreetMap, Lantmäteriet och kommunen. Det är villkoret för Bergets GPU:er och för att kartorna ska få ligga i en öppen kartstack.
+- Modellen och LoRA:n har licenser som tillåter en ideell förenings drift.
 - Byggsidan är visuell: rutnätet över kartan, tillstånd i färg, namn på rutorna, topplista.
 
 Icke-mål (v1)
 
 - Worker-läge där en maskin tar nästa fria ruta i en loop. Fas 2, men API:t ska göra det trivialt.
 - Kredit per ruta vid hovring på den riktiga kartan. Fas 2. v1 har kreditraden "och byggarna · N rutor" och topplistan.
-- Renderare på öppna data (Lantmäteriet) i stället för Google. Fas 2, separat beslut.
-- Byte av bildmodell till en Apache-licensierad (Qwen-Image-Edit-2511). Separat beslut; v1 kör samma modell som i dag.
 - Byar, skog, landsbygd. Ritas inte.
+- Att göra de tre Google-härledda städerna öppna. De kan inte licensieras CC BY; nya städer kan.
 
 Anti-mål (misslyckande även om det tekniskt fungerar)
 
@@ -36,7 +37,8 @@ Anti-mål (misslyckande även om det tekniskt fungerar)
 
 ## 3. Begränsningar
 
-- Googles villkor för Map Tiles API förbjuder maskintolkning, härlett innehåll och lagring. Varje bidragsgivare renderar med egen nyckel under eget avtal. Vi tar aldrig emot, lagrar eller vidarebefordrar en källrender. README säger detta rakt ut. Vad README får lova är Gustafs ord, inte byggarens.
+- **Google är stängt** (ändrat 2026-11-17 efter juridikmemot, `utredningar/rutnat-2026-11-17/JURIDIK.md`). Sedan 8 juli 2025 ger Map Tiles API 403 på Photorealistic 3D Tiles för projekt med faktureringsadress i EES, så "egen nyckel per bidragsgivare" går inte för svenska konton; Gustafs eget konto är dessutom fryst. Villkoren förbjuder därtill maskintolkning och härlett innehåll. Nya städer renderas från öppna data: OpenStreetMap (ODbL, Produced Work med kreditrad), Lantmäteriets ortofoto och ytmodell (CC BY 4.0, kräver Geotorget-konto) och kommunernas öppna 3D-byggnader där de finns (Helsingborg CC BY 4.0, Umeå CC0). Spiken `utredningar/rutnat-2026-11-17/SPIK.md` visar att rendern går från OSM ensamt. Vi tar aldrig emot, lagrar eller vidarebefordrar en Google-render. De tre live-städerna är Google-härledda; om de ska ligga kvar som förhandsvisning är Gustafs och en jurists beslut, se avsnitt 17.
+- **Modellen byts.** Qwen-Image-2.1-Turbo har forskningslicens (icke-kommersiell, forskning och utvärdering) och LoRA:n `handful/mndf-pixel-qwen-image-2.1` är enligt sitt eget modellkort tränad på renders av Googles 3D-tiles. Pixelbygget kör Qwen-Image-Edit-2511 (Apache 2.0) med en ny pixel-LoRA tränad på par där källan är en öppen-data-render. Varifrån målbilderna till träningen kommer är öppet, se avsnitt 17.
 - Pixelkarta-Workern och R2-bucketen `pixelkarta-eu` finns och serverar sajten. Live-formatet är fast: DZI, 512 px webp, overlap 0, 0,25 m per pixel, stadsdefinition i `karta.json` (origin, heading, xMeters, yMeters, groundHeight, width, height).
 - GitHub-organisationen är på Free. Inga rulesets på privata repon. Det spelar ingen roll längre: bidragsgivare commitar inget.
 - Intaget kör på Mac minin (alltid på, Tailscale) eller på PC:n med RTX-kortet. Intaget behöver ingen GPU.
@@ -115,7 +117,8 @@ Agent-först: `AGENTS.md` beskriver ordningen, stopp-villkoren och vad som aldri
 
 ## 9. Rendering, omritning, marginal
 
-- Rendern är 1536 px: rutan i mitten med 256 px (64 m) marginal åt alla håll, så omritningen ser grannarnas hus och gator. Källrendern lämnar aldrig maskinen.
+- Renderaren (`rutor render`) bygger rutan från öppna data: hus från kommunens 3D-byggnader där de finns, annars OpenStreetMap-fotavtryck med höjd ur taggar eller Lantmäteriets ytmodell; vägar, spår, vatten, parker från OpenStreetMap; marken som Lantmäteriets ortofoto när ett Geotorget-konto finns, annars enfärgad. Kameran är 45 grader ortografisk, norr uppåt, 0,25 m per pixel. Spikens renderare (`utredningar/rutnat-2026-11-17/spik/render_osm.py`, Pillow, ingen 3D-motor) är utgångspunkten. Källrendern får laddas upp tillsammans med rutan, den är öppen data; manifestet säger vilka källor och versioner som användes.
+- Rendern är 1536 px: rutan i mitten med 256 px (64 m) marginal åt alla håll, så omritningen ser grannarnas hus och gator.
 - Omritningen körs på hela 1536-fönstret och ger en 1536-PNG. Vad som laddas upp beror på spiken i fas 0: antingen hela 1536 (intaget blandar överlappet mot grannarna i ett band om 64 m) eller den beskurna 1024-kärnan (om skarvarna inte syns). Tjänsten och intaget ska klara båda storlekarna; standard tills spiken är klar är 1536.
 - Seed är valfritt. Samma seed, modell och render ger samma ruta, vilket låter Gustaf göra stickprov genom att köra om en ruta.
 
@@ -178,7 +181,7 @@ Hela bladet sys aldrig om. Dagens helblads-sömnad finns kvar för en engångsk�
 
 ## 14. Faser
 
-**Fas 0, spiken** (före all byggnation av tjänsten): render en Göteborg-ruta och dess åtta grannar från mallen på en annan maskin än Gustafs, med egen Google-nyckel; rita om med 1536-fönster; sy in för hand i en kopia av pyramiden; titta på skarvarna vid normal zoom. Mät tid per ruta på kortet, och antal rotanrop per körning. Spiken avgör: 1536 eller 1024 vid uppladdning, blandning eller inte, och om renderaren går att köra från mallen utan Gustaf.
+**Fas 0, spiken** (omskriven 2026-11-17): rendera en Helsingborg-ruta och dess åtta grannar från öppna data (gjort för en ruta, se SPIK.md); rita om med dagens modell på PC:n som referens, och med Qwen-Image-Edit-2511 utan och med en första ny LoRA; sy in för hand i en kopia av pyramiden; titta på stil och skarvar vid normal zoom. Spiken avgör: om OSM-rendern räcker eller om ortofoto och ytmodell måste in från start, hur målbilderna till den nya LoRA:n tas fram, och 1536 eller 1024 vid uppladdning. Tjänsten är redan byggd (plan `2026-11-17-pixelbygget-service.md`) och påverkas inte av utfallet.
 
 **Fas 1, v1**: rut-tjänsten, CLI:t med login/claim/render/redraw/upload, intaget, byggsidan med rutnät och panel, menyposten och kroken, README och AGENTS.md, repot omdöpt och publikt. Göteborg öppnas som första stad. Klart när acceptansen i avsnitt 15 håller.
 
@@ -215,3 +218,10 @@ Byggargranskningen 2026-11-17 lämnade fyra frågor som bara Gustaf kan svara p�
 2. **Förlustfria källor.** Finns de sydda förlustfria stadsbilderna (20 till 35 GB per blad) och vattenmaskerna kvar, och får intaget en kopia till Mac minin eller en privat bucket? Utan dem kan Göteborgs ritade rutor inte seedas förlustfritt, och blandning mot grannar får ske mot lossy webp.
 3. **Förutsättningar bara Gustaf kan skapa.** En GitHub OAuth App "Pixelbygget" med device flow (under organisationen), `ADMIN_GITHUB_ID`, R2-buckets `pixelbygget-inkorg` och `pixelbygget-master`, D1-databasen, och att repot döps om till `opensverige/pixelbygget` och görs publikt. Inget ände-till-ände-test går innan dessa finns.
 4. **Cloudflare-plan.** Workers Free är 100 000 anrop per dygn för hela kontot, och pixelkarta-Workern drar redan på det. Byggsidans minutpollning och D1/KV/cron har egna gränser på Free. Vilken plan har kontot? Avgör om pollningen får vara 60 s och om tjänsten behöver egen plan.
+
+Tillkommet 2026-11-17 efter juridikmemot och spiken:
+
+5. **De tre Google-städerna.** Memot säger: behåll dem som tidsbegränsad förhandsvisning utan licens tills en jurist sagt sitt, eller ta ner dem. Gustafs beslut. Berget får inte dem, bara nya öppna rutor.
+6. **Målbilder till den nya LoRA:n.** Stilen i dag kommer från en LoRA tränad på Google-renders. En ren LoRA behöver par av öppen-data-render och pixelkonst. Vägar: handmålade referensrutor (communityn ritar stilen), Qwen-Image-Edit-2511 med stilprompt utan LoRA om det räcker, eller kurerade utdata från den som träningsmål. Avgörs i spiken. Gustafs egna pixelstäder är Google-härledda och kan inte vara träningsmål.
+7. **Geotorget-konto** hos Lantmäteriet för föreningen (ortofoto, ytmodell), med ändamål och EU-lagring angivna. Utan det renderar vi från OSM ensamt.
+8. **PC:n.** Macens publika nyckel i `authorized_keys` på PC:n (mogadishu) och användarnamnet, så omritningen av spikens ruta kan köras där med dagens modell som referens.
