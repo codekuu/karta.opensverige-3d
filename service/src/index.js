@@ -14,7 +14,7 @@
    CORS: GET answers carry Access-Control-Allow-Origin for an origin in ALLOWED_ORIGINS, so
    the build page can read the grid. Other methods are CLI calls and get no CORS headers. */
 
-import { approveRoute, blockRoute, liveRoute, queueRoute, rejectRoute, trustRoute } from './admin.js';
+import { approveRoute, blankedRoute, blockRoute, liveRoute, queueRoute, rejectRoute, trustRoute } from './admin.js';
 import { requireUser } from './auth.js';
 import { error, json, nowIso } from './db.js';
 import { claimRoute, releaseRoute } from './cells.js';
@@ -58,6 +58,7 @@ const routes = [
   ['POST', /^\/v1\/block$/, blockRoute],
   ['GET', /^\/v1\/queue$/, queueRoute],
   ['POST', /^\/v1\/live$/, liveRoute],
+  ['POST', /^\/v1\/blanked$/, blankedRoute],
   ['POST', /^\/v1\/sheets$/, openSheetRoute],
   ['POST', /^\/v1\/seed$/, seedRoute],
 ];
@@ -150,15 +151,20 @@ export default {
       return withCors(new Response(null, { status: 204 }), request, env);
     }
     if (env.PIXELBYGGET_STANGD === '1' && request.method !== 'GET') {
-      return error(503, 'closed', 'Pixelbygget is closed for the moment. Try again later.', { 'Retry-After': '300' });
+      return withCors(error(503, 'closed', 'Pixelbygget is closed for the moment. Try again later.', { 'Retry-After': '300' }), request, env);
     }
     if (await overRate(env, clientKey(request))) {
-      return error(429, 'rate_limited', 'Too many requests. Wait half a minute.', { 'Retry-After': '30' });
+      return withCors(error(429, 'rate_limited', 'Too many requests. Wait half a minute.', { 'Retry-After': '30' }), request, env);
     }
     const route = match(request.method, url.pathname);
-    const response = route
-      ? await route.handler(request, env, ctx, route.params, now)
-      : error(404, 'not_found', 'No such route.');
+    let response;
+    try {
+      response = route ? await route.handler(request, env, ctx, route.params, now) : error(404, 'not_found', 'No such route.');
+    } catch (e) {
+      // A storage outage or a dropped upload body ends here, as JSON the CLI can read.
+      console.log(JSON.stringify({ fel: String(e), path: url.pathname, method: request.method }));
+      response = error(500, 'internal', 'Something broke on our side. Try again in a minute.', { 'Retry-After': '60' });
+    }
     return withCors(response, request, env);
   },
 

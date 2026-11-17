@@ -111,9 +111,17 @@ export const uploadRoute = requireUser(async (request, env, ctx, params, now, us
     httpMetadata: { contentType: 'application/json' },
   });
   const state = user.trusted ? 'godkand' : 'vantar';
-  await env.DB.prepare('UPDATE cells SET state = ?, uploaded_at = ?, bytes = ?, sha256 = ?, approved_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ?')
-    .bind(state, now, bytes.length, sha, user.trusted ? now : null, now, sheet, col, row)
+  // The lock may have expired or been freed while the file was written: the cell changes
+  // state only if it is still this user's lock, otherwise the objects go again.
+  const result = await env.DB.prepare(
+    "UPDATE cells SET state = ?, uploaded_at = ?, bytes = ?, sha256 = ?, approved_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'last' AND owner_id = ?",
+  )
+    .bind(state, now, bytes.length, sha, user.trusted ? now : null, now, sheet, col, row, user.github_id)
     .run();
+  if (result.meta.changes !== 1) {
+    await env.INKORG.delete([`${key}.png`, `${key}.json`]);
+    return error(409, 'lock_lost', 'Your lock on that cell ended before the upload finished. Claim it again, then upload.');
+  }
   await logEvent(env.DB, { at: now, github_id: user.github_id, login: user.login, action: 'upload', sheet, col, row, detail: `${bytes.length} bytes, ${png.width} px, ${state}` });
   return json(201, { state, url: `https://karta.opensverige.se/pixelbygget#${key}` });
 });

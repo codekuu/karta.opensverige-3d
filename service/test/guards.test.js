@@ -42,6 +42,22 @@ describe('rate limit', () => {
   });
 });
 
+describe('failures', () => {
+  it('turns a thrown handler error into json 500 with cors', async () => {
+    const broken = { prepare: () => { throw new Error('boom'); } };
+    const r = await call(new Request('https://x/v1/sheets', { headers: { Origin: 'https://karta.opensverige.se' } }), { TAKT: allow, DB: broken });
+    expect(r.status).toBe(500);
+    expect((await r.json()).error).toBe('internal');
+    expect(r.headers.get('Access-Control-Allow-Origin')).toBe('https://karta.opensverige.se');
+  });
+
+  it('carries cors on a rate-limited GET', async () => {
+    const r = await call(new Request('https://x/v1/health', { headers: { Origin: 'https://karta.opensverige.se', 'CF-Connecting-IP': '203.0.113.9' } }), { TAKT: deny });
+    expect(r.status).toBe(429);
+    expect(r.headers.get('Access-Control-Allow-Origin')).toBe('https://karta.opensverige.se');
+  });
+});
+
 describe('cors', () => {
   it('echoes an allowed origin on GET and nothing for others', async () => {
     const ok = await call(new Request('https://x/v1/health', { headers: { Origin: 'https://karta.opensverige.se' } }), { TAKT: allow });

@@ -49,6 +49,13 @@ describe('purgeRejected', () => {
     expect((await getCell('goteborg-norr', 2, 2)).rejected_at).toBeNull();
     expect((await getCell('goteborg-norr', 3, 2)).rejected_at).toBe('2026-11-10T00:00:00Z');
   });
+
+  it('leaves the objects of a cell that is no longer free', async () => {
+    await setCell('goteborg-norr', 1, 1, { state: 'vantar', owner_id: 7, owner_login: 'ebba', rejected_at: '2026-10-01T00:00:00Z', uploaded_at: NOW });
+    await env.INKORG.put('goteborg-norr/1_1.png', minimalPng(1024, 1024));
+    expect(await purgeRejected(env.DB, env.INKORG, NOW)).toBe(0);
+    expect((await env.INKORG.list()).objects.map((o) => o.key)).toEqual(['goteborg-norr/1_1.png']);
+  });
 });
 
 describe('scheduled', () => {

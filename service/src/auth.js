@@ -46,10 +46,22 @@ async function lookupGithub(token) {
   } catch {
     return 'down';
   }
-  if (response.status === 401 || response.status === 403) return 'bad';
+  if (response.status === 401) return 'bad';
+  if (response.status === 403) {
+    // GitHub answers 403 both for a token without rights and for its rate limits.
+    const remaining = response.headers.get('x-ratelimit-remaining');
+    const text = await response.text().catch(() => '');
+    if (remaining === '0' || /rate limit/i.test(text)) return 'down';
+    return 'bad';
+  }
   if (!response.ok) return 'down';
-  const body = await response.json();
-  if (typeof body.id !== 'number' || typeof body.login !== 'string') return 'down';
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    return 'down';
+  }
+  if (!body || typeof body.id !== 'number' || typeof body.login !== 'string') return 'down';
   return { id: body.id, login: body.login };
 }
 

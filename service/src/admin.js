@@ -23,14 +23,15 @@ export async function approveCell(db, sheet, col, row, now) {
   await db.batch([
     db.prepare("UPDATE cells SET state = 'godkand', approved_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'vantar'").bind(now, now, sheet, col, row),
     db.prepare('UPDATE users SET approved_count = approved_count + 1 WHERE github_id = ?').bind(cell.owner_id),
-    db.prepare('UPDATE users SET trusted = 1 WHERE github_id = ? AND approved_count >= ?').bind(cell.owner_id, TRUST_AT),
+    db.prepare('UPDATE users SET trusted = 1 WHERE github_id = ? AND approved_count = ?').bind(cell.owner_id, TRUST_AT),
   ]);
   return { ok: true };
 }
 
 /**
- * vantar, godkand or live → fri with a comment. The inbox objects go unless the cell was live:
- * then they stay so the intake can read the cell it must blank.
+ * vantar, godkand or live → fri with a comment. The inbox objects stay: for 30 days when the
+ * cell was waiting (the cron purges them), and until the intake has blanked the tiles when the
+ * cell was live (removed_at marks it, POST /blanked clears it).
  * @param {D1Database} db
  * @param {R2Bucket} inkorg
  * @param {string} sheet
@@ -44,14 +45,11 @@ export async function rejectCell(db, inkorg, sheet, col, row, comment, now) {
   const cell = await db.prepare('SELECT state, owner_id, owner_login FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
   if (!cell || !['vantar', 'godkand', 'live'].includes(cell.state)) return { ok: false, status: 409, code: 'nothing_to_reject' };
   const wasLive = cell.state === 'live';
-  if (!wasLive) {
-    await inkorg.delete([`${sheet}/${col}_${row}.png`, `${sheet}/${col}_${row}.json`]);
-  }
   await db
     .prepare(
-      "UPDATE cells SET state = 'fri', owner_id = NULL, owner_login = NULL, locked_at = NULL, expires_at = NULL, uploaded_at = NULL, approved_at = NULL, live_at = NULL, bytes = NULL, sha256 = NULL, rejected_at = ?, comment = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ?",
+      "UPDATE cells SET state = 'fri', owner_id = NULL, owner_login = NULL, locked_at = NULL, expires_at = NULL, uploaded_at = NULL, approved_at = NULL, live_at = NULL, bytes = NULL, sha256 = NULL, rejected_at = ?, removed_at = ?, comment = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ?",
     )
-    .bind(wasLive ? null : now, comment, now, sheet, col, row)
+    .bind(wasLive ? null : now, wasLive ? now : null, comment, now, sheet, col, row)
     .run();
   await logEvent(db, {
     at: now,
@@ -89,13 +87,18 @@ export async function setBlock(db, login, blocked) {
 }
 
 /**
- * Cells in a state, each with its eight neighbours as [col, row, state].
+ * Cells in a state, each with its eight neighbours as [col, row, state]. The state 'removed'
+ * lists live cells the admin took down that the intake has not blanked yet.
  * @param {D1Database} db
- * @param {'vantar'|'godkand'} state
+ * @param {'vantar'|'godkand'|'removed'} state
  * @returns {Promise<Array<import('./db.js').Cell & { neighbours: Array<[number, number, string]> }>>}
  */
 export async function listQueue(db, state) {
-  const { results } = await db.prepare('SELECT * FROM cells WHERE state = ? ORDER BY uploaded_at, sheet, row, col').bind(state).all();
+  const query =
+    state === 'removed'
+      ? db.prepare('SELECT * FROM cells WHERE removed_at IS NOT NULL ORDER BY removed_at, sheet, row, col')
+      : db.prepare('SELECT * FROM cells WHERE state = ? ORDER BY uploaded_at, sheet, row, col').bind(state);
+  const { results } = await query.all();
   const out = [];
   for (const cell of results) {
     const { results: around } = await db
@@ -117,6 +120,9 @@ export async function listQueue(db, state) {
  * @returns {Promise<{ ok: true, live: number } | { ok: false, status: number, code: string }>}
  */
 export async function markLive(db, sheet, cells, rev, now) {
+  const sheetRow = await db.prepare('SELECT rev FROM sheets WHERE id = ?').bind(sheet).first();
+  if (!sheetRow) return { ok: false, status: 404, code: 'no_sheet' };
+  if (rev <= sheetRow.rev) return { ok: false, status: 409, code: 'stale_rev' };
   for (const [col, row] of cells) {
     const cell = await db.prepare('SELECT state FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
     if (!cell || cell.state !== 'godkand') return { ok: false, status: 409, code: 'not_approved' };
@@ -124,9 +130,33 @@ export async function markLive(db, sheet, cells, rev, now) {
   const statements = cells.map(([col, row]) =>
     db.prepare("UPDATE cells SET state = 'live', live_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'godkand'").bind(now, now, sheet, col, row),
   );
-  statements.push(db.prepare('UPDATE sheets SET rev = ? WHERE id = ?').bind(rev, sheet));
-  await db.batch(statements);
-  return { ok: true, live: cells.length };
+  statements.push(db.prepare('UPDATE sheets SET rev = ? WHERE id = ? AND rev < ?').bind(rev, sheet, rev));
+  const results = await db.batch(statements);
+  const live = results.slice(0, cells.length).reduce((n, r) => n + r.meta.changes, 0);
+  const revBumped = results[cells.length].meta.changes === 1;
+  if (live !== cells.length || !revBumped) return { ok: false, status: 409, code: 'not_approved', live };
+  return { ok: true, live };
+}
+
+/**
+ * The intake has blanked the tiles of removed cells: forget the mark and drop the objects.
+ * @param {D1Database} db
+ * @param {R2Bucket} inkorg
+ * @param {string} sheet
+ * @param {Array<[number, number]>} cells
+ * @param {string} now
+ * @returns {Promise<{ ok: true, blanked: number } | { ok: false, status: number, code: string }>}
+ */
+export async function markBlanked(db, inkorg, sheet, cells, now) {
+  let blanked = 0;
+  for (const [col, row] of cells) {
+    const r = await db.prepare('UPDATE cells SET removed_at = NULL, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND removed_at IS NOT NULL').bind(now, sheet, col, row).run();
+    if (r.meta.changes === 1) {
+      await inkorg.delete([`${sheet}/${col}_${row}.png`, `${sheet}/${col}_${row}.json`]);
+      blanked += 1;
+    }
+  }
+  return { ok: true, blanked };
 }
 
 const MESSAGES = {
@@ -134,6 +164,8 @@ const MESSAGES = {
   nothing_to_reject: 'That cell has nothing uploaded to reject.',
   no_user: 'No user with that login.',
   not_approved: 'Every listed cell must be approved. Nothing was marked live.',
+  stale_rev: 'That revision is not newer than the sheet’s. Read the sheet again.',
+  no_sheet: 'No such sheet.',
 };
 
 function fail(r) {
@@ -176,10 +208,10 @@ function flagRoute(field, apply) {
 export const trustRoute = flagRoute('trusted', setTrust);
 export const blockRoute = flagRoute('blocked', setBlock);
 
-/** GET /v1/queue?state=vantar|godkand */
+/** GET /v1/queue?state=vantar|godkand|removed */
 export const queueRoute = requireAdmin(async (request, env) => {
   const state = new URL(request.url).searchParams.get('state') || 'vantar';
-  if (!['vantar', 'godkand'].includes(state)) return error(400, 'bad_state', 'state must be vantar or godkand.');
+  if (!['vantar', 'godkand', 'removed'].includes(state)) return error(400, 'bad_state', 'state must be vantar, godkand or removed.');
   return json(200, { state, cells: await listQueue(env.DB, state) }, { 'Cache-Control': 'private, no-store' });
 });
 
@@ -191,5 +223,15 @@ export const liveRoute = requireAdmin(async (request, env, ctx, params, now, adm
   const r = await markLive(env.DB, body.sheet, body.cells, body.rev, now);
   if (!r.ok) return fail(r);
   await logEvent(env.DB, { at: now, github_id: admin.github_id, login: admin.login, action: 'live', sheet: body.sheet, detail: `${r.live} cells, rev ${body.rev}` });
+  return json(200, r);
+});
+
+/** POST /v1/blanked */
+export const blankedRoute = requireAdmin(async (request, env, ctx, params, now, admin) => {
+  const body = await request.json().catch(() => null);
+  const cellsOk = body && Array.isArray(body.cells) && body.cells.every((c) => Array.isArray(c) && c.length === 2 && Number.isInteger(c[0]) && Number.isInteger(c[1]));
+  if (!cellsOk || typeof body.sheet !== 'string') return error(400, 'bad_body', 'Send JSON with sheet and cells as [[col,row],...].');
+  const r = await markBlanked(env.DB, env.INKORG, body.sheet, body.cells, now);
+  await logEvent(env.DB, { at: now, github_id: admin.github_id, login: admin.login, action: 'blanked', sheet: body.sheet, detail: `${r.blanked} cells` });
   return json(200, r);
 });

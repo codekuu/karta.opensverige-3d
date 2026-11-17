@@ -25,11 +25,12 @@ const SHEET_FIELDS = [
 
 /**
  * Inserts a sheet and all its cells: fri inside the mask, ute outside. Nothing is written on
- * refusal.
+ * refusal. A sheet that exists with fewer cells than cols × rows (a run that broke half way)
+ * is resumed: the missing cells are written and the answer says resumed.
  * @param {D1Database} db
  * @param {object} body
  * @param {string} now
- * @returns {Promise<{ ok: true, cells: number, fri: number } | { ok: false, status: number, code: string, field?: string }>}
+ * @returns {Promise<{ ok: true, cells: number, fri: number, resumed?: boolean } | { ok: false, status: number, code: string, field?: string }>}
  */
 export async function openSheet(db, body, now) {
   if (!body || typeof body !== 'object') return { ok: false, status: 400, code: 'bad_body', field: 'body' };
@@ -46,16 +47,25 @@ export async function openSheet(db, body, now) {
     }
     inMask.add(`${col}_${row}`);
   }
-  const exists = await db.prepare('SELECT id FROM sheets WHERE id = ?').bind(body.id).first();
-  if (exists) return { ok: false, status: 409, code: 'exists' };
-  const statements = [
-    db
-      .prepare(
-        'INSERT INTO sheets (id, city, name, cols, rows, origin_lat, origin_lon, x_meters, y_meters, ground_height, dzi_levels, pipeline, state, queue_order, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
-      )
-      .bind(body.id, body.city, body.name, cols, rows, body.origin_lat, body.origin_lon, body.x_meters, body.y_meters, body.ground_height, body.dzi_levels, body.pipeline, body.state, body.queue_order),
-  ];
-  const insert = db.prepare('INSERT INTO cells (sheet, col, row, state, updated_at) VALUES (?, ?, ?, ?, ?)');
+  const exists = await db.prepare('SELECT cols, rows FROM sheets WHERE id = ?').bind(body.id).first();
+  let resumed = false;
+  if (exists) {
+    const have = await db.prepare('SELECT COUNT(*) AS n FROM cells WHERE sheet = ?').bind(body.id).first();
+    if (have.n >= exists.cols * exists.rows) return { ok: false, status: 409, code: 'exists' };
+    if (exists.cols !== cols || exists.rows !== rows) return { ok: false, status: 409, code: 'exists' };
+    resumed = true;
+  }
+  const statements = [];
+  if (!resumed) {
+    statements.push(
+      db
+        .prepare(
+          'INSERT INTO sheets (id, city, name, cols, rows, origin_lat, origin_lon, x_meters, y_meters, ground_height, dzi_levels, pipeline, state, queue_order, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
+        )
+        .bind(body.id, body.city, body.name, cols, rows, body.origin_lat, body.origin_lon, body.x_meters, body.y_meters, body.ground_height, body.dzi_levels, body.pipeline, body.state, body.queue_order),
+    );
+  }
+  const insert = db.prepare('INSERT OR IGNORE INTO cells (sheet, col, row, state, updated_at) VALUES (?, ?, ?, ?, ?)');
   for (let row = 0; row < rows; row += 1) {
     for (let col = 0; col < cols; col += 1) {
       statements.push(insert.bind(body.id, col, row, inMask.has(`${col}_${row}`) ? 'fri' : 'ute', now));
@@ -64,7 +74,9 @@ export async function openSheet(db, body, now) {
   for (let i = 0; i < statements.length; i += BATCH) {
     await db.batch(statements.slice(i, i + BATCH));
   }
-  return { ok: true, cells: cols * rows, fri: inMask.size };
+  const result = { ok: true, cells: cols * rows, fri: inMask.size };
+  if (resumed) result.resumed = true;
+  return result;
 }
 
 /**

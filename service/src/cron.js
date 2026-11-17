@@ -39,7 +39,7 @@ export async function expireLocks(db, now) {
  */
 export async function purgeRejected(db, inkorg, now) {
   const before = new Date(Date.parse(now) - PURGE_DAYS * 24 * 3600 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const { results } = await db.prepare('SELECT sheet, col, row FROM cells WHERE rejected_at IS NOT NULL AND rejected_at < ?').bind(before).all();
+  const { results } = await db.prepare("SELECT sheet, col, row FROM cells WHERE rejected_at IS NOT NULL AND rejected_at < ? AND state = 'fri'").bind(before).all();
   for (const cell of results) {
     await inkorg.delete([`${cell.sheet}/${cell.col}_${cell.row}.png`, `${cell.sheet}/${cell.col}_${cell.row}.json`]);
     await db.prepare('UPDATE cells SET rejected_at = NULL WHERE sheet = ? AND col = ? AND row = ?').bind(cell.sheet, cell.col, cell.row).run();

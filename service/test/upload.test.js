@@ -2,7 +2,7 @@ import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { claimCell } from '../src/cells.js';
 import { ALLOWED_SIDES, MAX_UPLOAD, inspectPng, parseManifest } from '../src/upload.js';
-import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser } from './fixtures.js';
+import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser, setCell } from './fixtures.js';
 import { manifestHeader, minimalPng, sha256Hex } from './png.js';
 
 const user = { github_id: 4242, login: 'klang', first_seen: NOW, approved_count: 0, trusted: 0, blocked: 0 };
@@ -148,6 +148,41 @@ describe('PUT /v1/upload', () => {
     expect(r.status).toBe(429);
     expect((await r.json()).error).toBe('daily_limit');
     expect((await getCell('goteborg-norr', 1, 1)).state).toBe('last');
+  });
+});
+
+describe('PUT /v1/upload, lock lost mid-flight', () => {
+  it('answers 409 lock_lost, removes what it wrote and leaves the cell as it found it', async () => {
+    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW);
+    const bytes = minimalPng(1024, 1024);
+    const sha = await sha256Hex(bytes);
+    let flipped = false;
+    const inkorg = {
+      put: async (key, value, options) => {
+        if (!flipped) {
+          flipped = true;
+          await setCell('goteborg-norr', 1, 1, { state: 'fri', owner_id: null, owner_login: null, locked_at: null, expires_at: null });
+        }
+        return env.INKORG.put(key, value, options);
+      },
+      get: (key) => env.INKORG.get(key),
+      delete: (keys) => env.INKORG.delete(keys),
+      list: (o) => env.INKORG.list(o),
+    };
+    loginAs(user);
+    const r = await call(
+      new Request('https://x/v1/upload/goteborg-norr/1_1', {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer t', 'Content-Type': 'image/png', 'Content-Length': String(bytes.length), 'X-Manifest': manifestHeader({ sha256: sha }) },
+        body: bytes,
+      }),
+      { INKORG: inkorg },
+    );
+    vi.unstubAllGlobals();
+    expect(r.status).toBe(409);
+    expect((await r.json()).error).toBe('lock_lost');
+    expect((await env.INKORG.list()).objects).toHaveLength(0);
+    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'fri', owner_id: null, sha256: null, uploaded_at: null });
   });
 });
 

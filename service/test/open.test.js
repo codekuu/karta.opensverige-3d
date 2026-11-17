@@ -23,6 +23,18 @@ describe('openSheet', () => {
     expect(await openSheet(env.DB, body, NOW)).toMatchObject({ ok: false, status: 409, code: 'exists' });
   });
 
+  it('resumes a sheet whose cells were only half written', async () => {
+    await insertSheet({ cols: 3, rows: 2 });
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO cells (sheet, col, row, state, updated_at) VALUES ('goteborg-norr', 0, 0, 'fri', ?)").bind(NOW),
+      env.DB.prepare("INSERT INTO cells (sheet, col, row, state, updated_at) VALUES ('goteborg-norr', 1, 0, 'fri', ?)").bind(NOW),
+    ]);
+    const r = await openSheet(env.DB, body, NOW);
+    expect(r).toEqual({ ok: true, cells: 6, fri: 4, resumed: true });
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM cells WHERE sheet = 'goteborg-norr'").first()).n).toBe(6);
+    expect((await getCell('goteborg-norr', 1, 1)).state).toBe('ute');
+  });
+
   it('refuses a bad mask or a missing field and writes nothing', async () => {
     const outside = await openSheet(env.DB, { ...body, mask: [[0, 0], [5, 0]] }, NOW);
     expect(outside).toMatchObject({ ok: false, status: 400, code: 'bad_body', field: 'mask' });

@@ -54,16 +54,23 @@ export async function claimCell(db, user, sheet, col, row, now) {
   const cell = await db.prepare('SELECT state FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
   if (!cell) return { ok: false, status: 404, code: 'no_cell' };
   if (cell.state === 'ute') return { ok: false, status: 422, code: 'outside' };
+  const limit = lockLimit(user);
   const held = await db.prepare("SELECT COUNT(*) AS n FROM cells WHERE owner_id = ? AND state = 'last'").bind(user.github_id).first();
-  if (held.n >= lockLimit(user)) return { ok: false, status: 403, code: 'too_many_locks' };
+  if (held.n >= limit) return { ok: false, status: 403, code: 'too_many_locks' };
   const expires_at = plusHours(now, LOCK_HOURS);
+  // The lock and the limit are decided by this one statement, so parallel claims cannot
+  // slip past the count read above.
   const result = await db
     .prepare(
-      "UPDATE cells SET state = 'last', owner_id = ?, owner_login = ?, locked_at = ?, expires_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'fri'",
+      "UPDATE cells SET state = 'last', owner_id = ?, owner_login = ?, locked_at = ?, expires_at = ?, rejected_at = NULL, comment = NULL, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'fri' AND (SELECT COUNT(*) FROM cells WHERE owner_id = ? AND state = 'last') < ?",
     )
-    .bind(user.github_id, user.login, now, expires_at, now, sheet, col, row)
+    .bind(user.github_id, user.login, now, expires_at, now, sheet, col, row, user.github_id, limit)
     .run();
-  if (result.meta.changes !== 1) return { ok: false, status: 409, code: 'taken' };
+  if (result.meta.changes !== 1) {
+    const after = await db.prepare('SELECT state FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
+    if (after && after.state === 'fri') return { ok: false, status: 403, code: 'too_many_locks' };
+    return { ok: false, status: 409, code: 'taken' };
+  }
   await logEvent(db, { at: now, github_id: user.github_id, login: user.login, action: 'claim', sheet, col, row });
   return { ok: true, expires_at };
 }

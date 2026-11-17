@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { approveCell, listQueue, markLive, rejectCell, setBlock, setTrust } from '../src/admin.js';
+import { approveCell, listQueue, markBlanked, markLive, rejectCell, setBlock, setTrust } from '../src/admin.js';
 import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser, setCell } from './fixtures.js';
 import { minimalPng } from './png.js';
 
@@ -43,27 +43,40 @@ describe('approveCell', () => {
     expect(u).toEqual({ approved_count: 10, trusted: 1 });
   });
 
+  it('does not re-trust a user whose trust was revoked', async () => {
+    await env.DB.prepare('UPDATE users SET approved_count = 11, trusted = 0 WHERE github_id = 4242').run();
+    await uploaded(1, 1);
+    await approveCell(env.DB, 'goteborg-norr', 1, 1, LATER);
+    const u = await env.DB.prepare('SELECT approved_count, trusted FROM users WHERE github_id = 4242').first();
+    expect(u).toEqual({ approved_count: 12, trusted: 0 });
+  });
+
   it('is 409 when the cell is not waiting', async () => {
     expect(await approveCell(env.DB, 'goteborg-norr', 0, 0, LATER)).toMatchObject({ ok: false, status: 409, code: 'not_waiting' });
   });
 });
 
 describe('rejectCell', () => {
-  it('frees the cell, keeps the comment and deletes the inbox objects', async () => {
+  it('frees the cell, keeps the comment and keeps the inbox objects for the purge', async () => {
     await uploaded(1, 1);
     const r = await rejectCell(env.DB, env.INKORG, 'goteborg-norr', 1, 1, 'vattnet saknar kant', LATER);
     expect(r).toEqual({ ok: true });
     expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'fri', owner_id: null, owner_login: null, uploaded_at: null, sha256: null, bytes: null, rejected_at: LATER, comment: 'vattnet saknar kant' });
-    expect(await inboxKeys()).toEqual([]);
+    expect(await inboxKeys()).toEqual(['goteborg-norr/1_1.json', 'goteborg-norr/1_1.png']);
   });
 
-  it('keeps the inbox objects of a live cell and logs live-removed', async () => {
+  it('marks a live cell removed, keeps its objects and logs live-removed', async () => {
     await uploaded(1, 1, 'live');
     await rejectCell(env.DB, env.INKORG, 'goteborg-norr', 1, 1, 'fel hus', LATER);
-    expect((await getCell('goteborg-norr', 1, 1)).state).toBe('fri');
+    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'fri', removed_at: LATER, rejected_at: null });
     expect(await inboxKeys()).toEqual(['goteborg-norr/1_1.json', 'goteborg-norr/1_1.png']);
     const ev = await env.DB.prepare("SELECT detail FROM events WHERE action = 'reject'").first();
     expect(ev.detail).toContain('live-removed');
+    const removed = await listQueue(env.DB, 'removed');
+    expect(removed.map((c) => [c.col, c.row])).toEqual([[1, 1]]);
+    expect(await markBlanked(env.DB, env.INKORG, 'goteborg-norr', [[1, 1]], '2026-11-17T14:00:00Z')).toEqual({ ok: true, blanked: 1 });
+    expect((await getCell('goteborg-norr', 1, 1)).removed_at).toBeNull();
+    expect(await inboxKeys()).toEqual([]);
   });
 
   it('is 409 for a free cell', async () => {
@@ -105,6 +118,9 @@ describe('markLive', () => {
     expect((await getCell('goteborg-norr', 1, 1)).state).toBe('godkand');
     const ok = await markLive(env.DB, 'goteborg-norr', [[1, 1], [2, 1]], 3, LATER);
     expect(ok).toEqual({ ok: true, live: 2 });
+    const backwards = await markLive(env.DB, 'goteborg-norr', [], 2, LATER);
+    expect(backwards).toMatchObject({ ok: false, status: 409, code: 'stale_rev' });
+    expect((await env.DB.prepare("SELECT rev FROM sheets WHERE id = 'goteborg-norr'").first()).rev).toBe(3);
     expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'live', live_at: LATER });
     expect(await getCell('goteborg-norr', 2, 1)).toMatchObject({ state: 'live', live_at: LATER });
     expect((await env.DB.prepare("SELECT rev FROM sheets WHERE id = 'goteborg-norr'").first()).rev).toBe(3);

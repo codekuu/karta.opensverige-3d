@@ -53,6 +53,23 @@ describe('claimCell', () => {
     expect(await claimCell(env.DB, other, 'goteborg-norr', 2, 0, NOW)).toMatchObject({ ok: false, status: 403, code: 'too_many_locks' });
   });
 
+  it('holds the lock limit under parallel claims on different cells', async () => {
+    const results = await Promise.all([
+      claimCell(env.DB, user, 'goteborg-norr', 0, 1, NOW),
+      claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW),
+      claimCell(env.DB, user, 'goteborg-norr', 2, 1, NOW),
+    ]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    const held = await env.DB.prepare("SELECT COUNT(*) AS n FROM cells WHERE owner_id = 4242 AND state = 'last'").first();
+    expect(held.n).toBe(1);
+  });
+
+  it('clears an old rejection when the cell is claimed again', async () => {
+    await setCell('goteborg-norr', 0, 1, { rejected_at: '2026-11-01T00:00:00Z', comment: 'gammalt' });
+    await claimCell(env.DB, user, 'goteborg-norr', 0, 1, NOW);
+    expect(await getCell('goteborg-norr', 0, 1)).toMatchObject({ state: 'last', rejected_at: null, comment: null });
+  });
+
   it('lets exactly one of two simultaneous claims win', async () => {
     const [a, b] = await Promise.all([
       claimCell(env.DB, user, 'goteborg-norr', 2, 1, NOW),

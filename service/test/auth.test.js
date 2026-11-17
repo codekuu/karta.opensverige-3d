@@ -73,6 +73,13 @@ describe('resolveUser', () => {
     expect((await r.json()).error).toBe('github_down');
   });
 
+  it('reads a github rate limit (403, remaining 0) as 503, not as a bad token', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ message: 'API rate limit exceeded' }), { status: 403, headers: { 'content-type': 'application/json', 'x-ratelimit-remaining': '0' } }));
+    const r = await resolveUser(withToken('tok-rl'), env, NOW);
+    expect(r.status).toBe(503);
+    expect((await r.json()).error).toBe('github_down');
+  });
+
   it('is 401 no_token without a bearer header', async () => {
     const r = await resolveUser(new Request('https://x/v1/me'), env, NOW);
     expect(r.status).toBe(401);
