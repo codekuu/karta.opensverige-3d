@@ -16,6 +16,7 @@
 
 import { requireUser } from './auth.js';
 import { error, json, nowIso } from './db.js';
+import { citiesRoute, gridRoute, sheetsRoute } from './sheets.js';
 
 /**
  * GET /v1/me: the caller, their counts and their locks.
@@ -40,6 +41,9 @@ const me = requireUser(async (request, env, ctx, params, now, user) => {
 const routes = [
   ['GET', /^\/v1\/health$/, () => json(200, { ok: true, service: 'pixelbygget' })],
   ['GET', /^\/v1\/me$/, me],
+  ['GET', /^\/v1\/sheets$/, sheetsRoute],
+  ['GET', /^\/v1\/cities$/, citiesRoute],
+  ['GET', /^\/v1\/grid\/(?<sheet>[a-z0-9-]+)$/, gridRoute],
 ];
 
 /**
