@@ -18,6 +18,7 @@ import { requireUser } from './auth.js';
 import { error, json, nowIso } from './db.js';
 import { claimRoute, releaseRoute } from './cells.js';
 import { citiesRoute, gridRoute, sheetsRoute } from './sheets.js';
+import { inkorgRoute, uploadRoute } from './upload.js';
 
 /**
  * GET /v1/me: the caller, their counts and their locks.
@@ -47,6 +48,8 @@ const routes = [
   ['GET', /^\/v1\/grid\/(?<sheet>[a-z0-9-]+)$/, gridRoute],
   ['POST', /^\/v1\/claim$/, claimRoute],
   ['POST', /^\/v1\/release$/, releaseRoute],
+  ['PUT', /^\/v1\/upload\/(?<sheet>[a-z0-9-]+)\/(?<col>\d+)_(?<row>\d+)$/, uploadRoute],
+  ['GET', /^\/v1\/inkorg\/(?<sheet>[a-z0-9-]+)\/(?<col>\d+)_(?<row>\d+)\.(?<ext>png|json)$/, inkorgRoute],
 ];
 
 /**
