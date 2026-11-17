@@ -19,7 +19,7 @@ import { requireUser } from './auth.js';
 import { error, json, nowIso } from './db.js';
 import { claimRoute, releaseRoute } from './cells.js';
 import { runCron } from './cron.js';
-import { citiesRoute, gridRoute, sheetsRoute } from './sheets.js';
+import { citiesRoute, gridRoute, openSheetRoute, seedRoute, sheetsRoute } from './sheets.js';
 import { inkorgRoute, uploadRoute } from './upload.js';
 
 /**
@@ -58,6 +58,8 @@ const routes = [
   ['POST', /^\/v1\/block$/, blockRoute],
   ['GET', /^\/v1\/queue$/, queueRoute],
   ['POST', /^\/v1\/live$/, liveRoute],
+  ['POST', /^\/v1\/sheets$/, openSheetRoute],
+  ['POST', /^\/v1\/seed$/, seedRoute],
 ];
 
 /**
