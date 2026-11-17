@@ -14,11 +14,32 @@
    CORS: GET answers carry Access-Control-Allow-Origin for an origin in ALLOWED_ORIGINS, so
    the build page can read the grid. Other methods are CLI calls and get no CORS headers. */
 
+import { requireUser } from './auth.js';
 import { error, json, nowIso } from './db.js';
+
+/**
+ * GET /v1/me: the caller, their counts and their locks.
+ * @type {Function}
+ */
+const me = requireUser(async (request, env, ctx, params, now, user) => {
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM cells WHERE owner_id = ? AND state = 'last' ORDER BY locked_at",
+  )
+    .bind(user.github_id)
+    .all();
+  return json(200, {
+    login: user.login,
+    github_id: user.github_id,
+    trusted: user.trusted,
+    approved_count: user.approved_count,
+    locks: results,
+  });
+});
 
 /** @type {Array<[string, RegExp, Function]>} */
 const routes = [
   ['GET', /^\/v1\/health$/, () => json(200, { ok: true, service: 'pixelbygget' })],
+  ['GET', /^\/v1\/me$/, me],
 ];
 
 /**
