@@ -18,6 +18,7 @@ import { approveRoute, blockRoute, liveRoute, queueRoute, rejectRoute, trustRout
 import { requireUser } from './auth.js';
 import { error, json, nowIso } from './db.js';
 import { claimRoute, releaseRoute } from './cells.js';
+import { runCron } from './cron.js';
 import { citiesRoute, gridRoute, sheetsRoute } from './sheets.js';
 import { inkorgRoute, uploadRoute } from './upload.js';
 
@@ -157,5 +158,14 @@ export default {
       ? await route.handler(request, env, ctx, route.params, now)
       : error(404, 'not_found', 'No such route.');
     return withCors(response, request, env);
+  },
+
+  /**
+   * @param {ScheduledController} event
+   * @param {import('./db.js').Env} env
+   * @param {ExecutionContext} ctx
+   */
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runCron(env, nowIso()));
   },
 };
