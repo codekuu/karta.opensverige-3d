@@ -16,6 +16,7 @@
 
 import { requireUser } from './auth.js';
 import { error, json, nowIso } from './db.js';
+import { claimRoute, releaseRoute } from './cells.js';
 import { citiesRoute, gridRoute, sheetsRoute } from './sheets.js';
 
 /**
@@ -44,6 +45,8 @@ const routes = [
   ['GET', /^\/v1\/sheets$/, sheetsRoute],
   ['GET', /^\/v1\/cities$/, citiesRoute],
   ['GET', /^\/v1\/grid\/(?<sheet>[a-z0-9-]+)$/, gridRoute],
+  ['POST', /^\/v1\/claim$/, claimRoute],
+  ['POST', /^\/v1\/release$/, releaseRoute],
 ];
 
 /**
