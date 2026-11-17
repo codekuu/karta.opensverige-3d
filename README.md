@@ -1,96 +1,39 @@
-# SimCity AI-karta
+# Pixelbygget
 
-Public contributor door for the OpenSverige map. This repository is the only place you work.
+Pixelbygget is the volunteer grid for the OpenSverige map. A city is a sheet of cells. You claim one cell from the service, render it on your own machine, redraw it as pixel art, and upload the PNG. The service keeps the lock, the review queue and the address of the cell on the map.
 
-You do not receive API keys, tokens, SSH keys, or any other project. You clone this repo, claim one Swedish municipality, redraw that tile on your own GPU, and commit the finished PNG. Nothing else is uploaded.
+This repository is the `rutor` tool and the pinned redraw pipeline. You do not push claims or tiles with git. The PNG you upload is the only thing that leaves your machine, and it is the redraw, not the source render.
 
-Districts are the 290 municipalities in `districts.json`. One district per claim. The result path is `results/<district>.png`.
+Run the tool from `cli/` with `python -m rutor`, or install it into the virtualenv with `python -m pip install -e cli` and then call `rutor`. Output lines look like `claimed: goteborg-norr 64_59 expires 2026-11-19T12:00:00Z`. An agent reads [AGENTS.md](AGENTS.md) before it runs anything. The rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-The owner invites your GitHub account as a collaborator. That invitation is the only access. You need write access so the claim can be pushed. Ask for it with an [access request](https://github.com/Baltsar/karta.opensverige-3d/issues/new?template=access-request.yml).
-
-The rules, the license, and how you are credited are in [CONTRIBUTING.md](CONTRIBUTING.md). An AI agent reads [AGENTS.md](AGENTS.md) before it runs anything.
-
-Model weights are not in this repo. The redraw downloads them into the Hugging Face cache on your machine.
-
-## 0. Check the machine
-
-NVIDIA CUDA is required for the redraw. The 4-bit checkpoint is a bitsandbytes quant. The door is aimed at 24 GB cards. On the maintainer's RTX 5070 one tile takes about an hour.
+## The five steps
 
 ```bash
-python scripts/redraw_tile.py --preflight
+rutor login --accept-terms
+rutor claim goteborg-norr --next
+rutor render goteborg-norr 64_59
+rutor redraw goteborg-norr 64_59
+rutor upload goteborg-norr 64_59
 ```
 
-- **Windows and Linux** with an NVIDIA GPU: preflight should print `preflight: ok`.
-- **macOS**: clone, install, the price check, and `--list` all work. Preflight exits if there is no CUDA device. Do not claim a district on a Mac that fails preflight.
+`rutor claim` prints the cell you got. Use that `col_row` in render, redraw and upload. `rutor login` prints a device code. Approve it in the browser at the URL it prints. That approval, and putting your own Google key in `.env`, are the two steps that need a person.
 
-## 1. Price
+`rutor redraw --wait-for-cheap` runs the SE3 price check first and does not redraw while the price is high. Without the flag the price check is advice only: `python -m rutor.se3_price`.
 
-Swedish bidding zone SE3, from the public Elpriset just nu files. No key. Prices are SEK/kWh excluding VAT.
+`rutor preflight` checks Python, PyTorch with CUDA, bitsandbytes, Chrome, the key, the service and the login. Do not render or redraw when any line says `missing`.
 
-```bash
-python scripts/se3_price.py
-```
+## Setup
 
-Obey the `decision` line:
+Use Python 3.11 or newer. NVIDIA CUDA is required for the redraw. The 4-bit checkpoint is a bitsandbytes quant. The redraw is aimed at 24 GB cards. On the maintainer's RTX 5070 one cell takes about an hour.
 
-- `decision: RUN` — claim one district and redraw.
-- `decision: WAIT` — stop. Do not claim. Do not redraw. The `action` line says when SE3 is cheapest. Run this script again then.
-- Exit code 1 — the price could not be read. Do not redraw.
+Install a CUDA build of PyTorch first, then the rest, so a later install does not replace it with a CPU wheel. If the CUDA 12.8 index does not match your driver, use the current index from <https://pytorch.org>.
 
-Do not pass `--run-anyway` to the redraw when the decision is WAIT.
-
-## 2. Claim
-
-```bash
-python scripts/claim_district.py --list
-python scripts/claim_district.py --district stockholm
-```
-
-Have your source render ready first (step 3), so the district does not sit locked and waiting. Pick any free slug. Do not all take the first line. The script commits only `claims/<district>.md` and pushes it. If the push is rejected, that district is gone: `--list` again and choose another. Details are in `CLAIM.md`.
-
-## 3. Source image
-
-Put your own render at `inputs/<district>.png`. That folder is gitignored. Do not commit it. This repo does not ship source imagery.
-
-## 4. Redraw
-
-```bash
-python scripts/redraw_tile.py --district stockholm
-```
-
-One tile. Windows are 1024 pixels, stride 512. Overlapping noise predictions are averaged at every denoising step, then the scheduler steps once (MultiDiffusion). The script writes `results/<district>.png` and nothing else.
-
-Weights, downloaded only into your Hugging Face cache:
+Model weights are not in this repo. The first redraw downloads them into the Hugging Face cache on your machine, on the order of 20 GB.
 
 - `addlabsviral/Qwen-Image-2.1-Turbo-4bit`
 - LoRA `handful/mndf-pixel-qwen-image-2.1`
 
-The Qwen Research License applies to those weights. They are not copied into this repo. The first run is a large download, on the order of 20 GB.
-
-## 5. Publish
-
-```bash
-python scripts/publish_png.py --district stockholm
-```
-
-That commit contains only `results/<district>.png`. Do not use `git add -A`.
-
-If you cannot finish, give the district back:
-
-```bash
-python scripts/claim_district.py --release --district stockholm
-```
-
-## Setup
-
-Use Python 3.11 or newer. Set your own git identity inside the clone (not `--global` unless that is already how you work):
-
-```bash
-git config user.name "Your Name"
-git config user.email "you@example.com"
-```
-
-Install a CUDA build of PyTorch first, then the rest, so a later install does not replace it with a CPU wheel. If the CUDA 12.8 index does not match your driver, use the current index from <https://pytorch.org>.
+The Qwen Research License applies to those weights. They are not copied into this repo.
 
 ### Windows (PowerShell)
 
@@ -102,8 +45,8 @@ py -3 -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
 python -m pip install -r requirements.txt
-python scripts/redraw_tile.py --preflight
-python scripts/se3_price.py
+python -m pip install -e cli
+rutor preflight
 ```
 
 If activation is blocked for the current window only:
@@ -122,8 +65,8 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
 python -m pip install -r requirements.txt
-python scripts/redraw_tile.py --preflight
-python scripts/se3_price.py
+python -m pip install -e cli
+rutor preflight
 ```
 
 ### macOS
@@ -136,22 +79,33 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install torch
 python -m pip install -r requirements.txt
-python scripts/redraw_tile.py --preflight
-python scripts/se3_price.py
+python -m pip install -e cli
+rutor preflight
 ```
 
-The price check and the claim list do not need a GPU. The redraw does not run until preflight reports CUDA.
+A Mac can install, log in, claim and check the SE3 price. Preflight reports CUDA missing, and the redraw does not run there.
 
-## What never goes in a commit
+Without `pip install -e cli`, the same commands work as `python -m rutor` from the `cli/` directory.
 
-Environment files, private keys, tokens, model weights, and files under `inputs/`. A pull request may only add `claims/<district>.md` or `results/<district>.png`, or delete a claim when a district is released.
+## Google key
 
-PNG files you publish are contributed to this repository under the MIT license, and may be shown on karta.opensverige.se, credited to your GitHub account. The model weights stay under their own licenses. The Qwen Research License grants non-commercial use only. Details are in [CONTRIBUTING.md](CONTRIBUTING.md).
+You render with your own Google account, your own key and your own agreement with Google. Put the key in `.env` in the clone:
+
+```bash
+echo 'GOOGLE_MAPS_KEY=your-key' > .env
+chmod 600 .env
+```
+
+The key stays in `.env`. The CLI reads it for `rutor render` and refuses a `.env` that is group- or world-readable on POSIX. The source render (`work/<sheet>/<col>_<row>.src.png`) stays on your machine. Nothing Google-derived is uploaded. `rutor upload` sends only the redrawn PNG.
+
+## Licence and credit
+
+The PNG you upload is contributed under the MIT license. See [LICENSE](LICENSE). It may be shown on karta.opensverige.se. You are credited by your GitHub login. The model weights stay under their own licenses.
 
 ## Local checks
 
 This does not download the model:
 
 ```bash
-python -m unittest tests/test_door.py
+cd cli && python3 -m unittest discover -s tests -v
 ```

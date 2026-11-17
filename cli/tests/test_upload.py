@@ -1,0 +1,110 @@
+"""Upload checks the PNG against the manifest before it talks to the service."""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import os
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
+
+from rutor.__main__ import main
+from rutor.config import write_token
+from tests.fake_service import FakeService
+from tests.png import minimal_png
+
+
+def _manifest(width: int, height: int) -> dict[str, object]:
+    return {
+        "pipeline": "2026.11-a",
+        "seed": None,
+        "sha256": "abc",
+        "width": width,
+        "height": height,
+        "source": {"provider": "unknown", "version": "unknown"},
+        "gpu": "unknown",
+        "renderedAt": "2026-11-17T12:00:00Z",
+    }
+
+
+class UploadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.svc = FakeService()
+        self._saved = {name: os.environ.get(name) for name in ("PIXELBYGGET_HOME", "PIXELBYGGET_URL")}
+        os.environ["PIXELBYGGET_HOME"] = self.tmp.name
+        os.environ["PIXELBYGGET_URL"] = self.svc.start()
+        write_token("test-token")
+        self._root_patch = patch("rutor.config.repo_root", return_value=self.root)
+        self._root_patch.start()
+
+    def tearDown(self) -> None:
+        self._root_patch.stop()
+        self.svc.stop()
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        self.tmp.cleanup()
+
+    def run_cmd(self, argv: list[str]) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def write_pair(self, png_side: int, manifest_side: int) -> None:
+        work = self.root / "work" / "goteborg-norr"
+        work.mkdir(parents=True)
+        (work / "64_59.png").write_bytes(minimal_png(png_side, png_side))
+        (work / "64_59.manifest.json").write_text(
+            json.dumps(_manifest(manifest_side, manifest_side)) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_upload_sends_manifest_header_and_prints_state(self) -> None:
+        self.write_pair(1536, 1536)
+        code, out, err = self.run_cmd(["upload", "goteborg-norr", "64_59"])
+        self.assertEqual(err, "")
+        self.assertEqual(code, 0)
+        self.assertIn("uploaded: goteborg-norr 64_59 state vantar\n", out)
+        self.assertIn("url: https://karta.opensverige.se/pixelbygget#goteborg-norr/64_59\n", out)
+        puts = [item for item in self.svc.requests if item.get("method") == "PUT"]
+        self.assertEqual(len(puts), 1)
+        sent = puts[0]
+        self.assertEqual(sent["path"], "/v1/upload/goteborg-norr/64_59")
+        self.assertEqual(sent["body"], (self.root / "work" / "goteborg-norr" / "64_59.png").read_bytes())
+        headers = sent["headers"]
+        self.assertIsInstance(headers, dict)
+        found = ""
+        for key, value in headers.items():
+            if isinstance(key, str) and key.lower() == "x-manifest" and isinstance(value, str):
+                found = value
+        decoded = json.loads(base64.b64decode(found))
+        self.assertEqual(decoded["width"], 1536)
+        self.assertEqual(decoded["pipeline"], "2026.11-a")
+
+    def test_manifest_mismatch_fails_locally(self) -> None:
+        self.write_pair(1024, 1536)
+        code, _out, err = self.run_cmd(["upload", "goteborg-norr", "64_59"])
+        self.assertEqual(code, 1)
+        self.assertIn("64_59.png", err)
+        self.assertEqual(self.svc.requests, [])
+
+    def test_upload_refused_passes_code(self) -> None:
+        self.write_pair(1536, 1536)
+        self.svc.fail_next_with(
+            422,
+            json.dumps({"error": "wrong_pipeline", "message": "pipeline differs"}).encode("utf-8"),
+            "application/json",
+        )
+        code, _out, err = self.run_cmd(["upload", "goteborg-norr", "64_59"])
+        self.assertEqual(code, 2)
+        self.assertIn("refused: wrong_pipeline:", err)

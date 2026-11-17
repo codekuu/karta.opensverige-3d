@@ -174,7 +174,7 @@ def evaluate(now: datetime, today: list[Slot] | None, next_day: list[Slot] | Non
                 "exit_code": 2,
                 "action": (
                     "No SE3 prices are available for the horizon. Do not claim a district and do not run the redraw. "
-                    "Tomorrow's prices are usually published after 13:00 Europe/Stockholm. Run scripts/se3_price.py again then."
+                    "Tomorrow's prices are usually published after 13:00 Europe/Stockholm. Run python -m rutor.se3_price again then."
                 ),
             }
         )
@@ -228,7 +228,7 @@ def evaluate(now: datetime, today: list[Slot] | None, next_day: list[Slot] | Non
     report["exit_code"] = 2
     report["action"] = (
         f"The SE3 price is high. Do not claim a district and do not run the redraw until {when}.{extra} "
-        "Then run scripts/se3_price.py again."
+        "Then run python -m rutor.se3_price again."
     )
     return report
 
@@ -271,7 +271,7 @@ def main(argv: list[str] | None = None, fetch=fetch_prices, clock=None) -> int:
         print("decision: WAIT", flush=True)
         print(
             "action: The public SE3 price could not be read. Do not claim a district and do not run the redraw. "
-            f"Retry scripts/se3_price.py later. ({exc.__class__.__name__})",
+            f"Retry python -m rutor.se3_price later. ({exc.__class__.__name__})",
             flush=True,
         )
         return 1

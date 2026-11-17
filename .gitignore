@@ -28,3 +28,5 @@ Thumbs.db
 *.log
 .pytest_cache/
 .mypy_cache/
+work/
+cli/**/__pycache__/

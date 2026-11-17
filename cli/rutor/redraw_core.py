@@ -1,24 +1,12 @@
-"""Redraw one claimed district with a MultiDiffusion-style overlap.
+"""Redraw core moved verbatim from scripts/redraw_tile.py.
 
-Windows are 1024 pixels and the stride is 512. At every denoising step the
-noise prediction of each window is added onto the shared latent, then divided
-by how many windows covered that token, then the scheduler steps once.
-That is the MultiDiffusion average (Bar-Tal et al.), applied to one tile.
-
-Model weights download into the contributor's own Hugging Face cache:
-  addlabsviral/Qwen-Image-2.1-Turbo-4bit
-  handful/mndf-pixel-qwen-image-2.1
-
-The checkpoint is a bitsandbytes 4-bit quant and runs on NVIDIA CUDA.
+The bodies of the moved functions are unchanged. redraw_image is the same
+pad, encode, denoise, decode and crop, without a district, a claim or a file.
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
-from pathlib import Path
-
-from repo import load_districts, repo_root
 
 MODEL_ID = "addlabsviral/Qwen-Image-2.1-Turbo-4bit"
 LORA_ID = "handful/mndf-pixel-qwen-image-2.1"
@@ -27,7 +15,6 @@ STEP = 512
 VAE_ALIGN = 32
 MAX_SIDE = 4096
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-
 
 def pad_size(n: int, window: int = WINDOW, step: int = STEP, multiple: int = VAE_ALIGN) -> int:
     if n <= window:
@@ -38,7 +25,6 @@ def pad_size(n: int, window: int = WINDOW, step: int = STEP, multiple: int = VAE
     if target % multiple != 0:
         raise ValueError(f"Padded size {target} is not a multiple of {multiple}")
     return target
-
 
 def get_views(width: int, height: int, window: int = WINDOW, step: int = STEP) -> list[tuple[int, int]]:
     """Top-left corners of each window. The tile must already be padded to the grid."""
@@ -53,7 +39,6 @@ def get_views(width: int, height: int, window: int = WINDOW, step: int = STEP) -
     if not views:
         raise ValueError("No windows")
     return views
-
 
 def window_token_indices(
     full_h: int,
@@ -77,14 +62,6 @@ def window_token_indices(
             indices.append(row + x)
     return indices
 
-
-def prompt_for(name: str) -> str:
-    return (
-        "Repaint this 3D map render as mndfstyle isometric pixel-art map of "
-        f"{name}, Sweden, keeping every road, building and tree in place"
-    )
-
-
 def edge_pad(image, width: int, height: int):
     from PIL import Image
 
@@ -103,7 +80,6 @@ def edge_pad(image, width: int, height: int):
         strip = canvas.crop((0, src_h - 1, width, src_h)).resize((width, height - src_h), nearest)
         canvas.paste(strip, (0, src_h))
     return canvas
-
 
 def preflight_message() -> str | None:
     try:
@@ -127,7 +103,6 @@ def preflight_message() -> str | None:
         return "bitsandbytes is not installed. Run pip install -r requirements.txt on this CUDA machine."
     return None
 
-
 def _load_pipe():
     import torch
     from diffusers import QwenImage21Pipeline
@@ -149,7 +124,6 @@ def _load_pipe():
         pipe.vae.enable_tiling()
     pipe.set_progress_bar_config(disable=True)
     return pipe
-
 
 def _prepare_window(pipe, crop, prompt: str, device, dtype):
     import torch
@@ -192,7 +166,6 @@ def _prepare_window(pipe, crop, prompt: str, device, dtype):
         "img_shapes": [[(1, side, side), (1, side, side)]],
         "tokens": target_tokens,
     }
-
 
 def _denoise(pipe, full, views, contexts, full_h: int, full_w: int, device, dtype):
     import torch
@@ -262,7 +235,6 @@ def _denoise(pipe, full, views, contexts, full_h: int, full_w: int, device, dtyp
             full = pipe.scheduler.step(acc / weight, timestep, full, return_dict=False)[0]
     return full
 
-
 def _decode(pipe, latents, height: int, width: int):
     import torch
 
@@ -278,49 +250,19 @@ def _decode(pipe, latents, height: int, width: int):
     return pipe.image_processor.postprocess(decoded, output_type="pil")[0]
 
 
-def redraw(root: Path, slug: str, input_path: Path | None, seed: int | None, run_anyway: bool) -> int:
-    import se3_price
-
-    districts = load_districts(root)
-    if slug not in districts:
-        raise SystemExit(f"Unknown district {slug!r}. Run: python scripts/claim_district.py --list")
-    if not (root / "claims" / f"{slug}.md").exists():
-        raise SystemExit(f"No claim for {slug}. Claim it, push the claim, then redraw. Do not redraw an unclaimed district.")
-    dest = root / "results" / f"{slug}.png"
-    if dest.exists():
-        raise SystemExit(f"results/{slug}.png already exists. Do not overwrite a finished tile.")
-    source = input_path or (root / "inputs" / f"{slug}.png")
-    if not source.is_file():
-        raise SystemExit(
-            f"Missing {source}. Put your own source render there. "
-            "This repository does not ship source imagery. Do not commit the render."
-        )
-    if not run_anyway:
-        code = se3_price.main()
-        if code != 0:
-            raise SystemExit(code)
-    message = preflight_message()
-    if message:
-        raise SystemExit(message)
-
+def redraw_image(image: object, prompt: str, seed: int | None) -> object:
+    """Pad, encode, denoise, decode and crop, as redraw() did for one tile."""
     from PIL import Image
 
-    image = Image.open(source).convert("RGB")
-    src_w, src_h = image.size
+    if not isinstance(image, Image.Image):
+        raise TypeError("redraw_image expects a PIL image")
+    rgb = image.convert("RGB")
+    src_w, src_h = rgb.size
     if max(src_w, src_h) > MAX_SIDE:
-        raise SystemExit(f"Input is {src_w}x{src_h}. One district tile must be at most {MAX_SIDE}px on the long side.")
+        raise ValueError(f"Input is {src_w}x{src_h}. One cell must be at most {MAX_SIDE}px on the long side.")
     pad_w, pad_h = pad_size(src_w), pad_size(src_h)
-    padded = edge_pad(image, pad_w, pad_h)
+    padded = edge_pad(rgb, pad_w, pad_h)
     views = get_views(pad_w, pad_h)
-    name = districts[slug]["name"]
-    prompt = prompt_for(name)
-    print(f"district: {slug}", flush=True)
-    print(f"windows: {len(views)}", flush=True)
-    print(f"window: {WINDOW}", flush=True)
-    print(f"step: {STEP}", flush=True)
-    print(f"model: {MODEL_ID}", flush=True)
-    print(f"lora: {LORA_ID}", flush=True)
-    print("cache: the default Hugging Face cache on this machine", flush=True)
 
     import torch
 
@@ -348,50 +290,4 @@ def redraw(root: Path, slug: str, input_path: Path | None, seed: int | None, run
         crop = padded.crop((left, top, left + WINDOW, top + WINDOW))
         contexts.append(_prepare_window(pipe, crop, prompt, device, dtype))
     full = _denoise(pipe, full, views, contexts, pad_h, pad_w, device, dtype)
-    finished = _decode(pipe, full, pad_h, pad_w).convert("RGB").crop((0, 0, src_w, src_h))
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    partial = dest.with_name(dest.name + ".partial")
-    finished.save(partial, format="PNG")
-    data = partial.read_bytes()
-    if not data.startswith(PNG_MAGIC):
-        partial.unlink(missing_ok=True)
-        raise SystemExit("The redraw did not produce a PNG. Nothing was published.")
-    partial.replace(dest)
-    print(f"wrote: results/{slug}.png", flush=True)
-    print(f"Next: python scripts/publish_png.py --district {slug}", flush=True)
-    print("That commit contains only the PNG.", flush=True)
-    return 0
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Redraw one claimed district tile.")
-    parser.add_argument("--district", help="District slug you have already claimed")
-    parser.add_argument("--input", type=Path, help="Local source render. Default: inputs/<district>.png")
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--preflight", action="store_true", help="Check CUDA and bitsandbytes. Does not download weights.")
-    parser.add_argument(
-        "--run-anyway",
-        action="store_true",
-        help="Redraw even when the SE3 price is high. An agent told to WAIT must not pass this.",
-    )
-    args = parser.parse_args(argv)
-    if args.preflight:
-        message = preflight_message()
-        if message:
-            raise SystemExit(message)
-        import torch
-
-        print(f"preflight: ok ({torch.cuda.get_device_name(0)})")
-        return 0
-    if not args.district:
-        raise SystemExit("Pass --district <slug>, or --preflight.")
-    return redraw(repo_root(), args.district, args.input, args.seed, args.run_anyway)
-
-
-if __name__ == "__main__":
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8")
-        except Exception:
-            pass
-    sys.exit(main())
+    return _decode(pipe, full, pad_h, pad_w).convert("RGB").crop((0, 0, src_w, src_h))

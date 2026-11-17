@@ -1,88 +1,48 @@
 # Contributing
 
-You lend one GPU run. The map gets one tile, credited to you.
+You lend one GPU run. The map gets one cell, credited to your GitHub login.
 
-This page holds the rules. The commands and the install are in [README.md](README.md). If an AI agent runs the commands for you, it reads [AGENTS.md](AGENTS.md) first.
+This page holds the rules. The commands and the install are in [README.md](README.md). If an agent runs the commands for you, it reads [AGENTS.md](AGENTS.md) first.
 
-## Before you ask for access
+## Before you start
 
-- An NVIDIA GPU with CUDA. The door is aimed at 24 GB cards.
-- Time. On the maintainer's RTX 5070 one tile takes about an hour.
+- An NVIDIA GPU with CUDA. The redraw is aimed at 24 GB cards.
+- Time. On the maintainer's RTX 5070 one cell takes about an hour.
 - About 20 GB of free disk for the model download.
-- Windows or Linux. A Mac can read the repo and check the price. It cannot redraw.
-- Python 3.11 or newer, git, and a GitHub account.
-- A source render of the district. See [Source render](#source-render).
+- Windows or Linux for the redraw. A Mac can log in, claim and check the price. It cannot redraw.
+- Python 3.11 or newer, and a GitHub account.
+- Your own Google key, on your own Google account, under your own agreement with Google. It lives in `.env` as `GOOGLE_MAPS_KEY`, mode `0600`. The project never receives it.
 
-Clone, install, and run the preflight. None of that needs access.
-
-```bash
-python scripts/redraw_tile.py --preflight
-```
-
-Go on only when it prints `preflight: ok`.
-
-## Get access
-
-Open an [access request](https://github.com/Baltsar/karta.opensverige-3d/issues/new?template=access-request.yml). The owner invites your GitHub account as a collaborator. Accept the invitation.
-
-That invitation is the only access you get. There are no keys, tokens, or other projects to ask for.
+Clone, install, and run `rutor preflight`. Go on only when every line says `ok`.
 
 ## The run
 
-Have the source render ready before you claim, so no district sits locked and waiting.
-
 ```bash
-python scripts/se3_price.py
-python scripts/claim_district.py --list
-python scripts/claim_district.py --district <slug>
-python scripts/redraw_tile.py --district <slug>
-python scripts/publish_png.py --district <slug>
+rutor login --accept-terms
+rutor claim <sheet> --next
+rutor render <sheet> <col>_<row>
+rutor redraw <sheet> <col>_<row>
+rutor upload <sheet> <col>_<row>
 ```
 
-Each step is explained in [README.md](README.md). The claim file is explained in [CLAIM.md](CLAIM.md).
+Each step is explained in [README.md](README.md).
 
 ## Rules
 
-- One district at a time. Finish it or release it before you take another.
-- You add two files, and only through the scripts: `claims/<district>.md` and `results/<district>.png`.
-- Never commit `inputs/`, model weights, `.env` files, keys, or tokens. Never use `git add -A`.
-- Do not edit the scripts, `districts.json`, or another contributor's claim or tile. Found a bug? Open an issue.
-- Obey the price check. `decision: WAIT` means stop.
-- Cannot finish? Give the district back: `python scripts/claim_district.py --release --district <slug>`.
+- One cell at a time until you are trusted. Finish it or release it before you take another. Trust arrives after ten approved cells. Until then a second open lock is refused.
+- The first ten cells are reviewed. `rutor upload` leaves a new contributor's cell waiting. An admin approves or rejects it.
+- Use your own Google key. Do not borrow one, and do not send the source render to anyone. `work/<sheet>/<col>_<row>.src.png` stays on your machine. Only the redrawn PNG is uploaded.
+- Do not edit `cli/rutor/pipeline.py`, the redraw, or another contributor's cell. Found a bug? Open an issue.
+- Cannot finish? Give the cell back: `rutor release <sheet> <col>_<row>`.
 
-## What the door checks
+## How to report
 
-Every push and every pull request runs the `door` check. A contributor change passes only when it does one of these:
+Open an issue on <https://github.com/Baltsar/karta.opensverige-3d/issues>. Include the command, the exit code and the `error:` line. Do not paste your Google key or your GitHub token.
 
-- adds a claim exactly as `scripts/claim_district.py` writes it
-- adds a real PNG at `results/<district>.png`
-- deletes a claim to release a district
+## Licence and credit
 
-Any other file fails the check. So does a hand-edited claim.
-
-## Source render
-
-The redraw repaints a render you already have. It does not create the map view.
-
-- Put it at `inputs/<district>.png`.
-- It is a 3D render of the district, seen from above at an angle.
-- It is a PNG, at most 4096 pixels on the long side.
-- It stays on your machine. `inputs/` is gitignored.
-
-This repo does not ship renders. If you do not have one, say so in your access request, before you claim.
-
-## License and credit
-
-- The PNG you publish is contributed under the MIT license. See [LICENSE](LICENSE).
-- By pushing a tile or opening a pull request, you agree that it may be shown on karta.opensverige.se.
-- You are credited by the GitHub account that publishes the tile.
-- Contribute only a tile you made with this pipeline, from a render you are allowed to use.
-
-The model weights are not part of this repo and keep their own licenses. You download and run them on your own machine, under those licenses:
-
-- Qwen-Image-2.1-Turbo is under the [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE). It grants non-commercial use only. Read it before the first run.
-- The LoRA `handful/mndf-pixel-qwen-image-2.1` is Apache-2.0.
-
-## Problems
-
-Open an issue. Do not paste keys, tokens, or paths from your machine.
+- The PNG you upload is contributed under the MIT license. See [LICENSE](LICENSE).
+- By uploading, you agree that it may be shown on karta.opensverige.se.
+- You are credited by the GitHub login you used in `rutor login`.
+- Contribute only a cell you made with this pipeline, from a render your own key produced.
+- The model weights stay under their own licenses. The Qwen Research License grants non-commercial use only.
