@@ -524,6 +524,7 @@ class RenderTests(unittest.TestCase):
             with (
                 patch("rutor.redraw_core.preflight_message", return_value=None),
                 patch("rutor.redraw_core.redraw_image", side_effect=fake_redraw),
+                patch("rutor.commands.check_problems", return_value=[]),
             ):
                 code, out, err = self.run_cmd(["redraw", "goteborg-norr", "64_59", "--seed", "7"])
         finally:
@@ -549,3 +550,5 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(manifest["gpu"], "unknown")
         self.assertRegex(manifest["renderedAt"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
         self.assertEqual(len(manifest["sha256"]), 64)
+        self.assertEqual(manifest["check"], "ok")
+        self.assertEqual(manifest["check_problems"], [])

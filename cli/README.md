@@ -35,6 +35,8 @@ Replace `64_59` with the cell `rutor claim` prints. `rutor preflight` should be 
 
 `rutor render` builds the source render from open data. Göteborgs Stad orthophoto is CC0. OpenStreetMap is ODbL. Only `goteborg-norr` has a source so far. That step needs pillow and numpy, which are in the repository `requirements.txt`.
 
+`rutor redraw` checks its own result before it finishes. A blank, too dark, posterised, shifted or unchanged redraw exits with code 5 and one `check:` line per problem. `rutor upload` refuses a cell until the check has passed. `rutor check <sheet> <col>_<row>` runs the check again on the files in `work/`.
+
 ## Tests
 
 ```bash

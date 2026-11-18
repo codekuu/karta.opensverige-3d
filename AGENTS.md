@@ -29,6 +29,7 @@ The source render comes from open data: Göteborgs Stad orthophoto (CC0) and Ope
 - `rutor login` refuses because the GitHub client id is still the placeholder.
 - The service refuses the same step twice. Report the `error:` line. Do not loop.
 - The redraw fails. Report the last lines. Do not change `cli/rutor/pipeline.py` or the redraw to get past it.
+- `rutor redraw` or `rutor check` prints `check:` lines and exits 5. The cell failed the quality check. Do not upload it and do not loosen the check. Report the `check:` lines.
 
 ## The redraw is long
 

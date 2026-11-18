@@ -11,8 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rutor import api, config, pipeline, redraw_core
-from rutor.errors import RutorError, bad_input, environment, network, refused
+from rutor.errors import RutorError, bad_input, check_failed, environment, network, refused
 from rutor.manifest import build_manifest, encode_manifest, png_size, write_manifest
+from rutor.check import problems as check_problems
 from rutor.render import render_cell
 
 
@@ -339,6 +340,40 @@ def _save_image(image: object, path: Path) -> None:
     save(path)
 
 
+def _check_cell(directory: Path, col: int, row: int) -> list[str]:
+    """Run the quality check on the source and the redrawn PNG in the work directory."""
+    src = directory / f"{col}_{row}.src.png"
+    png = directory / f"{col}_{row}.png"
+    for path in (src, png):
+        if not path.is_file():
+            raise bad_input(f"missing {path.name}: run rutor render and rutor redraw first")
+    return check_problems(_open_image(src), _open_image(png))
+
+
+def _record_check(manifest: dict[str, object], found: list[str]) -> None:
+    manifest["check"] = "ok" if not found else "failed"
+    manifest["check_problems"] = list(found)
+    for problem in found:
+        print(f"check: {problem}")
+    if not found:
+        print("check: ok")
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    col, row = parse_cell(args.cell)
+    directory = config.work_dir(args.sheet)
+    manifest_path = directory / f"{col}_{row}.manifest.json"
+    if not manifest_path.is_file():
+        raise bad_input(f"missing {manifest_path.name}: run rutor redraw {args.sheet} {col}_{row} first")
+    manifest = _read_manifest(manifest_path)
+    found = _check_cell(directory, col, row)
+    _record_check(manifest, found)
+    write_manifest(manifest, manifest_path)
+    if found:
+        raise check_failed(f"{args.sheet} {col}_{row} failed the quality check; do not upload it")
+    return 0
+
+
 def cmd_redraw(args: argparse.Namespace) -> int:
     col, row = parse_cell(args.cell)
     if args.wait_for_cheap:
@@ -374,8 +409,12 @@ def cmd_redraw(args: argparse.Namespace) -> int:
         gpu=_gpu_name(),
         rendered_at=rendered_at,
     )
-    write_manifest(manifest, directory / f"{col}_{row}.manifest.json")
     print(f"redrawn: {args.sheet} {col}_{row} {out}")
+    found = _check_cell(directory, col, row)
+    _record_check(manifest, found)
+    write_manifest(manifest, directory / f"{col}_{row}.manifest.json")
+    if found:
+        raise check_failed(f"{args.sheet} {col}_{row} failed the quality check; the PNG is kept but must not be uploaded")
     return 0
 
 
@@ -403,6 +442,8 @@ def cmd_upload(args: argparse.Namespace) -> int:
     told_h = manifest.get("height")
     if told_w != width or told_h != height:
         raise bad_input(f"{png.name} is {width}x{height} but the manifest says {told_w}x{told_h}")
+    if manifest.get("check") != "ok":
+        raise check_failed(f"{args.sheet} {col}_{row} has not passed rutor check: run rutor check {args.sheet} {col}_{row}")
     _status, body = api.put_bytes(
         f"/v1/upload/{args.sheet}/{col}_{row}",
         png.read_bytes(),
@@ -529,6 +570,11 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     redraw.add_argument("--seed", type=int, default=None)
     redraw.add_argument("--wait-for-cheap", action="store_true")
     redraw.set_defaults(func=cmd_redraw)
+
+    check = sub.add_parser("check", help="run the quality check on a redrawn cell")
+    check.add_argument("sheet")
+    check.add_argument("cell")
+    check.set_defaults(func=cmd_check)
 
     upload = sub.add_parser("upload", help="upload the redrawn PNG")
     upload.add_argument("sheet")

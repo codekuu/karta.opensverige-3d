@@ -16,10 +16,11 @@ from rutor.__main__ import main
 from rutor.config import write_token
 from tests.fake_service import FakeService
 from tests.png import minimal_png
+from tests.test_check import AVAILABLE as DRAWING
 
 
-def _manifest(width: int, height: int) -> dict[str, object]:
-    return {
+def _manifest(width: int, height: int, check: str | None = "ok") -> dict[str, object]:
+    manifest: dict[str, object] = {
         "pipeline": "2026.11-a",
         "seed": None,
         "sha256": "abc",
@@ -29,6 +30,9 @@ def _manifest(width: int, height: int) -> dict[str, object]:
         "gpu": "unknown",
         "renderedAt": "2026-11-17T12:00:00Z",
     }
+    if check is not None:
+        manifest["check"] = check
+    return manifest
 
 
 class UploadTests(unittest.TestCase):
@@ -60,14 +64,56 @@ class UploadTests(unittest.TestCase):
             code = main(argv)
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def write_pair(self, png_side: int, manifest_side: int) -> None:
+    def write_pair(self, png_side: int, manifest_side: int, check: str | None = "ok") -> None:
         work = self.root / "work" / "goteborg-norr"
         work.mkdir(parents=True)
         (work / "64_59.png").write_bytes(minimal_png(png_side, png_side))
         (work / "64_59.manifest.json").write_text(
-            json.dumps(_manifest(manifest_side, manifest_side)) + "\n",
+            json.dumps(_manifest(manifest_side, manifest_side, check)) + "\n",
             encoding="utf-8",
         )
+
+    def test_upload_refuses_a_cell_that_has_not_passed_check(self) -> None:
+        for check in (None, "failed"):
+            with self.subTest(check=check):
+                self.svc.requests.clear()
+                work = self.root / "work" / "goteborg-norr"
+                if work.exists():
+                    for item in work.iterdir():
+                        item.unlink()
+                    work.rmdir()
+                self.write_pair(1536, 1536, check)
+                code, _out, err = self.run_cmd(["upload", "goteborg-norr", "64_59"])
+                self.assertEqual(code, 5)
+                self.assertIn("has not passed rutor check", err)
+                self.assertEqual([item for item in self.svc.requests if item.get("method") == "PUT"], [])
+
+    @unittest.skipUnless(DRAWING, "pillow and numpy are not installed")
+    def test_check_command_marks_the_manifest(self) -> None:
+        from PIL import Image
+
+        from tests.test_check import _redrawn, _scene
+
+        work = self.root / "work" / "goteborg-norr"
+        work.mkdir(parents=True)
+        source = _scene()
+        source.save(work / "64_59.src.png")
+        _redrawn(source).save(work / "64_59.png")
+        (work / "64_59.manifest.json").write_text(json.dumps(_manifest(1536, 1536, None)) + "\n", encoding="utf-8")
+        code, out, err = self.run_cmd(["check", "goteborg-norr", "64_59"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("check: ok", out)
+        manifest = json.loads((work / "64_59.manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["check"], "ok")
+        self.assertEqual(manifest["check_problems"], [])
+
+        Image.open(work / "64_59.src.png").save(work / "64_59.png")
+        code, out, _err = self.run_cmd(["check", "goteborg-norr", "64_59"])
+        self.assertEqual(code, 5)
+        self.assertIn("check: not redrawn", out)
+        manifest = json.loads((work / "64_59.manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["check"], "failed")
+        self.assertTrue(manifest["check_problems"])
 
     def test_upload_sends_manifest_header_and_prints_state(self) -> None:
         self.write_pair(1536, 1536)
