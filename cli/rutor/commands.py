@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import shutil
 import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -196,21 +195,13 @@ def _bitsandbytes_missing() -> str | None:
     return None
 
 
-def _chrome_missing() -> str | None:
-    names = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome")
-    if any(shutil.which(name) for name in names):
-        return None
-    mac = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-    if mac.is_file():
-        return None
-    return "Google Chrome was not found on PATH"
-
-
-def _env_missing() -> str | None:
+def _render_missing() -> str | None:
     try:
-        config.read_env_key(config.repo_root())
-    except RutorError as exc:
-        return exc.message
+        import numpy
+        from PIL import Image
+    except ImportError:
+        return "pillow and numpy are not installed (pip install pillow numpy)"
+    del numpy, Image
     return None
 
 
@@ -244,8 +235,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         ("python", _python_missing()),
         ("torch", _torch_missing()),
         ("bitsandbytes", _bitsandbytes_missing()),
-        ("chrome", _chrome_missing()),
-        ("env", _env_missing()),
+        ("render", _render_missing()),
         ("service", _service_missing()),
         ("login", _login_missing()),
     )
@@ -267,11 +257,9 @@ def _sheet_body(token: str, sheet_id: str) -> dict[str, object]:
 def cmd_render(args: argparse.Namespace) -> int:
     token = require_token()
     col, row = parse_cell(args.cell)
-    # The key is local. A world-readable .env must fail before any request.
-    key = config.read_env_key(config.repo_root())
     sheet = _sheet_body(token, args.sheet)
     out = config.work_dir(args.sheet) / f"{col}_{row}.src.png"
-    render_cell(sheet, col, row, key, out)
+    render_cell(sheet, col, row, out)
     print(f"rendered: {args.sheet} {col}_{row} {out}")
     return 0
 

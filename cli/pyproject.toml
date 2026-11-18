@@ -9,6 +9,9 @@ description = "Claim a Pixelbygget cell, render it, redraw it, and upload the PN
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+render = ["pillow", "numpy"]
+
 [project.scripts]
 rutor = "rutor.__main__:main"
 

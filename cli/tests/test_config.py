@@ -1,4 +1,4 @@
-"""Config: token file, service url, and the Google key in .env."""
+"""Config: token file and service url."""
 
 from __future__ import annotations
 
@@ -8,8 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rutor.config import read_env_key, read_token, service_url, write_token
-from rutor.errors import RutorError
+from rutor.config import read_token, service_url, write_token
 
 
 class ConfigTests(unittest.TestCase):
@@ -37,30 +36,3 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(service_url(), "https://pixelbygget.gustaf-garnow.workers.dev")
         os.environ["PIXELBYGGET_URL"] = "http://127.0.0.1:9/"
         self.assertEqual(service_url(), "http://127.0.0.1:9")
-
-    def test_read_env_key_reads_GOOGLE_MAPS_KEY(self) -> None:
-        root = Path(self.tmp.name) / "repo"
-        root.mkdir()
-        env = root / ".env"
-        env.write_text('GOOGLE_MAPS_KEY="map-key"\n', encoding="utf-8")
-        os.chmod(env, 0o600)
-        self.assertEqual(read_env_key(root), "map-key")
-
-    def test_world_readable_env_refused(self) -> None:
-        root = Path(self.tmp.name) / "repo"
-        root.mkdir()
-        env = root / ".env"
-        env.write_text("GOOGLE_MAPS_KEY=map-key\n", encoding="utf-8")
-        os.chmod(env, 0o644)
-        with self.assertRaises(RutorError) as caught:
-            read_env_key(root)
-        self.assertEqual(caught.exception.code, 3)
-        self.assertIn("chmod 600 .env", caught.exception.message)
-
-    def test_missing_env_is_environment_error(self) -> None:
-        root = Path(self.tmp.name) / "empty"
-        root.mkdir()
-        with self.assertRaises(RutorError) as caught:
-            read_env_key(root)
-        self.assertEqual(caught.exception.code, 3)
-        self.assertIn("GOOGLE_MAPS_KEY", caught.exception.message)
