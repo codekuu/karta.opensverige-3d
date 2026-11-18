@@ -16,11 +16,11 @@ rutor redraw goteborg-norr 64_59
 rutor upload goteborg-norr 64_59
 ```
 
-`rutor claim` prints the cell you got. Use that `col_row` in render, redraw and upload. `rutor login` prints a device code. Approve it in the browser at the URL it prints. That approval, and putting your own Google key in `.env`, are the two steps that need a person.
+`rutor claim` prints the cell you got. Use that `col_row` in render, redraw and upload. `rutor login` prints a device code. Approve it in the browser at the URL it prints. That approval is the step that needs a person.
 
 `rutor redraw --wait-for-cheap` runs the SE3 price check first and does not redraw while the price is high. Without the flag the price check is advice only: `python -m rutor.se3_price`.
 
-`rutor preflight` checks Python, PyTorch with CUDA, bitsandbytes, Chrome, the key, the service and the login. Do not render or redraw when any line says `missing`.
+`rutor preflight` checks Python, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login. Do not render or redraw when any line says `missing`.
 
 ## Setup
 
@@ -87,16 +87,11 @@ A Mac can install, log in, claim and check the SE3 price. Preflight reports CUDA
 
 Without `pip install -e cli`, the same commands work as `python -m rutor` from the `cli/` directory.
 
-## Google key
+## Source render
 
-You render with your own Google account, your own key and your own agreement with Google. Put the key in `.env` in the clone:
+`rutor render` builds the source render from open data. Göteborgs Stad orthophoto is CC0. OpenStreetMap is ODbL. Only `goteborg-norr` has a source so far.
 
-```bash
-echo 'GOOGLE_MAPS_KEY=your-key' > .env
-chmod 600 .env
-```
-
-The key stays in `.env`. The CLI reads it for `rutor render` and refuses a `.env` that is group- or world-readable on POSIX. The source render (`work/<sheet>/<col>_<row>.src.png`) stays on your machine. Nothing Google-derived is uploaded. `rutor upload` sends only the redrawn PNG.
+The source render (`work/<sheet>/<col>_<row>.src.png`) stays on your machine. `rutor upload` sends only the redrawn PNG.
 
 ## Licence and credit
 

@@ -15,17 +15,17 @@ Run `rutor` from a virtualenv where `pip install -e cli` has been done, or run `
 
 Use the cell the claim prints. `rutor redraw --wait-for-cheap` runs the SE3 price check first and stops when the price is high. Without that flag, `python -m rutor.se3_price` is advice, not a gate.
 
-## Two human steps
+## The human step
 
-Only these two need a person. Do not invent a way around either.
+Only this needs a person. Do not invent a way around it.
 
 - Approve the GitHub device login in the browser, at the URL `rutor login` prints.
-- Put their own `GOOGLE_MAPS_KEY` in `.env` in the clone and run `chmod 600 .env`.
+
+The source render comes from open data: Göteborgs Stad orthophoto (CC0) and OpenStreetMap (ODbL). Only `goteborg-norr` has a source so far.
 
 ## Stop and tell your human
 
 - Preflight prints any `check: <name> missing` line. Do not render or redraw.
-- There is no Google key, or `rutor render` refuses `.env` because of its mode.
 - `rutor login` refuses because the GitHub client id is still the placeholder.
 - The service refuses the same step twice. Report the `error:` line. Do not loop.
 - The redraw fails. Report the last lines. Do not change `cli/rutor/pipeline.py` or the redraw to get past it.
@@ -41,7 +41,6 @@ One cell takes about an hour. The redraw prints `encode window i/n` while it wor
 ## Never
 
 - Never upload `work/<sheet>/<col>_<row>.src.png`. `rutor upload` sends the redrawn PNG only. Do not PUT the source render yourself.
-- Never put the Google key anywhere except `.env`.
 - Never edit `cli/rutor/pipeline.py`.
 - Never claim a second cell while one lock is still open, unless `rutor whoami` shows a trusted login.
 - Never pass `--wait-for-cheap` and then ignore a non-zero exit from it.

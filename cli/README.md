@@ -31,9 +31,9 @@ rutor upload goteborg-norr 64_59
 
 Replace `64_59` with the cell `rutor claim` prints. `rutor preflight` should be `ok` on every line before `rutor render`.
 
-`rutor login` prints a code and `url: https://github.com/login/device`. A person approves that code in the browser. The token is stored in `~/.config/pixelbygget/token` (override with `PIXELBYGGET_HOME`), mode `0600`.
+`rutor login` prints a code and `url: https://github.com/login/device`. A person approves that code in the browser. The token is stored in `~/.config/pixelbygget/token` (override with `PIXELBYGGET_HOME`), mode `0600`. That approval is the step that needs a person.
 
-The Google key stays in `.env` at the clone root. `rutor render` refuses the file when it is group- or world-readable.
+`rutor render` builds the source render from open data. Göteborgs Stad orthophoto is CC0. OpenStreetMap is ODbL. Only `goteborg-norr` has a source so far. That step needs pillow and numpy, which are in the repository `requirements.txt`.
 
 ## Tests
 
