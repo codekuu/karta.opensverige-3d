@@ -160,7 +160,7 @@ def _prepare_window(pipe, crop, prompt: str, device, dtype):
     side = WINDOW // scale
     return {
         "prompt_embeds": prompt_embeds.detach().to("cpu"),
-        "prompt_mask": prompt_mask.detach().to("cpu"),
+        "prompt_mask": prompt_mask.detach().to("cpu") if prompt_mask is not None else None,
         "image_pad_mask": image_pad_mask.detach().to("cpu"),
         "image_latents": image_latents.detach().to("cpu"),
         "img_shapes": [[(1, side, side), (1, side, side)]],
@@ -214,7 +214,7 @@ def _denoise(pipe, full, views, contexts, full_h: int, full_w: int, device, dtyp
                     hidden_states=hidden,
                     timestep=mark / 1000,
                     encoder_hidden_states=context["prompt_embeds"].to(device=device, dtype=dtype),
-                    encoder_hidden_states_mask=context["prompt_mask"].to(device=device),
+                    encoder_hidden_states_mask=context["prompt_mask"].to(device=device) if context["prompt_mask"] is not None else None,
                     img_shapes=context["img_shapes"],
                     img_mask=context["image_pad_mask"].to(device=device),
                     attention_kwargs={},
@@ -238,16 +238,44 @@ def _denoise(pipe, full, views, contexts, full_h: int, full_w: int, device, dtyp
 def _decode(pipe, latents, height: int, width: int):
     import torch
 
-    latents = pipe._unpack_latents(latents, height, width, pipe.vae_scale_factor)
-    latents = latents.to(pipe.vae.dtype)
+    pipe.transformer.to("cpu")
+    if getattr(pipe, "text_encoder", None) is not None:
+        pipe.text_encoder.to("cpu")
+    torch.cuda.empty_cache()
+    lat = pipe._unpack_latents(latents, height, width, pipe.vae_scale_factor).to(pipe.vae.dtype)
     z_dim = pipe.vae.config.z_dim
-    latents_mean = (
-        torch.tensor(pipe.vae.config.latents_mean).view(1, z_dim, 1, 1, 1).to(latents.device, latents.dtype)
-    )
-    latents_std = torch.tensor(pipe.vae.config.latents_std).view(1, z_dim, 1, 1, 1).to(latents.device, latents.dtype)
-    latents = latents * latents_std + latents_mean
-    decoded = pipe.vae.decode(latents, return_dict=False)[0][:, :, 0]
-    return pipe.image_processor.postprocess(decoded, output_type="pil")[0]
+    mean = torch.tensor(pipe.vae.config.latents_mean).view(1, z_dim, 1, 1, 1).to(lat.device, lat.dtype)
+    std = torch.tensor(pipe.vae.config.latents_std).view(1, z_dim, 1, 1, 1).to(lat.device, lat.dtype)
+    lat = lat * std + mean
+    b, c, t, h, w = lat.shape
+    f = height // h
+    tile, overlap = 96, 32
+    stride = tile - overlap
+    out = None
+    wsum = torch.zeros(1, 1, height, width, dtype=torch.float32)
+    ov = overlap * f
+
+    def ramp(n):
+        i = torch.arange(n, dtype=torch.float32)
+        return torch.clamp(torch.minimum((i + 1) / ov, (n - i) / ov), max=1.0)
+
+    ys = sorted({min(y, max(0, h - tile)) for y in range(0, h, stride)})
+    xs = sorted({min(x, max(0, w - tile)) for x in range(0, w, stride)})
+    with torch.inference_mode():
+        for y0 in ys:
+            for x0 in xs:
+                y1, x1 = min(y0 + tile, h), min(x0 + tile, w)
+                piece = pipe.vae.decode(lat[:, :, :, y0:y1, x0:x1], return_dict=False)[0][:, :, 0].float().cpu()
+                ph, pw = piece.shape[-2], piece.shape[-1]
+                if out is None:
+                    out = torch.zeros(b, piece.shape[1], height, width, dtype=torch.float32)
+                wgt = (ramp(ph)[:, None] * ramp(pw)[None, :])[None, None]
+                out[..., y0 * f:y0 * f + ph, x0 * f:x0 * f + pw] += piece * wgt
+                wsum[..., y0 * f:y0 * f + ph, x0 * f:x0 * f + pw] += wgt
+                del piece
+                torch.cuda.empty_cache()
+    out = out / wsum
+    return pipe.image_processor.postprocess(out, output_type="pil")[0]
 
 
 def redraw_image(image: object, prompt: str, seed: int | None) -> object:
