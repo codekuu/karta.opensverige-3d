@@ -235,13 +235,37 @@ def _denoise(pipe, full, views, contexts, full_h: int, full_w: int, device, dtyp
             full = pipe.scheduler.step(acc / weight, timestep, full, return_dict=False)[0]
     return full
 
+# Which parts sit on the GPU in each phase. Encoding needs the text encoder and the
+# VAE, denoising needs the transformer, decoding needs the VAE. Keeping the rest on
+# the CPU is what lets the redraw fit a 24 GB card such as an L4.
+_PHASES: dict[str, dict[str, str]] = {
+    "encode": {"text_encoder": "cuda", "transformer": "cpu", "vae": "cuda"},
+    "denoise": {"text_encoder": "cpu", "transformer": "cuda", "vae": "cuda"},
+    "decode": {"text_encoder": "cpu", "transformer": "cpu", "vae": "cuda"},
+}
+
+
+def _place(pipe, phase: str, empty_cache=None) -> None:
+    placement = _PHASES.get(phase)
+    if placement is None:
+        raise ValueError(f"unknown redraw phase {phase}")
+    # Move parts off the GPU before moving others on, so the peak never holds both.
+    ordered = sorted(placement.items(), key=lambda item: item[1] != "cpu")
+    for name, device in ordered:
+        part = getattr(pipe, name, None)
+        if part is not None:
+            part.to(device)
+    if empty_cache is None:
+        import torch
+
+        empty_cache = torch.cuda.empty_cache
+    empty_cache()
+
+
 def _decode(pipe, latents, height: int, width: int):
     import torch
 
-    pipe.transformer.to("cpu")
-    if getattr(pipe, "text_encoder", None) is not None:
-        pipe.text_encoder.to("cpu")
-    torch.cuda.empty_cache()
+    _place(pipe, "decode")
     lat = pipe._unpack_latents(latents, height, width, pipe.vae_scale_factor).to(pipe.vae.dtype)
     z_dim = pipe.vae.config.z_dim
     mean = torch.tensor(pipe.vae.config.latents_mean).view(1, z_dim, 1, 1, 1).to(lat.device, lat.dtype)
@@ -279,7 +303,18 @@ def _decode(pipe, latents, height: int, width: int):
 
 
 def redraw_image(image: object, prompt: str, seed: int | None) -> object:
-    """Pad, encode, denoise, decode and crop, as redraw() did for one tile."""
+    """Pad, encode, denoise, decode and crop, as redraw() did for one tile.
+
+    Runs under torch.inference_mode: without it autograd keeps every VAE and text
+    encoder activation, which needed over 21 GB for one window and broke 24 GB cards.
+    """
+    import torch
+
+    with torch.inference_mode():
+        return _redraw_image(image, prompt, seed)
+
+
+def _redraw_image(image: object, prompt: str, seed: int | None) -> object:
     from PIL import Image
 
     if not isinstance(image, Image.Image):
@@ -312,10 +347,12 @@ def redraw_image(image: object, prompt: str, seed: int | None) -> object:
         generator,
         None,
     )
+    _place(pipe, "encode")
     contexts = []
     for index, (top, left) in enumerate(views):
         print(f"encode window {index + 1}/{len(views)}", flush=True)
         crop = padded.crop((left, top, left + WINDOW, top + WINDOW))
         contexts.append(_prepare_window(pipe, crop, prompt, device, dtype))
+    _place(pipe, "denoise")
     full = _denoise(pipe, full, views, contexts, pad_h, pad_w, device, dtype)
     return _decode(pipe, full, pad_h, pad_w).convert("RGB").crop((0, 0, src_w, src_h))
