@@ -35,6 +35,7 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 - The `pytorch/pytorch:2.8.0` image ships old `brotli` and `zstandard`; Hugging Face downloads then crash in `httpx2` with `process() takes no keyword arguments`. Fix: `pip install -U brotli zstandard`.
 - Start long jobs with `setsid nohup ... &` and `ssh -n`, or the job dies with the SSH session. Vast boxes can refuse the direct port for minutes while they install SSH; the `sshN.vast.ai` proxy address may also lag.
 - `pgrep -f pattern` over SSH matches the SSH command line itself. Grep the process list for the script name instead.
+- On the Mac the shell is zsh, which does not split `$var` into words: `set -- $addr` keeps "host port" as one argument and every SSH attempt fails with "Bad port". A wait loop built that way reported a box as down for 15 minutes while it was up. Pass host and port as separate variables.
 - Never type an API key for someone. Vast keys go in through a terminal script that reads them without echo.
 
 ## 2026-11-18
