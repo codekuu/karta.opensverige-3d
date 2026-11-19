@@ -45,6 +45,8 @@ Fetch = Callable[[str, bytes | None, float], tuple[int, bytes]]
 class OrthoSource(NamedTuple):
     endpoint: str
     layer: str
+    # CRS:84 takes longitude first. EPSG:4326 in WMS 1.3.0 takes latitude first.
+    crs: str = "CRS:84"
 
 
 ORTHO_SOURCES: dict[str, OrthoSource] = {
@@ -97,6 +99,10 @@ def wms_url(sheet_id: str, west: float, south: float, east: float, north: float,
     """GetMap for the exact snapped box. PNG, so neighbouring crops get identical pixels."""
     source = ortho_source(sheet_id)
     west_s, south_s, east_s, north_s = _box_text(west, south, east, north, WMS_DECIMALS)
+    if source.crs == "EPSG:4326":
+        bbox = f"{south_s},{west_s},{north_s},{east_s}"
+    else:
+        bbox = f"{west_s},{south_s},{east_s},{north_s}"
     query = urllib.parse.urlencode(
         [
             ("SERVICE", "WMS"),
@@ -104,14 +110,15 @@ def wms_url(sheet_id: str, west: float, south: float, east: float, north: float,
             ("REQUEST", "GetMap"),
             ("LAYERS", source.layer),
             ("STYLES", ""),
-            ("CRS", "CRS:84"),
-            ("BBOX", f"{west_s},{south_s},{east_s},{north_s}"),
+            ("CRS", source.crs),
+            ("BBOX", bbox),
             ("WIDTH", str(width)),
             ("HEIGHT", str(height)),
             ("FORMAT", "image/png"),
         ]
     )
-    return f"{source.endpoint}?{query}"
+    joiner = "&" if "?" in source.endpoint else "?"
+    return f"{source.endpoint}{joiner}{query}"
 
 
 def _query(filters: tuple[str, ...], south: float, west: float, north: float, east: float) -> str:

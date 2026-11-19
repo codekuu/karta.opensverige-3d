@@ -205,6 +205,26 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f'way["natural"~"tree_row|wood|scrub|grassland"]{box};', trees)
         self.assertIn(f'relation["landuse"~"grass|forest"]{box};', trees)
 
+    def test_wms_url_for_a_lat_lon_service_with_its_own_query(self) -> None:
+        from rutor.renderer import sources
+
+        lidingo = sources.OrthoSource(
+            "https://karta.lidingo.se/wms?servicename=wms_ortofoto_2019_oppendata",
+            "theme-ortofoto2019",
+            "EPSG:4326",
+        )
+        with patch.dict(sources.ORTHO_SOURCES, {"test-sheet": lidingo}):
+            url = wms_url("test-sheet", 18.13, 59.365, 18.1345, 59.3673, 1024, 1024)
+        parsed = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        self.assertEqual(query["servicename"], ["wms_ortofoto_2019_oppendata"])
+        self.assertEqual(query["CRS"], ["EPSG:4326"])
+        self.assertEqual(query["LAYERS"], ["theme-ortofoto2019"])
+        # EPSG:4326 in WMS 1.3.0 is latitude first: south, west, north, east.
+        bbox = [float(part) for part in query["BBOX"][0].split(",")]
+        self.assertEqual(bbox, [59.365, 18.13, 59.3673, 18.1345])
+        self.assertEqual(url.count("?"), 1)
+
     def test_neighbour_boxes_share_one_pixel_grid(self) -> None:
         sheet = _sheet()
         lon_px = 0.25 / (111320.0 * math.cos(math.radians(57.707)))
