@@ -90,6 +90,18 @@ class CheckTests(unittest.TestCase):
         found = " ".join(self.problems(_redrawn(_scene(seed=11))))
         self.assertIn("no match", found)
 
+    def test_open_water_without_structure_skips_the_alignment_test(self) -> None:
+        import numpy as np
+        from PIL import Image
+
+        from rutor.check import problems
+
+        rng = np.random.default_rng(5)
+        water = np.clip(np.full((1536, 1536, 3), (30, 45, 35)) + rng.integers(-3, 4, (1536, 1536, 3)), 0, 255)
+        source = Image.fromarray(water.astype(np.uint8))
+        blue = np.clip(np.full((1536, 1536, 3), (20, 90, 140)) + rng.integers(-30, 31, (1536, 1536, 3)), 0, 255)
+        self.assertEqual(problems(source, Image.fromarray(blue.astype(np.uint8))), [])
+
     def test_posterised_redraw_fails(self) -> None:
         found = " ".join(self.problems(self.good.quantize(16).convert("RGB")))
         self.assertIn("colours", found)

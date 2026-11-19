@@ -2,7 +2,7 @@
 
 A redraw passes when it has the source's size, is not blank, black, white or
 posterised, differs from the source (it was actually redrawn), and lines up with
-the source. Every limit is a named constant so calibration changes one line.
+the source. Alignment is skipped for a source with almost no edges (open water). Every limit is a named constant so calibration changes one line.
 """
 
 from __future__ import annotations
@@ -24,8 +24,14 @@ MIN_COLOURS = 2000
 MIN_MEAN_DIFFERENCE = 6.0
 ALIGN_SCALE = 512
 MAX_SHIFT_PX = 4
-# Calibrated 2026-11-18: eight real pairs 0.28 to 0.46, a redraw of the wrong cell 0.013.
-MIN_MATCH_PEAK = 0.1
+# Calibrated 2026-11-19 on 100 L4 redraws: correct pairs 0.088 and up, the wrong
+# cell 0.011 to 0.018. The limit sits in the gap.
+MIN_MATCH_PEAK = 0.04
+# Share of the source core with a clear edge (Sobel above EDGE at 512 px). Open water
+# has almost none, so there is nothing to align against: 0.020 for a harbour cell,
+# 0.039 and up for every cell where the alignment test held.
+EDGE = 60.0
+MIN_STRUCTURE = 0.03
 
 
 def _rgb(image: "Image.Image") -> "np.ndarray":
@@ -93,7 +99,9 @@ def measure(source: "Image.Image", redrawn: "Image.Image") -> dict[str, float]:
     core = _core(out)
     packed = (core[..., 0].astype(np.int64) << 16) | (core[..., 1].astype(np.int64) << 8) | core[..., 2]
     dx, dy, peak = _shift(src, out)
+    structure = float((_gradient(src) > EDGE).mean())
     return {
+        "structure": structure,
         "brightness_spread": float(lum.std()),
         "near_black": float((lum < NEAR_BLACK).mean()),
         "near_white": float((lum > NEAR_WHITE).mean()),
@@ -127,6 +135,9 @@ def problems(source: "Image.Image", redrawn: "Image.Image") -> list[str]:
             f"not redrawn: mean difference {values['mean_difference']:.1f} from the source "
             f"(limit {MIN_MEAN_DIFFERENCE:.0f})"
         )
+    if values["structure"] < MIN_STRUCTURE:
+        # Mostly water: alignment cannot be measured, the other checks still apply.
+        return found
     if abs(values["shift_x"]) > MAX_SHIFT_PX or abs(values["shift_y"]) > MAX_SHIFT_PX:
         found.append(
             f"shifted: {abs(values['shift_x']):.0f} px east-west and {abs(values['shift_y']):.0f} px "
