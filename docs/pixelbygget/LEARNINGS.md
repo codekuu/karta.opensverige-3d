@@ -4,6 +4,14 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-19
 
+### Lidingö against the Google map (16 cells, west Lidingö)
+- The chain ran clean: 130 s per cell on an L4, all 16 cells passed the check, no visible seams after blending, and the render is identical on the Mac and on the box.
+- It looks clearly worse than the Google-based map in three ways, each with a known cause:
+  - **Villas drawn as five-storey blocks.** 89 percent of Lidingö's OSM buildings have no height or levels (Göteborg: 65 percent), and the renderer falls back to 18 m. A height from footprint size and building type, or laser heights from Lantmäteriet, fixes it.
+  - **Forest drawn as lawn.** The 2019 photo is from April with bare trees, and OSM has few forest polygons on the slopes. Land cover data (Nationella Marktäckedata, open) or laser crown heights would place the trees.
+  - **Ghost houses in the water.** Lidingö's photo stops at the municipal border, so cells reaching the Stockholm side draw OSM buildings on an empty photo. A cell needs full photo coverage, or several sources stitched together.
+- Granite cliffs and rocky shores are missing: no data source in the chain describes them yet.
+
 ### Open orthophotos around Stockholm
 - **Lidingö** publishes its 2019 orthophoto as CC0: WMS `https://karta.lidingo.se/wms?servicename=wms_ortofoto_2019_oppendata`, layer `theme-ortofoto2019`, `EPSG:4326` (latitude first in WMS 1.3.0). Sharper than Göteborg's.
 - **Stockholms stad** orthophoto WMS (`WMS_STHLM_ORTOFOTO_2020`) says all rights reserved and no use without written consent. Do not use it.
