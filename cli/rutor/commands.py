@@ -462,8 +462,9 @@ def _queue_cells(token: str, state: str) -> list[object]:
 
 
 def _waiting_line(cell: dict[str, object]) -> str:
+    label = "approved" if cell.get("state") == "godkand" else "waiting"
     return (
-        f"waiting: {cell.get('sheet')} {cell.get('col')}_{cell.get('row')} "
+        f"{label}: {cell.get('sheet')} {cell.get('col')}_{cell.get('row')} "
         f"{cell.get('owner_login')} uploaded {cell.get('uploaded_at')}"
     )
 

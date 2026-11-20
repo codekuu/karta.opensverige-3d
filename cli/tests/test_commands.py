@@ -207,6 +207,10 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("waiting: goteborg-norr 0_1 klang uploaded 2026-11-17T12:00:00Z\n", out)
         self.assertNotIn("other", out)
+        code, out, err = self.run_cmd(["queue", "--state", "godkand"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("approved: goteborg-norr 2_2 other uploaded 2026-11-17T13:00:00Z\n", out)
+        self.assertNotIn("waiting:", out)
 
     def test_queue_show_downloads_png(self) -> None:
         png = minimal_png(8, 8)

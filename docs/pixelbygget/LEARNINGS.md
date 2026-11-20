@@ -2,6 +2,17 @@
 
 What we tried, what we measured and what we changed. Newest first. One entry per finding, with the number that decided it. Images, renders and raw logs stay outside the repository; this file keeps the conclusions.
 
+## 2026-11-20
+
+### First end-to-end contributor run
+- The whole volunteer flow ran on Gustaf's gaming PC (Windows, RTX 5070, 12 GB) against the service running locally with `wrangler dev`: preflight, claim `--next`, render from open data, redraw, quality check, upload, then the admin's queue, inbox download (same sha256) and approve. Every step worked without code changes.
+- Login without a GitHub app: the service caches who a token belongs to in KV under `gh:<sha256 of token>`, so a local test seeds two fake users with `wrangler kv key put --binding GH --local` and uses made-up tokens. GitHub is never asked and no real token is used. The admin id comes from `service/.dev.vars` (`ADMIN_GITHUB_ID`), which is now ignored by git.
+- Reaching the Mac from the PC: the macOS firewall blocked port 8787 over Tailscale. A reverse SSH tunnel (`ssh -N -R 8787:localhost:8787 mogadishu`) works.
+- RTX 5070 with 12 GB is enough: one full `rutor redraw` took 133 s including model load and the check.
+- The same cell and seed is not pixel-identical across GPUs and library versions (RTX 5070 with diffusers 0.42.1 against an L4 with the pinned commit: mean difference 23). The look is the same; blending covers the seams, but a cell cannot be reproduced exactly on another machine.
+- `rutor queue --state godkand` printed approved cells as "waiting"; fixed.
+- On Windows, run PowerShell through script files (`powershell -File`); nested quoting over SSH breaks. Tar archives from macOS carry `._*` files unless `COPYFILE_DISABLE=1` is set.
+
 ## 2026-11-19
 
 ### Lidingö against the Google map (16 cells, west Lidingö)
