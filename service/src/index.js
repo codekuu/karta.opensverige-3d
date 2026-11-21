@@ -2,7 +2,7 @@
 
    Routes live under /v1. Each handler is called as
    handler(request, env, ctx, params, now) and returns a Response. The order in fetch is:
-   kill switch, rate limit, router, cors. See the design document for the rules.
+   kill switch, rate limit, router, cors. See docs/pixelbygget/DESIGN.md for the rules.
 
    Kill switch: PIXELBYGGET_STANGD="1" answers 503 to everything but GET, so the grid stays
    readable while uploads and claims are paused.
