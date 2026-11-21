@@ -6,9 +6,13 @@ Overpass. Both are cached under the sheet work directory and reused.
 
 from __future__ import annotations
 
+import hashlib
+import http.client
 import io
+import json
 import math
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -56,6 +60,14 @@ ORTHO_SOURCES: dict[str, OrthoSource] = {
     ),
 }
 
+# The OpenStreetMap data is pinned per sheet. A query carries the date, so the
+# same cell always comes from the same OSM snapshot, and the cache file carries
+# it too, so a new date never reads the old answer.
+OSM_DATES: dict[str, str] = {
+    "goteborg-norr": "2026-11-15T00:00:00Z",
+    "stockholm-norr": "2026-11-15T00:00:00Z",
+}
+
 BUILDING_FILTERS = (
     'way["building"]',
     'way["building:part"]',
@@ -84,6 +96,22 @@ def ortho_source(sheet_id: str) -> OrthoSource:
     if found is None:
         raise environment(f"no open orthophoto source for sheet {sheet_id} yet")
     return found
+
+
+def osm_date(sheet_id: str) -> str:
+    found = OSM_DATES.get(sheet_id)
+    if found is None:
+        raise environment(f"no OpenStreetMap date pinned for sheet {sheet_id}")
+    return found
+
+
+def _date_stamp(date: str) -> str:
+    # A colon is not allowed in a Windows file name.
+    return date.replace(":", "-")
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9_-]", "_", text.lower())
 
 
 def _box_text(west: float, south: float, east: float, north: float, places: int = OVERPASS_DECIMALS) -> tuple[str, str, str, str]:
@@ -121,11 +149,19 @@ def wms_url(sheet_id: str, west: float, south: float, east: float, north: float,
     return f"{source.endpoint}{joiner}{query}"
 
 
-def _query(filters: tuple[str, ...], south: float, west: float, north: float, east: float) -> str:
+def _query(
+    filters: tuple[str, ...],
+    south: float,
+    west: float,
+    north: float,
+    east: float,
+    date: str | None = None,
+) -> str:
     west_s, south_s, east_s, north_s = _box_text(west, south, east, north)
     # Overpass bbox order is south, west, north, east.
     box = f"({south_s},{west_s},{north_s},{east_s})"
-    lines = ["[out:json][timeout:90];", "("]
+    header = "[out:json][timeout:90];" if date is None else f'[out:json][timeout:90][date:"{date}"];'
+    lines = [header, "("]
     for item in filters:
         lines.append(f"  {item}{box};")
     lines.append(");")
@@ -133,12 +169,12 @@ def _query(filters: tuple[str, ...], south: float, west: float, north: float, ea
     return "\n".join(lines) + "\n"
 
 
-def buildings_query(south: float, west: float, north: float, east: float) -> str:
-    return _query(BUILDING_FILTERS, south, west, north, east)
+def buildings_query(south: float, west: float, north: float, east: float, date: str | None = None) -> str:
+    return _query(BUILDING_FILTERS, south, west, north, east, date)
 
 
-def trees_query(south: float, west: float, north: float, east: float) -> str:
-    return _query(TREE_FILTERS, south, west, north, east)
+def trees_query(south: float, west: float, north: float, east: float, date: str | None = None) -> str:
+    return _query(TREE_FILTERS, south, west, north, east, date)
 
 
 def build_request(url: str, data: bytes | None) -> urllib.request.Request:
@@ -160,23 +196,62 @@ def http_request(url: str, data: bytes | None = None, timeout: float = OVERPASS_
         finally:
             exc.close()
     except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            # Worth another try, so it is reported as a retryable 502.
+            return 502, b""
         raise network(f"could not reach {url} ({exc.reason})") from exc
+    # A read timeout is a TimeoutError, not a URLError. It, a dropped connection
+    # and a broken HTTP stream are all worth another try, so they look like the
+    # retryable 502 that fetch_overpass already understands.
+    except (TimeoutError, ConnectionError, http.client.HTTPException):
+        return 502, b""
+
+
+def _overpass_problem(payload: bytes) -> str | None:
+    """Why an Overpass answer cannot be cached, or None when it can.
+
+    Overpass reports a failed query as HTTP 200 with a `remark`, so the body has
+    to be read before it is trusted.
+    """
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "the answer was not JSON"
+    if not isinstance(parsed, dict):
+        return "the answer was not a JSON object"
+    if not isinstance(parsed.get("elements"), list):
+        return "the answer had no elements list"
+    remark = parsed.get("remark")
+    if isinstance(remark, str):
+        lowered = remark.lower()
+        for word in ("error", "timed out", "runtime"):
+            if word in lowered:
+                return f"the answer said: {remark}"
+    return None
 
 
 def fetch_overpass(query: str, fetch: Fetch | None = None) -> bytes:
     getter = http_request if fetch is None else fetch
     url = os.environ.get("PIXELBYGGET_OVERPASS_URL", OVERPASS_URL).strip() or OVERPASS_URL
     body = urllib.parse.urlencode({"data": query}).encode("utf-8")
-    last_status = 0
+    last_problem = "no answer"
     for attempt in range(ATTEMPTS):
         status, payload = getter(url, body, OVERPASS_TIMEOUT)
         if status == 200 and payload:
-            return payload
-        last_status = status
-        if status not in RETRIABLE_STATUS or attempt + 1 == ATTEMPTS:
-            raise network(f"Overpass gave up after {attempt + 1} tries: HTTP {status}")
+            problem = _overpass_problem(payload)
+            if problem is None:
+                return payload
+            last_problem = problem
+        elif status == 200:
+            last_problem = "the answer was empty"
+        else:
+            last_problem = f"HTTP {status}"
+        # An unusable body under HTTP 200 is as retryable as a 502.
+        retriable = status == 200 or status in RETRIABLE_STATUS
+        if not retriable or attempt + 1 == ATTEMPTS:
+            raise network(f"Overpass gave up after {attempt + 1} tries: {last_problem}")
         time.sleep(BACKOFF_SECONDS[attempt])
-    raise network(f"Overpass gave up after {ATTEMPTS} tries: HTTP {last_status}")
+    raise network(f"Overpass gave up after {ATTEMPTS} tries: {last_problem}")
 
 
 def _grid_steps(camera: dict[str, float]) -> tuple[float, float]:
@@ -187,7 +262,7 @@ def _grid_steps(camera: dict[str, float]) -> tuple[float, float]:
 
 def _fetch_tile(sheet_id: str, camera: dict[str, float], tx: int, ty: int, fetch: Fetch) -> bytes:
     """One ORTHO_TILE square of the sheet's photo grid, cached and shared by every cell."""
-    path = config.work_dir(sheet_id) / "sources" / "ortho" / f"{tx}_{ty}.png"
+    path = config.work_dir(sheet_id) / "sources" / "ortho" / _slug(ortho_source(sheet_id).layer) / f"{tx}_{ty}.png"
     if path.is_file():
         return path.read_bytes()
     lon_px, lat_px = _grid_steps(camera)
@@ -252,6 +327,36 @@ def _store(path: Path, payload: bytes) -> None:
     temporary.replace(path)
 
 
+def _usable_osm(path: Path) -> bool:
+    """True when the cached file is an OSM answer this module would have written."""
+    if not path.is_file():
+        return False
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return False
+    if _overpass_problem(payload) is None:
+        return True
+    path.unlink(missing_ok=True)
+    return False
+
+
+def _ortho_key(sheet_id: str, west: float, south: float, east: float, north: float, width: int, height: int) -> str:
+    """A short stable name for the exact photo box, so two boxes never share a file."""
+    source = ortho_source(sheet_id)
+    parts = [
+        source.endpoint,
+        source.layer,
+        f"{west:.{WMS_DECIMALS}f}",
+        f"{south:.{WMS_DECIMALS}f}",
+        f"{east:.{WMS_DECIMALS}f}",
+        f"{north:.{WMS_DECIMALS}f}",
+        str(int(width)),
+        str(int(height)),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
 def source_dir(sheet_id: str, col: int, row: int) -> Path:
     return config.work_dir(sheet_id) / "sources" / f"{col}_{row}"
 
@@ -263,22 +368,25 @@ def load_sources(
     camera: dict[str, float],
     fetch: Fetch | None = None,
 ) -> tuple[Path, Path, Path]:
-    """Return orto.png, osm.json and trees.json, fetching whatever is not cached."""
+    """Return the photo, buildings and trees cache files, fetching what is missing."""
     west = camera["west"]
     south = camera["south"]
     east = camera["east"]
     north = camera["north"]
-    # Fail on an unknown sheet before creating a cache directory.
+    # Fail on an unknown sheet or an unpinned date before creating a cache directory.
     ortho_source(sheet_id)
+    date = osm_date(sheet_id)
     directory = source_dir(sheet_id, col, row)
-    orto_path = directory / "orto.png"
-    osm_path = directory / "osm.json"
-    trees_path = directory / "trees.json"
+    width = int(camera["ortho_width"])
+    height = int(camera["ortho_height"])
+    orto_path = directory / f"orto_{_ortho_key(sheet_id, west, south, east, north, width, height)}.png"
+    osm_path = directory / f"osm_{_date_stamp(date)}.json"
+    trees_path = directory / f"trees_{_date_stamp(date)}.json"
     getter = http_request if fetch is None else fetch
     if not orto_path.is_file():
         _store(orto_path, _fetch_ortho(sheet_id, camera, getter))
-    if not osm_path.is_file():
-        _store(osm_path, fetch_overpass(buildings_query(south, west, north, east), fetch=getter))
-    if not trees_path.is_file():
-        _store(trees_path, fetch_overpass(trees_query(south, west, north, east), fetch=getter))
+    if not _usable_osm(osm_path):
+        _store(osm_path, fetch_overpass(buildings_query(south, west, north, east, date), fetch=getter))
+    if not _usable_osm(trees_path):
+        _store(trees_path, fetch_overpass(trees_query(south, west, north, east, date), fetch=getter))
     return orto_path, osm_path, trees_path

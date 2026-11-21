@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -19,11 +20,11 @@ from tests.png import minimal_png
 from tests.test_check import AVAILABLE as DRAWING
 
 
-def _manifest(width: int, height: int, check: str | None = "ok") -> dict[str, object]:
+def _manifest(width: int, height: int, check: str | None = "ok", sha: str = "abc") -> dict[str, object]:
     manifest: dict[str, object] = {
         "pipeline": "2026.11-a",
         "seed": None,
-        "sha256": "abc",
+        "sha256": sha,
         "width": width,
         "height": height,
         "source": {"provider": "unknown", "version": "unknown"},
@@ -67,9 +68,10 @@ class UploadTests(unittest.TestCase):
     def write_pair(self, png_side: int, manifest_side: int, check: str | None = "ok") -> None:
         work = self.root / "work" / "goteborg-norr"
         work.mkdir(parents=True)
-        (work / "64_59.png").write_bytes(minimal_png(png_side, png_side))
+        data = minimal_png(png_side, png_side)
+        (work / "64_59.png").write_bytes(data)
         (work / "64_59.manifest.json").write_text(
-            json.dumps(_manifest(manifest_side, manifest_side, check)) + "\n",
+            json.dumps(_manifest(manifest_side, manifest_side, check, hashlib.sha256(data).hexdigest())) + "\n",
             encoding="utf-8",
         )
 

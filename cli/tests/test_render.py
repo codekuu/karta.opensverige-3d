@@ -398,9 +398,10 @@ class RenderTests(unittest.TestCase):
         load_sources("goteborg-norr", 64, 52, camera, fetch=fetch)
         self.assertEqual(calls["n"], 14)
         cache = self.root / "work" / "goteborg-norr" / "sources" / "64_52"
-        self.assertTrue((cache / "orto.png").is_file())
-        self.assertTrue((cache / "osm.json").is_file())
-        self.assertTrue((cache / "trees.json").is_file())
+        # The photo file is keyed by its box and layer, the OSM files by the pinned date.
+        self.assertEqual(len(list(cache.glob("orto_*.png"))), 1)
+        self.assertTrue((cache / "osm_2026-11-15T00-00-00Z.json").is_file())
+        self.assertTrue((cache / "trees_2026-11-15T00-00-00Z.json").is_file())
 
     @unittest.skipUnless(DRAWING, "pillow and numpy are not installed")
     def test_neighbours_share_photo_tiles_and_pixels(self) -> None:

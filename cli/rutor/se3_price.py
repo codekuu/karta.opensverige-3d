@@ -10,6 +10,7 @@ Exit 1: the price could not be read. Do not redraw.
 
 from __future__ import annotations
 
+import http.client
 import json
 import sys
 import urllib.error
@@ -55,6 +56,9 @@ def fetch_prices(day) -> list[Slot] | None:
         raise RuntimeError(f"SE3 price request failed with HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError("SE3 price request failed") from exc
+    # A read timeout and a dropped connection mean the price could not be read.
+    except (TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+        raise RuntimeError(f"SE3 price request failed ({exc.__class__.__name__})") from exc
     if status == 404:
         return None
     if status != 200:
@@ -173,8 +177,9 @@ def evaluate(now: datetime, today: list[Slot] | None, next_day: list[Slot] | Non
                 "decision": "WAIT",
                 "exit_code": 2,
                 "action": (
-                    "No SE3 prices are available for the horizon. Do not claim a district and do not run the redraw. "
-                    "Tomorrow's prices are usually published after 13:00 Europe/Stockholm. Run python -m rutor.se3_price again then."
+                    "No SE3 prices are available for the horizon. "
+                    "Keep your lock and run rutor redraw --wait-for-cheap again after tomorrow's prices "
+                    "are published, usually after 13:00 Europe/Stockholm."
                 ),
             }
         )
@@ -216,7 +221,7 @@ def evaluate(now: datetime, today: list[Slot] | None, next_day: list[Slot] | Non
             why = "The current SE3 price is close to the cheapest hour."
         report["decision"] = "RUN"
         report["exit_code"] = 0
-        report["action"] = f"{why} Claim one district and run the redraw."
+        report["action"] = f"{why} Run the redraw now."
         return report
 
     when = hour["start"].astimezone(STOCKHOLM).strftime("%Y-%m-%d %H:%M %Z")
@@ -227,8 +232,7 @@ def evaluate(now: datetime, today: list[Slot] | None, next_day: list[Slot] | Non
     report["decision"] = "WAIT"
     report["exit_code"] = 2
     report["action"] = (
-        f"The SE3 price is high. Do not claim a district and do not run the redraw until {when}.{extra} "
-        "Then run python -m rutor.se3_price again."
+        f"The SE3 price is high. Keep your lock and run rutor redraw --wait-for-cheap again after {when}.{extra}"
     )
     return report
 
@@ -270,8 +274,9 @@ def main(argv: list[str] | None = None, fetch=fetch_prices, clock=None) -> int:
         print("area: SE3", flush=True)
         print("decision: WAIT", flush=True)
         print(
-            "action: The public SE3 price could not be read. Do not claim a district and do not run the redraw. "
-            f"Retry python -m rutor.se3_price later. ({exc.__class__.__name__})",
+            "action: The public SE3 price could not be read. Keep your lock and try again later, "
+            "or run rutor redraw without --wait-for-cheap. "
+            f"({exc.__class__.__name__})",
             flush=True,
         )
         return 1
