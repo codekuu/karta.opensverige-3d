@@ -13,6 +13,8 @@ Four reviews read the code without running the pipeline. What they found and wha
 - **Forests mapped as multipolygon relations were never drawn**, and a way Overpass sent twice could lose its tags.
 - **Network timeouts crashed with a traceback** instead of exit 4, and an Overpass error answer with status 200 was cached forever.
 - Docs told contributors to run preflight before login, which can never pass, and the login terms still mentioned a Google key.
+- A second, fresh review of the service fixes found four more races in them: a purged key could be a re-upload with the same bytes (the seed is fixed per cell), the cron could free a lock taken over after it looked, two `/live` calls with the same rev could both move cells, and a reject could free a cell that had just gone live. Each write now names the exact state it read, keys carry a random part, and each race has a test that fails on the code before it. Review your own fixes with fresh eyes too.
+- CRC32 in JavaScript costs about 14 ms of CPU for 8 MB, over the Workers Free limit of 10 ms. The upload checks every chunk's CRC except the image data's.
 
 ### Opening the repository
 - The full history was checked before going public: no images, no keys, no env files, 29 KB packed. The Google-era plate pipeline only exists on the branch `cursor/plate-pipeline-7eb5`, as code.

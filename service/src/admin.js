@@ -43,10 +43,14 @@ const IN_LIST = "(col, row) IN (SELECT json_extract(value, '$[0]'), json_extract
 export async function approveCell(db, sheet, col, row, now) {
   const cell = await db.prepare('SELECT state, owner_id FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
   if (!cell || cell.state !== 'vantar') return { ok: false, status: 409, code: 'not_waiting' };
+  const moved = await db
+    .prepare("UPDATE cells SET state = 'godkand', approved_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'vantar'")
+    .bind(now, now, sheet, col, row)
+    .run();
+  // A second approval that lost the race counts nothing and gives no trust.
+  if (moved.meta.changes !== 1) return { ok: false, status: 409, code: 'not_waiting' };
   await db.batch([
-    db.prepare("UPDATE cells SET state = 'godkand', approved_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'vantar'").bind(now, now, sheet, col, row),
-    // changes() is the row count of the update just above: a lost race counts nothing.
-    db.prepare('UPDATE users SET approved_count = approved_count + 1 WHERE github_id = ? AND changes() = 1').bind(cell.owner_id),
+    db.prepare('UPDATE users SET approved_count = approved_count + 1 WHERE github_id = ?').bind(cell.owner_id),
     db.prepare('UPDATE users SET trusted = 1 WHERE github_id = ? AND approved_count = ?').bind(cell.owner_id, TRUST_AT),
   ]);
   return { ok: true };
@@ -71,20 +75,18 @@ export async function rejectCell(db, inkorg, sheet, col, row, comment, now, admi
   const cell = await db.prepare('SELECT state, owner_id, owner_login, inbox_key FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
   if (!cell || !['vantar', 'godkand', 'live'].includes(cell.state)) return { ok: false, status: 409, code: 'nothing_to_reject' };
   const wasLive = cell.state === 'live';
-  const statements = [
-    db
-      .prepare(
-        "UPDATE cells SET state = 'fri', owner_id = NULL, owner_login = NULL, locked_at = NULL, expires_at = NULL, uploaded_at = NULL, approved_at = NULL, live_at = NULL, bytes = NULL, sha256 = NULL, inbox_key = ?, rejected_at = ?, removed_at = ?, comment = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ?",
-      )
-      .bind(wasLive ? cell.inbox_key : null, wasLive ? null : now, wasLive ? now : null, comment, now, sheet, col, row),
-  ];
+  // Only from the state that was read: a cell the intake just made live must be removed, not freed.
+  const moved = await db
+    .prepare(
+      "UPDATE cells SET state = 'fri', owner_id = NULL, owner_login = NULL, locked_at = NULL, expires_at = NULL, uploaded_at = NULL, approved_at = NULL, live_at = NULL, bytes = NULL, sha256 = NULL, inbox_key = ?, rejected_at = ?, removed_at = ?, comment = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = ?",
+    )
+    .bind(wasLive ? cell.inbox_key : null, wasLive ? null : now, wasLive ? now : null, comment, now, sheet, col, row, cell.state)
+    .run();
+  if (moved.meta.changes !== 1) return { ok: false, status: 409, code: 'changed_meanwhile' };
   if (!wasLive && cell.inbox_key) {
     const due = plusDays(now, PURGE_DAYS);
-    for (const ext of ['png', 'json']) {
-      statements.push(db.prepare('INSERT OR REPLACE INTO purge (key, due) VALUES (?, ?)').bind(`${cell.inbox_key}.${ext}`, due));
-    }
+    await db.batch(['png', 'json'].map((ext) => db.prepare('INSERT OR REPLACE INTO purge (key, due) VALUES (?, ?)').bind(`${cell.inbox_key}.${ext}`, due)));
   }
-  await db.batch(statements);
   await logEvent(db, {
     at: now,
     github_id: admin ? admin.github_id : null,
@@ -196,7 +198,9 @@ export async function markLive(db, sheet, cells, rev, now) {
       .prepare(`UPDATE sheets SET rev = ? WHERE id = ? AND rev < ? AND (SELECT COUNT(*) FROM cells WHERE sheet = ? AND state = 'godkand' AND ${IN_LIST}) = ?`)
       .bind(rev, sheet, rev, sheet, list, cells.length),
     db
-      .prepare(`UPDATE cells SET state = 'live', live_at = ?, updated_at = ? WHERE sheet = ? AND state = 'godkand' AND ${IN_LIST} AND (SELECT rev FROM sheets WHERE id = ?) = ?`)
+      // changes() is the row count of the revision bump just before, in the same transaction:
+      // a second call with the same rev moves nothing.
+      .prepare(`UPDATE cells SET state = 'live', live_at = ?, updated_at = ? WHERE sheet = ? AND state = 'godkand' AND ${IN_LIST} AND changes() = 1 AND (SELECT rev FROM sheets WHERE id = ?) = ?`)
       .bind(now, now, sheet, list, sheet, rev),
   ]);
   if (bump.meta.changes !== 1) {
@@ -236,6 +240,7 @@ const MESSAGES = {
   no_user: 'No user with that login or id.',
   ambiguous_login: 'Two users share that login. Send github_id instead.',
   duplicate_cells: 'A cell is listed twice. Nothing was changed.',
+  changed_meanwhile: 'That cell changed while you rejected it. Read the queue again.',
   not_approved: 'Every listed cell must be approved. Nothing was marked live.',
   stale_rev: 'That revision is not newer than the sheet’s. Read the sheet again.',
   no_sheet: 'No such sheet.',

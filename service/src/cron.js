@@ -13,15 +13,16 @@ const PURGE_DAYS = 30;
  */
 export async function expireLocks(db, now) {
   const { results } = await db
-    .prepare("SELECT sheet, col, row, owner_id, owner_login FROM cells WHERE state = 'last' AND expires_at < ? AND uploaded_at IS NULL")
+    .prepare("SELECT sheet, col, row, owner_id, owner_login, expires_at FROM cells WHERE state = 'last' AND expires_at < ? AND uploaded_at IS NULL")
     .bind(now)
     .all();
   for (const cell of results) {
     const r = await db
       .prepare(
-        "UPDATE cells SET state = 'fri', owner_id = NULL, owner_login = NULL, locked_at = NULL, expires_at = NULL, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'last' AND uploaded_at IS NULL",
+        // Only the very lock that was read: someone may have taken the cell over meanwhile.
+        "UPDATE cells SET state = 'fri', owner_id = NULL, owner_login = NULL, locked_at = NULL, expires_at = NULL, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'last' AND uploaded_at IS NULL AND owner_id = ? AND expires_at = ? AND expires_at < ?",
       )
-      .bind(now, cell.sheet, cell.col, cell.row)
+      .bind(now, cell.sheet, cell.col, cell.row, cell.owner_id, cell.expires_at, now)
       .run();
     if (r.meta.changes === 1) {
       await logEvent(db, { at: now, github_id: cell.owner_id, login: cell.owner_login, action: 'expired', sheet: cell.sheet, col: cell.col, row: cell.row });
@@ -40,7 +41,11 @@ export async function expireLocks(db, now) {
  * @returns {Promise<number>} how many uploads were deleted (two objects each)
  */
 export async function purgeDue(db, inkorg, now) {
-  const { results } = await db.prepare('SELECT key FROM purge WHERE due <= ? ORDER BY due LIMIT 500').bind(now).all();
+  // A key a cell still points at is never deleted, whatever the list says.
+  const { results } = await db
+    .prepare("SELECT key FROM purge WHERE due <= ? AND NOT EXISTS (SELECT 1 FROM cells WHERE purge.key IN (cells.inbox_key || '.png', cells.inbox_key || '.json')) ORDER BY due LIMIT 500")
+    .bind(now)
+    .all();
   const keys = results.map((r) => r.key);
   if (keys.length) {
     await inkorg.delete(keys);

@@ -94,12 +94,13 @@ export async function releaseCell(db, user, sheet, col, row, now) {
   if (!cell) return { ok: false, status: 404, code: 'no_cell' };
   if (cell.owner_id !== user.github_id) return { ok: false, status: 403, code: 'not_yours' };
   if (cell.state !== 'last' || cell.uploaded_at) return { ok: false, status: 409, code: 'already_uploaded' };
-  await db
+  const r = await db
     .prepare(
-      "UPDATE cells SET state = 'fri', owner_id = NULL, owner_login = NULL, locked_at = NULL, expires_at = NULL, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'last' AND owner_id = ?",
+      "UPDATE cells SET state = 'fri', owner_id = NULL, owner_login = NULL, locked_at = NULL, expires_at = NULL, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'last' AND owner_id = ? AND uploaded_at IS NULL",
     )
     .bind(now, sheet, col, row, user.github_id)
     .run();
+  if (r.meta.changes !== 1) return { ok: false, status: 409, code: 'already_uploaded' };
   await logEvent(db, { at: now, github_id: user.github_id, login: user.login, action: 'release', sheet, col, row });
   return { ok: true };
 }

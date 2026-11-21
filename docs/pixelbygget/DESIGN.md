@@ -57,7 +57,7 @@ Redraws are not pixel-identical across GPUs and library versions. That is fine: 
 
 - An upload is one PUT with the PNG as the body and the manifest in a header.
 - The service checks the lock, its expiry, the size, the manifest, every PNG chunk and the sha256 before it writes anything.
-- Each upload is stored under its own key (the cell plus the start of its sha256). A request that loses its lock can only delete its own objects, never someone else's.
+- Each upload is stored under its own key (the cell, the start of its sha256 and a random part). A request that loses its lock can only delete its own objects, never someone else's.
 
 ## What is open and what is not
 

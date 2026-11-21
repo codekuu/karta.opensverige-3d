@@ -2,9 +2,9 @@
    checks ownership, expiry, size, manifest, PNG chunks and hash before anything is written, so
    a refused upload leaves no object behind and the cell stays locked.
 
-   Every upload has its own inbox key, the cell plus the first 16 hex of its sha256. A request
-   that loses its lock half-way deletes only its own key, and only when the cell does not point
-   at that key: two requests with the same bytes share a key, and the winner keeps it. */
+   Every upload has its own inbox key: the cell, the first 16 hex of its sha256 and a random
+   part, so two requests never share a key, not even with the same bytes. A request that loses
+   its lock half-way deletes only its own key. */
 
 import { requireAdmin, requireUser } from './auth.js';
 import { logEvent } from './cells.js';
@@ -94,9 +94,11 @@ function crc32(bytes) {
 const DEPTHS = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
 
 /**
- * Width and height of a well-formed PNG, or null. Every chunk is walked and its CRC checked:
- * IHDR first with 13 bytes and a valid depth and colour type, at least one IDAT, and IEND as
- * the very last bytes, so nothing can hide after the image.
+ * Width and height of a well-formed PNG, or null. Every chunk is walked: IHDR first with 13
+ * bytes and a valid depth and colour type, at least one IDAT, and IEND as the very last bytes,
+ * so nothing can hide after the image. Every CRC but the image data's is checked: CRC over a
+ * full 8 MB costs about 14 ms of CPU, more than the Workers Free plan allows, and the intake
+ * decodes the image data anyway.
  * @param {Uint8Array} bytes
  * @returns {{ width: number, height: number }|null}
  */
@@ -111,7 +113,7 @@ export function inspectPng(bytes) {
     const length = view.getUint32(pos);
     if (length > bytes.length - pos - 12) return null;
     const type = String.fromCharCode(bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]);
-    if (crc32(bytes.subarray(pos + 4, pos + 8 + length)) !== view.getUint32(pos + 8 + length)) return null;
+    if (type !== 'IDAT' && crc32(bytes.subarray(pos + 4, pos + 8 + length)) !== view.getUint32(pos + 8 + length)) return null;
     if (size === null) {
       if (type !== 'IHDR' || length !== 13) return null;
       const depth = bytes[pos + 16];
@@ -130,16 +132,17 @@ export function inspectPng(bytes) {
 }
 
 /**
- * The inbox key of one upload: the cell and the first 16 hex of its sha256. The objects are
- * `${key}.png` and `${key}.json`.
+ * The inbox key of one upload: the cell, the first 16 hex of its sha256 and 8 random hex, so
+ * every request has a key of its own. The objects are `${key}.png` and `${key}.json`.
  * @param {string} sheet
  * @param {number} col
  * @param {number} row
  * @param {string} sha
+ * @param {string} [nonce]
  * @returns {string}
  */
-export function inboxKey(sheet, col, row, sha) {
-  return `${sheet}/${col}_${row}.${sha.slice(0, 16)}`;
+export function inboxKey(sheet, col, row, sha, nonce = crypto.randomUUID().replace(/-/g, '').slice(0, 8)) {
+  return `${sheet}/${col}_${row}.${sha.slice(0, 16)}.${nonce}`;
 }
 
 /**
@@ -211,9 +214,8 @@ export const uploadRoute = requireUser(async (request, env, ctx, params, now, us
     .bind(state, now, bytes.length, sha, key, user.trusted ? now : null, now, sheet, col, row, user.github_id, now)
     .run();
   if (result.meta.changes !== 1) {
-    const after = await env.DB.prepare('SELECT inbox_key FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
-    // A twin request with the same bytes may have won with this very key: then it stays.
-    if (!after || after.inbox_key !== key) await env.INKORG.delete([`${key}.png`, `${key}.json`]);
+    // The key is this request's own, so nobody else's upload can be under it.
+    await env.INKORG.delete([`${key}.png`, `${key}.json`]);
     return error(409, 'lock_lost', 'Your lock on that cell ended before the upload finished. Claim it again, then upload.');
   }
   await logEvent(env.DB, { at: now, github_id: user.github_id, login: user.login, action: 'upload', sheet, col, row, detail: `${bytes.length} bytes, ${png.width} px, ${state}` });

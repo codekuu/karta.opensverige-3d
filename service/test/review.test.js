@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { approveCell, markBlanked, markLive, rejectCell, setTrust } from '../src/admin.js';
 import { claimCell } from '../src/cells.js';
 import { nowIso } from '../src/db.js';
-import { purgeDue } from '../src/cron.js';
+import { expireLocks, purgeDue } from '../src/cron.js';
 import { clearPublicCache } from '../src/index.js';
 import { inboxKey, inspectPng } from '../src/upload.js';
 import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser, setCell } from './fixtures.js';
@@ -87,17 +87,18 @@ describe('per-upload inbox keys', () => {
     const sha = await sha256Hex(bytes);
     const r = await put(user, bytes);
     expect(r.status).toBe(201);
-    const key = inboxKey('goteborg-norr', 1, 1, sha);
-    expect(key).toBe(`goteborg-norr/1_1.${sha.slice(0, 16)}`);
+    const key = (await getCell('goteborg-norr', 1, 1)).inbox_key;
+    expect(key).toMatch(new RegExp(`^goteborg-norr/1_1\\.${sha.slice(0, 16)}\\.[0-9a-f]{8}$`));
     expect(await keys()).toEqual([`${key}.json`, `${key}.png`]);
-    expect((await getCell('goteborg-norr', 1, 1)).inbox_key).toBe(key);
+    expect(inboxKey('goteborg-norr', 1, 1, sha)).not.toBe(inboxKey('goteborg-norr', 1, 1, sha));
   });
 
   it('keeps the winner of a twin upload with the same bytes', async () => {
     await claimCell(env.DB, user, 'goteborg-norr', 1, 1, nowIso());
     const bytes = minimalPng(1024, 1024);
     const sha = await sha256Hex(bytes);
-    const key = inboxKey('goteborg-norr', 1, 1, sha);
+    // The twin has the same bytes but a key of its own.
+    const key = inboxKey('goteborg-norr', 1, 1, sha, 'aaaa0000');
     // The twin request finishes first: same user, same bytes, same key.
     const inkorg = inboxWith(async () => {
       await env.INKORG.put(`${key}.png`, bytes);
@@ -246,6 +247,70 @@ describe('rejected uploads are purged by key', () => {
   });
 });
 
+describe('races the second review found', () => {
+  it('never purges a key a cell points at again', async () => {
+    const key = 'goteborg-norr/1_1.aaaaaaaaaaaaaaaa.00000000';
+    await env.INKORG.put(`${key}.png`, minimalPng(1024, 1024));
+    await env.INKORG.put(`${key}.json`, '{}');
+    await env.DB.batch([
+      env.DB.prepare('INSERT INTO purge (key, due) VALUES (?, ?)').bind(`${key}.png`, '2026-01-01T00:00:00Z'),
+      env.DB.prepare('INSERT INTO purge (key, due) VALUES (?, ?)').bind(`${key}.json`, '2026-01-01T00:00:00Z'),
+    ]);
+    await setCell('goteborg-norr', 1, 1, { state: 'vantar', owner_id: 4242, owner_login: 'klang', uploaded_at: NOW, inbox_key: key });
+    expect(await purgeDue(env.DB, env.INKORG, NOW)).toBe(0);
+    expect(await keys()).toEqual([`${key}.json`, `${key}.png`]);
+  });
+
+  it('the cron does not free a lock someone took over after it looked', async () => {
+    await setCell('goteborg-norr', 1, 1, { state: 'last', owner_id: 4242, owner_login: 'klang', locked_at: '2026-01-01T00:00:00Z', expires_at: '2026-01-03T00:00:00Z' });
+    const db = {
+      prepare: (sql) => {
+        const real = env.DB.prepare(sql);
+        if (!sql.startsWith('SELECT sheet, col, row, owner_id')) return real;
+        return {
+          bind: (...args) => ({
+            all: async () => {
+              const out = await real.bind(...args).all();
+              // The takeover lands between the cron's read and its write.
+              await claimCell(env.DB, other, 'goteborg-norr', 1, 1, nowIso());
+              return out;
+            },
+          }),
+        };
+      },
+    };
+    await expireLocks(db, nowIso());
+    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'last', owner_id: 5151 });
+  });
+
+  it('a second /live with the same rev moves nothing', async () => {
+    await setCell('goteborg-norr', 1, 1, { state: 'godkand', owner_id: 4242, owner_login: 'klang' });
+    expect(await markLive(env.DB, 'goteborg-norr', [[1, 1]], 3, NOW)).toEqual({ ok: true, live: 1 });
+    await setCell('goteborg-norr', 2, 1, { state: 'godkand', owner_id: 4242, owner_login: 'klang' });
+    // The second call read the sheet before the first one bumped it.
+    const stale = {
+      prepare: (sql) => (sql.startsWith('SELECT rev FROM sheets') ? { bind: () => ({ first: async () => ({ rev: 0 }) }) } : env.DB.prepare(sql)),
+      batch: (s) => env.DB.batch(s),
+    };
+    expect(await markLive(stale, 'goteborg-norr', [[2, 1]], 3, NOW)).toMatchObject({ ok: false, status: 409 });
+    expect((await getCell('goteborg-norr', 2, 1)).state).toBe('godkand');
+  });
+
+  it('a reject that read an approved cell does not free it once it went live', async () => {
+    await setCell('goteborg-norr', 1, 1, { state: 'live', owner_id: 4242, owner_login: 'klang', live_at: NOW, inbox_key: 'goteborg-norr/1_1.aaaaaaaaaaaaaaaa.00000000' });
+    const stale = {
+      prepare: (sql) =>
+        sql.startsWith('SELECT state, owner_id, owner_login, inbox_key')
+          ? { bind: () => ({ first: async () => ({ state: 'godkand', owner_id: 4242, owner_login: 'klang', inbox_key: 'goteborg-norr/1_1.aaaaaaaaaaaaaaaa.00000000' }) }) }
+          : env.DB.prepare(sql),
+      batch: (s) => env.DB.batch(s),
+    };
+    expect(await rejectCell(stale, env.INKORG, 'goteborg-norr', 1, 1, 'fel', NOW)).toMatchObject({ ok: false, status: 409, code: 'changed_meanwhile' });
+    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'live', removed_at: null });
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM purge').first()).n).toBe(0);
+  });
+});
+
 describe('expired locks', () => {
   it('do not count against the limit and can be taken by someone else', async () => {
     await claimCell(env.DB, user, 'goteborg-norr', 0, 0, nowIso());
@@ -271,7 +336,7 @@ describe('admin actions', () => {
       prepare: (sql) => (sql.startsWith('SELECT state, owner_id FROM cells') ? { bind: () => ({ first: async () => ({ state: 'vantar', owner_id: 4242 }) }) } : env.DB.prepare(sql)),
       batch: (s) => env.DB.batch(s),
     };
-    await approveCell(db, 'goteborg-norr', 1, 1, NOW);
+    expect(await approveCell(db, 'goteborg-norr', 1, 1, NOW)).toMatchObject({ ok: false, code: 'not_waiting' });
     expect((await env.DB.prepare('SELECT approved_count FROM users WHERE github_id = 4242').first()).approved_count).toBe(0);
   });
 
