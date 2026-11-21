@@ -114,6 +114,27 @@ def _elements(data: dict[str, object]) -> list[dict[str, object]]:
     return elements
 
 
+def _merged_ways(elements: list[dict[str, object]]) -> dict[int, dict[str, object]]:
+    """Ways by id. Overpass can send one way twice, tagged and again as a bare relation member;
+    the tags and node list of whichever copy has them win, so a later bare copy loses nothing."""
+    ways: dict[int, dict[str, object]] = {}
+    for element in elements:
+        if element.get("type") != "way":
+            continue
+        ident = _ident(element)
+        earlier = ways.get(ident)
+        if earlier is None:
+            ways[ident] = element
+            continue
+        merged = dict(earlier)
+        if not _tags(earlier) and _tags(element):
+            merged["tags"] = element.get("tags")
+        if not _node_ids(earlier) and _node_ids(element):
+            merged["nodes"] = element.get("nodes")
+        ways[ident] = merged
+    return ways
+
+
 def _ident(element: dict[str, object]) -> int:
     ident = element.get("id")
     if isinstance(ident, bool) or not isinstance(ident, int):
@@ -169,7 +190,7 @@ def draw(
         for element in elements
         if element.get("type") == "node"
     }
-    ways = {_ident(element): element for element in elements if element.get("type") == "way"}
+    ways = _merged_ways(elements)
 
     def to_pixel(point_lat: float, point_lon: float) -> tuple[float, float]:
         return (point_lon - west) / (east - west) * cols, (north - point_lat) / (north - south) * rows
@@ -218,7 +239,7 @@ def draw(
     # Vegetation from OSM: crowns as a height field, lawns as a ground tint.
     tree_elements = _elements(trees)
     tnodes = {_ident(element): element for element in tree_elements if element.get("type") == "node"}
-    tways = {_ident(element): element for element in tree_elements if element.get("type") == "way"}
+    tways = _merged_ways(tree_elements)
     # One longitude scale per sheet keeps every cell on the same metre grid.
     cos_ref = math.cos(math.radians(lat if grid_lat is None else grid_lat))
     ppm_x = cols / ((east - west) * 111320.0 * cos_ref)
@@ -265,11 +286,37 @@ def draw(
             crowns.append(
                 (px, py, max(2.0, min(radius, 7.0)), max(5.0, min(tree_height, 22.0)), f"node:{_ident(element)}")
             )
+    # Tree areas: tagged ways, and multipolygon relations whose tags sit on the relation and
+    # whose closed member ways are the outer and inner rings.
+    areas: list[tuple[dict[str, object], list[list[tuple[float, float]]], list[list[tuple[float, float]]]]] = []
+    for rel in (element for element in tree_elements if element.get("type") == "relation"):
+        rel_tags = _tags(rel)
+        members = rel.get("members")
+        if rel_tags.get("type") != "multipolygon" or not isinstance(members, list):
+            continue
+        outers: list[list[tuple[float, float]]] = []
+        inners: list[list[tuple[float, float]]] = []
+        for member in members:
+            if not isinstance(member, dict) or member.get("type") != "way":
+                continue
+            ref = member.get("ref")
+            if isinstance(ref, bool) or not isinstance(ref, int) or ref not in tways:
+                continue
+            ring_ids = _node_ids(tways[ref])
+            if len(ring_ids) < 4 or ring_ids[0] != ring_ids[-1]:
+                continue
+            pts = ring_px(tways[ref])
+            if len(pts) >= 3:
+                (inners if member.get("role") == "inner" else outers).append(pts)
+        if outers:
+            areas.append((rel_tags, outers, inners))
     for way in tways.values():
         tree_tags = _tags(way)
         pts = ring_px(way)
         if len(pts) < 2:
             continue
+        if len(pts) >= 3:
+            areas.append((tree_tags, [pts], []))
         if tree_tags.get("natural") == "tree_row":
             for segment, ((x0, y0), (x1, y1)) in enumerate(zip(pts, pts[1:])):
                 seg_m = math.hypot((x1 - x0) / ppm_x, (y1 - y0) / ppm_y)
@@ -284,6 +331,7 @@ def draw(
                             f"row:{_ident(way)}:{segment}:{i}",
                         )
                     )
+    for tree_tags, outers, inners in areas:
         wood = tree_tags.get("natural") in ("wood", "scrub") or tree_tags.get("landuse") == "forest"
         lawn = (
             wood
@@ -291,11 +339,18 @@ def draw(
             or tree_tags.get("leisure") in ("park", "garden", "playground", "dog_park")
             or tree_tags.get("natural") == "grassland"
         )
-        if len(pts) >= 3 and lawn:
-            ldraw.polygon(pts, fill=255)
-        if len(pts) >= 3 and wood:
+        if lawn:
+            for ring in outers:
+                ldraw.polygon(ring, fill=255)
+            for ring in inners:
+                ldraw.polygon(ring, fill=0)
+        if wood:
             mask = Image.new("L", (cols, rows), 0)
-            ImageDraw.Draw(mask).polygon(pts, fill=1)
+            mask_draw = ImageDraw.Draw(mask)
+            for ring in outers:
+                mask_draw.polygon(ring, fill=1)
+            for ring in inners:
+                mask_draw.polygon(ring, fill=0)
             occupied = np.asarray(mask, dtype=bool)
             for i, j, gx, gy in world_grid(5.0):
                 xi, yi = int(gx), int(gy)
@@ -403,14 +458,18 @@ def draw(
     cid = np.asarray(crown_id, dtype=np.int32)
     on_building = ids > 0
     crown_h = np.where(on_building, 0.0, crown_h)
-    crown_table = np.array([(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)] + expanded, dtype=np.float32)
+    # float64: the table holds this cell's photo x, which differs by 1024 between east-west
+    # neighbours; float32 would round the same tree differently in each cell.
+    crown_table = np.array([(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)] + expanded, dtype=np.float64)
     grid_y, grid_x = np.mgrid[0:rows, 0:cols]
     distance = np.hypot((grid_x - crown_table[cid, 0]) / ppm_x, (grid_y - crown_table[cid, 1]) / ppm_y) / np.maximum(
         crown_table[cid, 2], 1e-3
     )
     crown_h = np.where(crown_h > 0, crown_h * (0.78 + 0.22 * np.sqrt(np.clip(1 - distance**2, 0, 1))), 0.0)
     lawn = (np.asarray(lawn_img) > 0) & ~on_building
-    crown_lut = np.array([(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)] + expanded, dtype=np.float32)
+    # float64: the table holds this cell's photo x, which differs by 1024 between east-west
+    # neighbours; float32 would round the same tree differently in each cell.
+    crown_lut = np.array([(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)] + expanded, dtype=np.float64)
 
     # Crown colour: a green per tree, lit from the top of the crown, textured by the photo.
     greens = np.array(
