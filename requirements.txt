@@ -4,8 +4,9 @@ diffusers @ git+https://github.com/huggingface/diffusers.git@8c54b38fea3d624d23d
 transformers>=5.17.0
 accelerate
 bitsandbytes
-pillow
+# Pinned: the source render must be pixel-identical on every machine.
+pillow==13.0.0
 sentencepiece
 peft
 protobuf
-numpy
+numpy==2.4.6

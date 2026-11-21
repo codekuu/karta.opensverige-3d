@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-render = ["pillow", "numpy"]
+render = ["pillow==13.0.0", "numpy==2.4.6"]
 
 [project.scripts]
 rutor = "rutor.__main__:main"
