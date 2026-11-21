@@ -138,9 +138,11 @@ describe('PUT /v1/upload', () => {
   });
 
   it('limits a new user to 20 uploads a day', async () => {
+    // The route counts from the real clock, so the uploads must be recent in real time.
+    const anHourAgo = new Date(Date.now() - 3600 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
     const statements = [];
     for (let i = 0; i < 20; i += 1) {
-      statements.push(env.DB.prepare("INSERT INTO events (at, github_id, login, action, sheet, col, row) VALUES (?, 4242, 'klang', 'upload', 'goteborg-norr', 0, 0)").bind('2026-11-17T01:00:00Z'));
+      statements.push(env.DB.prepare("INSERT INTO events (at, github_id, login, action, sheet, col, row) VALUES (?, 4242, 'klang', 'upload', 'goteborg-norr', 0, 0)").bind(anHourAgo));
     }
     await env.DB.batch(statements);
     await claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW);

@@ -33,7 +33,7 @@ The source render comes from open data: Göteborgs Stad orthophoto (CC0) and Ope
 
 ## The redraw is long
 
-One cell takes about an hour. The redraw prints `encode window i/n` while it works.
+One cell takes about two minutes on a 12 GB card, plus the model download the first time. The redraw prints `encode window i/n` while it works.
 
 - Run it once and wait. Do not start a second run.
 - Do not treat a quiet minute as a hang.

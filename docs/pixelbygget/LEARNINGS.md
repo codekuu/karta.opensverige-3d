@@ -2,6 +2,13 @@
 
 What we tried, what we measured and what we changed. Newest first. One entry per finding, with the number that decided it. Images, renders and raw logs stay outside the repository; this file keeps the conclusions.
 
+## 2026-11-21
+
+### Opening the repository
+- The full history was checked before going public: no images, no keys, no env files, 29 KB packed. The Google-era plate pipeline only exists on the branch `cursor/plate-pipeline-7eb5`, as code.
+- A service test seeded uploads at a fixed date while the route counts the last 24 hours from the real clock, so it failed from 2026-11-18. Tests that meet the real clock must seed relative to it.
+- Pull requests now run both test suites in GitHub Actions (`.github/workflows/tests.yml`). The CLI tests need only Pillow and numpy, no GPU and no model.
+
 ## 2026-11-20
 
 ### First end-to-end contributor run

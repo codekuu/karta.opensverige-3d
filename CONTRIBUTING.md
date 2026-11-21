@@ -6,8 +6,8 @@ This page holds the rules. The commands and the install are in [README.md](READM
 
 ## Before you start
 
-- An NVIDIA GPU with CUDA. The redraw is aimed at 24 GB cards.
-- Time. On the maintainer's RTX 5070 one cell takes about an hour.
+- An NVIDIA GPU with CUDA and 12 GB of memory or more.
+- Time. One cell takes about two minutes on an RTX 5070 or an L4.
 - About 20 GB of free disk for the model download.
 - Windows or Linux for the redraw. A Mac can log in, claim and check the price. It cannot redraw.
 - Python 3.11 or newer, and a GitHub account.
@@ -35,9 +35,20 @@ Each step is explained in [README.md](README.md).
 - Do not edit `cli/rutor/pipeline.py`, the redraw, or another contributor's cell. Found a bug? Open an issue.
 - Cannot finish? Give the cell back: `rutor release <sheet> <col>_<row>`.
 
+## Code contributions
+
+Code contributions are open now. GPU runs open when the service is live.
+
+- Pick an issue, or open one before a large change.
+- Branch from `main` and open a pull request against `main`.
+- Run the tests before you push: `cd cli && python3 -m unittest discover -s tests` and `cd service && npm test`.
+- A source render must stay identical between neighbouring cells. Add a test when you change `cli/rutor/renderer/`.
+- Write what you learned in `docs/pixelbygget/LEARNINGS.md`, newest first.
+- Never commit images, model weights or keys.
+
 ## How to report
 
-Open an issue on <https://github.com/Baltsar/karta.opensverige-3d/issues>. Include the command, the exit code and the `error:` line. Do not paste your GitHub token.
+Open an issue on <https://github.com/opensverige/karta.opensverige-3d/issues>. Include the command, the exit code and the `error:` line. Do not paste your GitHub token.
 
 ## Licence and credit
 

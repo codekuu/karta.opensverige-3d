@@ -2,6 +2,14 @@
 
 Pixelbygget is the volunteer grid for the OpenSverige map. A city is a sheet of cells. You claim one cell from the service, render it on your own machine, redraw it as pixel art, and upload the PNG. The service keeps the lock, the review queue and the address of the cell on the map.
 
+## Status
+
+Code contributions are open now: the renderer, the open-data sources, the quality check and the docs. GPU contributions open when the service is live. Until then `rutor login` has no service to talk to.
+
+Start with an issue labelled `good first issue`. Open a pull request against `main`. The tests must pass.
+
+## What this is
+
 This repository is the `rutor` tool and the pinned redraw pipeline. You do not push claims or tiles with git. The PNG you upload is the only thing that leaves your machine, and it is the redraw, not the source render.
 
 Run the tool from `cli/` with `python -m rutor`, or install it into the virtualenv with `python -m pip install -e cli` and then call `rutor`. Output lines look like `claimed: goteborg-norr 64_59 expires 2026-11-19T12:00:00Z`. An agent reads [AGENTS.md](AGENTS.md) before it runs anything. The rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -24,7 +32,7 @@ rutor upload goteborg-norr 64_59
 
 ## Setup
 
-Use Python 3.11 or newer. NVIDIA CUDA is required for the redraw. The 4-bit checkpoint is a bitsandbytes quant. The redraw is aimed at 24 GB cards. On the maintainer's RTX 5070 one cell takes about an hour.
+Use Python 3.11 or newer. NVIDIA CUDA is required for the redraw. The 4-bit checkpoint is a bitsandbytes quant. A 12 GB card is enough: the redraw peaks at about 11 GB. One cell takes about two minutes on an RTX 5070 or an L4.
 
 Install a CUDA build of PyTorch first, then the rest, so a later install does not replace it with a CPU wheel. If the CUDA 12.8 index does not match your driver, use the current index from <https://pytorch.org>.
 
@@ -38,7 +46,7 @@ The Qwen Research License applies to those weights. They are not copied into thi
 ### Windows (PowerShell)
 
 ```powershell
-git clone https://github.com/Baltsar/karta.opensverige-3d
+git clone https://github.com/opensverige/karta.opensverige-3d
 cd karta.opensverige-3d
 py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -58,7 +66,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ### Linux
 
 ```bash
-git clone https://github.com/Baltsar/karta.opensverige-3d
+git clone https://github.com/opensverige/karta.opensverige-3d
 cd karta.opensverige-3d
 python3 -m venv .venv
 source .venv/bin/activate
@@ -72,7 +80,7 @@ rutor preflight
 ### macOS
 
 ```bash
-git clone https://github.com/Baltsar/karta.opensverige-3d
+git clone https://github.com/opensverige/karta.opensverige-3d
 cd karta.opensverige-3d
 python3 -m venv .venv
 source .venv/bin/activate
