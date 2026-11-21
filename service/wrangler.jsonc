@@ -1,0 +1,37 @@
+// The Worker pixelbygget: rut-tjänsten. Locks grid cells, takes cell uploads into the inbox
+// bucket, serves the grid, and lets the admin review. The rules are in src/index.js and the
+// design in docs/superpowers/specs/2026-11-17-pixelbygget-design.md.
+//
+// Deploy: npx wrangler@4.163.0 deploy (Node 22 or newer, logged in with wrangler login).
+// Tests:  npx vitest run
+{
+  "name": "pixelbygget",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "upload_source_maps": true,
+
+  "d1_databases": [
+    { "binding": "DB", "database_name": "pixelbygget", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "INKORG", "bucket_name": "pixelbygget-inkorg" }
+  ],
+  "kv_namespaces": [
+    { "binding": "GH", "id": "00000000000000000000000000000000" }
+  ],
+  // 60 requests per minute per client, counted per Cloudflare location, as in pixelkarta.
+  "ratelimits": [
+    { "name": "TAKT", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } }
+  ],
+  "triggers": { "crons": ["0 * * * *"] },
+
+  "vars": {
+    // GitHub user id of the one admin. Set the real id before deploy.
+    "ADMIN_GITHUB_ID": "0",
+    // "1" closes the service: every request but GET gets 503.
+    "PIXELBYGGET_STANGD": "0",
+    // Origins that may read GET endpoints from a browser, comma separated.
+    "ALLOWED_ORIGINS": "https://karta.opensverige.se, https://techembassy.se, https://www.techembassy.se"
+  }
+}

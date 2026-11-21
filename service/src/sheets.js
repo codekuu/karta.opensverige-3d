@@ -1,0 +1,193 @@
+/* Sheets and the grid: what the build page and the CLI read, and how the admin opens a sheet
+   and seeds the cells that are already drawn. */
+
+import { requireAdmin } from './auth.js';
+import { logEvent } from './cells.js';
+import { error, json } from './db.js';
+
+const BATCH = 500;
+const SHEET_FIELDS = [
+  ['id', (v) => typeof v === 'string' && /^[a-z0-9-]+$/.test(v)],
+  ['city', (v) => typeof v === 'string' && /^[a-z0-9-]+$/.test(v)],
+  ['name', (v) => typeof v === 'string' && v.length > 0],
+  ['cols', (v) => Number.isInteger(v) && v > 0],
+  ['rows', (v) => Number.isInteger(v) && v > 0],
+  ['origin_lat', (v) => typeof v === 'number'],
+  ['origin_lon', (v) => typeof v === 'number'],
+  ['x_meters', (v) => typeof v === 'number'],
+  ['y_meters', (v) => typeof v === 'number'],
+  ['ground_height', (v) => typeof v === 'number'],
+  ['dzi_levels', (v) => Number.isInteger(v) && v > 0],
+  ['pipeline', (v) => typeof v === 'string' && v.length > 0],
+  ['queue_order', (v) => Number.isInteger(v)],
+  ['state', (v) => ['queued', 'open', 'done'].includes(v)],
+];
+
+/**
+ * Inserts a sheet and all its cells: fri inside the mask, ute outside. Nothing is written on
+ * refusal. A sheet that exists with fewer cells than cols × rows (a run that broke half way)
+ * is resumed: the missing cells are written and the answer says resumed.
+ * @param {D1Database} db
+ * @param {object} body
+ * @param {string} now
+ * @returns {Promise<{ ok: true, cells: number, fri: number, resumed?: boolean } | { ok: false, status: number, code: string, field?: string }>}
+ */
+export async function openSheet(db, body, now) {
+  if (!body || typeof body !== 'object') return { ok: false, status: 400, code: 'bad_body', field: 'body' };
+  for (const [field, valid] of SHEET_FIELDS) {
+    if (!valid(body[field])) return { ok: false, status: 400, code: 'bad_body', field };
+  }
+  const { cols, rows } = body;
+  if (!Array.isArray(body.mask)) return { ok: false, status: 400, code: 'bad_body', field: 'mask' };
+  const inMask = new Set();
+  for (const entry of body.mask) {
+    const [col, row] = Array.isArray(entry) ? entry : [];
+    if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0 || col >= cols || row >= rows) {
+      return { ok: false, status: 400, code: 'bad_body', field: 'mask' };
+    }
+    inMask.add(`${col}_${row}`);
+  }
+  const exists = await db.prepare('SELECT cols, rows FROM sheets WHERE id = ?').bind(body.id).first();
+  let resumed = false;
+  if (exists) {
+    const have = await db.prepare('SELECT COUNT(*) AS n FROM cells WHERE sheet = ?').bind(body.id).first();
+    if (have.n >= exists.cols * exists.rows) return { ok: false, status: 409, code: 'exists' };
+    if (exists.cols !== cols || exists.rows !== rows) return { ok: false, status: 409, code: 'exists' };
+    resumed = true;
+  }
+  const statements = [];
+  if (!resumed) {
+    statements.push(
+      db
+        .prepare(
+          'INSERT INTO sheets (id, city, name, cols, rows, origin_lat, origin_lon, x_meters, y_meters, ground_height, dzi_levels, pipeline, state, queue_order, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
+        )
+        .bind(body.id, body.city, body.name, cols, rows, body.origin_lat, body.origin_lon, body.x_meters, body.y_meters, body.ground_height, body.dzi_levels, body.pipeline, body.state, body.queue_order),
+    );
+  }
+  const insert = db.prepare('INSERT OR IGNORE INTO cells (sheet, col, row, state, updated_at) VALUES (?, ?, ?, ?, ?)');
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      statements.push(insert.bind(body.id, col, row, inMask.has(`${col}_${row}`) ? 'fri' : 'ute', now));
+    }
+  }
+  for (let i = 0; i < statements.length; i += BATCH) {
+    await db.batch(statements.slice(i, i + BATCH));
+  }
+  const result = { ok: true, cells: cols * rows, fri: inMask.size };
+  if (resumed) result.resumed = true;
+  return result;
+}
+
+/**
+ * Marks cells that are already drawn as live, credited to a login. Every cell must be fri.
+ * @param {D1Database} db
+ * @param {string} sheet
+ * @param {Array<[number, number]>} cells
+ * @param {string} login
+ * @param {number} githubId
+ * @param {string} now
+ * @returns {Promise<{ ok: true, live: number } | { ok: false, status: number, code: string, cell?: string }>}
+ */
+export async function seedCells(db, sheet, cells, login, githubId, now) {
+  for (const [col, row] of cells) {
+    const cell = await db.prepare('SELECT state FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
+    if (!cell || cell.state !== 'fri') return { ok: false, status: 422, code: 'seed_outside_mask', cell: `${col}_${row}` };
+  }
+  const update = db.prepare(
+    "UPDATE cells SET state = 'live', owner_id = ?, owner_login = ?, approved_at = ?, live_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'fri'",
+  );
+  const statements = cells.map(([col, row]) => update.bind(githubId, login, now, now, now, sheet, col, row));
+  for (let i = 0; i < statements.length; i += BATCH) {
+    await db.batch(statements.slice(i, i + BATCH));
+  }
+  return { ok: true, live: cells.length };
+}
+
+/** POST /v1/sheets, admin. */
+export const openSheetRoute = requireAdmin(async (request, env, ctx, params, now, admin) => {
+  const body = await request.json().catch(() => null);
+  const r = await openSheet(env.DB, body, now);
+  if (!r.ok) {
+    if (r.code === 'exists') return error(409, 'exists', 'A sheet with that id already exists.');
+    return error(400, 'bad_body', `The field ${r.field} is missing or wrong.`);
+  }
+  await logEvent(env.DB, { at: now, github_id: admin.github_id, login: admin.login, action: 'open_sheet', sheet: body.id, detail: `${r.fri} of ${r.cells} cells` });
+  return json(201, r);
+});
+
+/** POST /v1/seed, admin. */
+export const seedRoute = requireAdmin(async (request, env, ctx, params, now, admin) => {
+  const body = await request.json().catch(() => null);
+  const cellsOk = body && Array.isArray(body.cells) && body.cells.every((c) => Array.isArray(c) && c.length === 2 && Number.isInteger(c[0]) && Number.isInteger(c[1]));
+  if (!cellsOk || typeof body.sheet !== 'string' || typeof body.login !== 'string' || !Number.isInteger(body.github_id)) {
+    return error(400, 'bad_body', 'Send JSON with sheet, cells as [[col,row],...], login and github_id.');
+  }
+  const r = await seedCells(env.DB, body.sheet, body.cells, body.login, body.github_id, now);
+  if (!r.ok) return error(r.status, r.code, `Cell ${r.cell} is not free, so nothing was seeded.`);
+  await logEvent(env.DB, { at: now, github_id: admin.github_id, login: admin.login, action: 'seed', sheet: body.sheet, detail: `${r.live} cells to ${body.login}` });
+  return json(200, r);
+});
+
+const GRID_CACHE = { 'Cache-Control': 'public, max-age=60' };
+
+/**
+ * Every sheet with how many cells are live (done) and how many count at all (total:
+ * everything but ute), in queue order.
+ * @param {D1Database} db
+ * @returns {Promise<Array<import('./db.js').Sheet & { done: number, total: number }>>}
+ */
+export async function listSheets(db) {
+  const { results } = await db
+    .prepare(
+      `SELECT s.*,
+         (SELECT COUNT(*) FROM cells c WHERE c.sheet = s.id AND c.state = 'live') AS done,
+         (SELECT COUNT(*) FROM cells c WHERE c.sheet = s.id AND c.state != 'ute') AS total
+       FROM sheets s ORDER BY s.queue_order, s.id`,
+    )
+    .all();
+  return results;
+}
+
+/**
+ * The sheet and all its cells as compact rows [col, row, state, owner_login, updated_at].
+ * @param {D1Database} db
+ * @param {string} sheetId
+ * @returns {Promise<{ sheet: import('./db.js').Sheet, cells: Array<[number, number, string, string|null, string]> } | null>}
+ */
+export async function getGrid(db, sheetId) {
+  const sheet = await db.prepare('SELECT * FROM sheets WHERE id = ?').bind(sheetId).first();
+  if (!sheet) return null;
+  const { results } = await db
+    .prepare('SELECT col, row, state, owner_login, updated_at FROM cells WHERE sheet = ? ORDER BY row, col')
+    .bind(sheetId)
+    .all();
+  return { sheet, cells: results.map((c) => [c.col, c.row, c.state, c.owner_login, c.updated_at]) };
+}
+
+/** GET /v1/sheets */
+export async function sheetsRoute(request, env) {
+  return json(200, { sheets: await listSheets(env.DB) }, GRID_CACHE);
+}
+
+/** GET /v1/cities: sheets grouped by city, first sheet's queue order first. */
+export async function citiesRoute(request, env) {
+  const sheets = await listSheets(env.DB);
+  /** @type {Map<string, { id: string, name: string, sheets: object[], done: number, total: number }>} */
+  const cities = new Map();
+  for (const s of sheets) {
+    const city = cities.get(s.city) || { id: s.city, name: s.name, sheets: [], done: 0, total: 0 };
+    city.sheets.push(s);
+    city.done += s.done;
+    city.total += s.total;
+    cities.set(s.city, city);
+  }
+  return json(200, { cities: [...cities.values()] }, GRID_CACHE);
+}
+
+/** GET /v1/grid/:sheet */
+export async function gridRoute(request, env, ctx, params) {
+  const grid = await getGrid(env.DB, params.sheet);
+  if (!grid) return error(404, 'no_sheet', `No sheet named ${params.sheet}.`);
+  return json(200, grid, GRID_CACHE);
+}
