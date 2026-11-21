@@ -10,8 +10,8 @@ STEP = 512
 
 PINS: dict[str, str] = {
     "model_revision": "",
-    "lora_sha256": "",
-    "diffusers_commit": "",
+    "lora_revision": "",
+    "diffusers_version": "",
 }
 
 
@@ -25,6 +25,7 @@ def prompt_for(city_name: str) -> str:
 def check_pins(found: dict[str, str]) -> list[str]:
     mismatched: list[str] = []
     for name, pin in PINS.items():
-        if pin and found.get(name) != pin:
+        # A pin is only checked against a value that was actually found.
+        if pin and name in found and found[name] != pin:
             mismatched.append(name)
     return mismatched

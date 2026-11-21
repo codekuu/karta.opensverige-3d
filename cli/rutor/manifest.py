@@ -41,9 +41,10 @@ def build_manifest(
     source: dict[str, str],
     gpu: str,
     rendered_at: str,
+    source_sha256: str | None = None,
 ) -> dict[str, object]:
     width, height = png_size(png)
-    return {
+    manifest: dict[str, object] = {
         "pipeline": pipeline,
         "seed": seed,
         "sha256": sha256_file(png),
@@ -53,6 +54,10 @@ def build_manifest(
         "gpu": gpu,
         "renderedAt": rendered_at,
     }
+    # Ties the redrawn PNG to the source it was redrawn from.
+    if source_sha256 is not None:
+        manifest["source_sha256"] = source_sha256
+    return manifest
 
 
 def encode_manifest(manifest: dict[str, object]) -> str:

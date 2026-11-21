@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import sys
+import urllib.parse
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
 from rutor import api, config, pipeline, redraw_core
-from rutor.errors import RutorError, bad_input, check_failed, environment, network, refused
-from rutor.manifest import build_manifest, encode_manifest, png_size, write_manifest
+from rutor.errors import RutorError, bad_input, check_failed, environment, network, refused, wait
+from rutor.manifest import build_manifest, encode_manifest, png_size, sha256_file, write_manifest
 from rutor.check import problems as check_problems
 from rutor.render import render_cell
+from rutor.renderer.sources import ortho_source, osm_date
 
 
 def require_token() -> str:
@@ -165,7 +169,14 @@ def cmd_whoami(args: argparse.Namespace) -> int:
     del args
     token = require_token()
     _status, body = api.get("/v1/me", token=token)
-    print(f"login: {_object(body, 'object').get('login')}")
+    payload = _object(body, "object")
+    print(f"login: {payload.get('login')}")
+    trusted = payload.get("trusted")
+    if isinstance(trusted, (bool, int)):
+        print(f"trusted: {'yes' if trusted else 'no'}")
+    approved = payload.get("approved_count")
+    if isinstance(approved, int) and not isinstance(approved, bool):
+        print(f"approved: {approved}")
     return 0
 
 
@@ -261,8 +272,20 @@ def cmd_render(args: argparse.Namespace) -> int:
     sheet = _sheet_body(token, args.sheet)
     out = config.work_dir(args.sheet) / f"{col}_{row}.src.png"
     render_cell(sheet, col, row, out)
+    _write_source_info(args.sheet, out)
     print(f"rendered: {args.sheet} {col}_{row} {out}")
     return 0
+
+
+def _write_source_info(sheet_id: str, png: Path) -> None:
+    """Record what the source PNG was made from, next to the PNG itself."""
+    source = ortho_source(sheet_id)
+    info = {
+        "provider": f"{urllib.parse.urlsplit(source.endpoint).netloc} {source.layer}",
+        "version": f"osm {osm_date(sheet_id)}; ortho {source.layer}",
+        "sha256": sha256_file(png),
+    }
+    png.with_suffix(".json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
 
 
 def _se3_main() -> Callable[..., int]:
@@ -283,10 +306,17 @@ def _se3_main() -> Callable[..., int]:
 
 
 def _report_pins() -> None:
-    found = {name: "" for name in pipeline.PINS}
+    unset = [name for name, pin in pipeline.PINS.items() if not pin]
+    if unset:
+        print("pin: unset " + ", ".join(unset))
+    found: dict[str, str] = {}
+    try:
+        found["diffusers_version"] = importlib.metadata.version("diffusers")
+    except importlib.metadata.PackageNotFoundError as exc:
+        # An empty pin cannot mismatch, so it does not block either.
+        if pipeline.PINS.get("diffusers_version"):
+            raise environment("pin mismatch: diffusers_version, but diffusers is not installed") from exc
     mismatched = pipeline.check_pins(found)
-    if any(pin == "" for pin in pipeline.PINS.values()):
-        print("pin: unset")
     if mismatched:
         raise environment("pin mismatch: " + ", ".join(mismatched))
 
@@ -359,6 +389,25 @@ def _record_check(manifest: dict[str, object], found: list[str]) -> None:
         print("check: ok")
 
 
+def _require_source_unchanged(
+    directory: Path,
+    col: int,
+    row: int,
+    manifest: dict[str, object],
+    sheet_id: str,
+) -> None:
+    recorded = manifest.get("source_sha256")
+    if not isinstance(recorded, str) or not recorded:
+        # A manifest from 0.1.0 has no source sha to compare with.
+        return
+    src = directory / f"{col}_{row}.src.png"
+    if not src.is_file() or sha256_file(src) != recorded:
+        raise bad_input(
+            f"{sheet_id} {col}_{row}: the source was rendered again after the redraw: "
+            f"run rutor redraw {sheet_id} {col}_{row}"
+        )
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     col, row = parse_cell(args.cell)
     directory = config.work_dir(args.sheet)
@@ -366,20 +415,33 @@ def cmd_check(args: argparse.Namespace) -> int:
     if not manifest_path.is_file():
         raise bad_input(f"missing {manifest_path.name}: run rutor redraw {args.sheet} {col}_{row} first")
     manifest = _read_manifest(manifest_path)
+    _require_source_unchanged(directory, col, row, manifest, args.sheet)
     found = _check_cell(directory, col, row)
     _record_check(manifest, found)
+    # The PNG is what the upload sends, so the manifest describes this file, not the old one.
+    manifest["sha256"] = sha256_file(directory / f"{col}_{row}.png")
     write_manifest(manifest, manifest_path)
     if found:
         raise check_failed(f"{args.sheet} {col}_{row} failed the quality check; do not upload it")
     return 0
 
 
+def _default_seed(sheet_id: str, col: int, row: int) -> int:
+    digest = hashlib.sha256(f"{sheet_id}:{col}_{row}".encode()).digest()
+    return int.from_bytes(digest[:4], "big")
+
+
 def cmd_redraw(args: argparse.Namespace) -> int:
     col, row = parse_cell(args.cell)
     if args.wait_for_cheap:
         code = int(_se3_main()())
+        if code == 2:
+            raise wait("the SE3 price is high: keep your lock and run rutor redraw --wait-for-cheap again after the cheap hour")
         if code != 0:
-            return code
+            raise network(
+                "the public SE3 price could not be read: keep your lock and try again later, "
+                "or run rutor redraw without --wait-for-cheap"
+            )
     message = redraw_core.preflight_message()
     if message:
         raise environment(message)
@@ -393,7 +455,7 @@ def cmd_redraw(args: argparse.Namespace) -> int:
     name = sheet.get("name")
     if not isinstance(name, str) or not name:
         raise bad_input(f"sheet {args.sheet} has no name")
-    seed = args.seed if isinstance(args.seed, int) else None
+    seed = args.seed if isinstance(args.seed, int) else _default_seed(args.sheet, col, row)
     try:
         image = redraw_core.redraw_image(_open_image(src), pipeline.prompt_for(name), seed)
     except ValueError as exc:
@@ -408,6 +470,7 @@ def cmd_redraw(args: argparse.Namespace) -> int:
         source=_source_info(directory / f"{col}_{row}.src.json"),
         gpu=_gpu_name(),
         rendered_at=rendered_at,
+        source_sha256=sha256_file(src),
     )
     print(f"redrawn: {args.sheet} {col}_{row} {out}")
     found = _check_cell(directory, col, row)
@@ -442,6 +505,13 @@ def cmd_upload(args: argparse.Namespace) -> int:
     told_h = manifest.get("height")
     if told_w != width or told_h != height:
         raise bad_input(f"{png.name} is {width}x{height} but the manifest says {told_w}x{told_h}")
+    recorded_png = manifest.get("sha256")
+    if isinstance(recorded_png, str) and recorded_png and recorded_png != sha256_file(png):
+        raise bad_input(
+            f"{png.name}: the PNG changed after the manifest was written: "
+            f"run rutor check {args.sheet} {col}_{row}"
+        )
+    _require_source_unchanged(directory, col, row, manifest, args.sheet)
     if manifest.get("check") != "ok":
         raise check_failed(f"{args.sheet} {col}_{row} has not passed rutor check: run rutor check {args.sheet} {col}_{row}")
     _status, body = api.put_bytes(

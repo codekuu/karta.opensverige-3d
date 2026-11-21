@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -48,6 +49,10 @@ def _exchange(
             exc.close()
     except urllib.error.URLError as exc:
         raise network(f"could not reach the service ({exc.reason})") from exc
+    # A read timeout is a TimeoutError, not a URLError, so it needs its own
+    # clause; a dropped connection and a broken HTTP stream are the same story.
+    except (TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+        raise network(f"could not reach the service ({exc.__class__.__name__}: {exc})") from exc
 
 
 def _parse(status: int, raw: bytes) -> object:
