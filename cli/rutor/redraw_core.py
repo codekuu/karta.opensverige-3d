@@ -1,15 +1,16 @@
 """Redraw core moved verbatim from scripts/redraw_tile.py.
 
 The bodies of the moved functions are unchanged. redraw_image is the same
-pad, encode, denoise, decode and crop, without a district, a claim or a file.
+pad, encode, denoise, decode and crop, without a cell, a claim or a file.
 """
 
 from __future__ import annotations
 
 import sys
 
-MODEL_ID = "addlabsviral/Qwen-Image-2.1-Turbo-4bit"
-LORA_ID = "handful/mndf-pixel-qwen-image-2.1"
+from rutor.errors import environment
+from rutor.pipeline import LORA_ID, MODEL_ID, PINS
+
 WINDOW = 1024
 STEP = 512
 VAE_ALIGN = 32
@@ -89,18 +90,19 @@ def preflight_message() -> str | None:
     if not torch.cuda.is_available():
         if sys.platform == "darwin":
             return (
-                "No NVIDIA CUDA GPU is visible. macOS can clone, install, check the SE3 price, and list districts. "
+                "No NVIDIA CUDA GPU is visible. macOS can clone, install, check the SE3 price, and list sheets. "
                 "The 4-bit checkpoint is a bitsandbytes quant and the redraw runs on CUDA. "
-                "Do not claim a district on this Mac."
+                "Do not claim a cell on this Mac."
             )
         return (
             "No NVIDIA CUDA GPU is visible. Install a CUDA build of PyTorch and check the driver. "
-            "Do not claim a district until preflight passes."
+            "Do not claim a cell until preflight passes."
         )
     try:
-        import bitsandbytes  # noqa: F401
+        import bitsandbytes
     except ImportError:
         return "bitsandbytes is not installed. Run pip install -r requirements.txt on this CUDA machine."
+    del bitsandbytes
     return None
 
 def _load_pipe():
@@ -108,16 +110,23 @@ def _load_pipe():
     from diffusers import QwenImage21Pipeline
 
     kwargs = {"low_cpu_mem_usage": True}
+    model_revision = PINS.get("model_revision", "")
+    if model_revision:
+        kwargs["revision"] = model_revision
     try:
         pipe = QwenImage21Pipeline.from_pretrained(MODEL_ID, dtype=torch.bfloat16, **kwargs)
     except TypeError:
         pipe = QwenImage21Pipeline.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, **kwargs)
+    lora_kwargs = {}
+    lora_revision = PINS.get("lora_revision", "")
+    if lora_revision:
+        lora_kwargs["revision"] = lora_revision
     try:
-        pipe.load_lora_weights(LORA_ID)
+        pipe.load_lora_weights(LORA_ID, **lora_kwargs)
     except Exception as exc:
-        raise SystemExit(
+        raise environment(
             f"Could not load LoRA {LORA_ID} on {MODEL_ID}. No PNG was written. "
-            f"Keep this district and retry after fixing the environment. ({exc.__class__.__name__}: {exc})"
+            f"Keep this cell and retry after fixing the environment. ({exc.__class__.__name__}: {exc})"
         ) from exc
     pipe.to("cuda")
     if hasattr(pipe.vae, "enable_tiling"):
@@ -137,7 +146,7 @@ def _prepare_window(pipe, crop, prompt: str, device, dtype):
     scale = pipe.vae_scale_factor
     target_tokens = (WINDOW // scale) * (WINDOW // scale)
     if target_tokens % 4 != 0:
-        raise RuntimeError("Window token count is not divisible by 4")
+        raise environment("Window token count is not divisible by 4")
     # Same target-slot extension as QwenImage21Pipeline.__call__.
     image_pad_mask = torch.cat(
         [image_pad_mask, image_pad_mask.new_ones(image_pad_mask.shape[0], target_tokens // 4)],
@@ -173,10 +182,10 @@ def _denoise(pipe, full, views, contexts, full_h: int, full_w: int, device, dtyp
 
     scale = pipe.vae_scale_factor
     if WINDOW % scale or STEP % scale:
-        raise RuntimeError(f"Window {WINDOW} and step {STEP} must be divisible by VAE scale {scale}")
+        raise environment(f"Window {WINDOW} and step {STEP} must be divisible by VAE scale {scale}")
     sigmas = pipe.config.sample_sigmas
     if not sigmas:
-        raise SystemExit("The Turbo checkpoint has no sample_sigmas. Refusing to invent a schedule.")
+        raise environment("The Turbo checkpoint has no sample_sigmas. Refusing to invent a schedule.")
     seq = (WINDOW // scale) * (WINDOW // scale)
     scheduler_config = pipe.scheduler.config
     mu = calculate_shift(
@@ -231,7 +240,7 @@ def _denoise(pipe, full, views, contexts, full_h: int, full_w: int, device, dtyp
                 )
                 del hidden, noise_pred, image_latents, crop
             if int((weight < 1).sum().item()) != 0:
-                raise RuntimeError("The window grid missed part of the tile. No PNG was written.")
+                raise environment("The window grid missed part of the tile. No PNG was written.")
             full = pipe.scheduler.step(acc / weight, timestep, full, return_dict=False)[0]
     return full
 

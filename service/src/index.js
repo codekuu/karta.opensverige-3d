@@ -2,7 +2,7 @@
 
    Routes live under /v1. Each handler is called as
    handler(request, env, ctx, params, now) and returns a Response. The order in fetch is:
-   kill switch, rate limit, router, cors. See the design document for the rules.
+   kill switch, rate limit, router, cors. See docs/pixelbygget/DESIGN.md for the rules.
 
    Kill switch: PIXELBYGGET_STANGD="1" answers 503 to everything but GET, so the grid stays
    readable while uploads and claims are paused.
@@ -11,11 +11,19 @@
    pixelkarta. The key is the client address, IPv6 as its /64. Without the binding or when the
    limiter fails the answer is "not over": the rate must never take the service down.
 
+   The admin passes the rate limit on admin routes when its token is already in the KV cache,
+   so the intake can fetch a long queue. The cache is only read for a request already over the
+   limit. Everyone else, admin routes included, is counted.
+
+   Public reads (/v1/sheets, /v1/cities, /v1/grid/*) are kept in memory per isolate for
+   PUBLIC_CACHE_SECONDS (default 60), so a busy map page does not read every cell from D1 on
+   every hit. The Cache API does not work on workers.dev, so this is the cache we have.
+
    CORS: GET answers carry Access-Control-Allow-Origin for an origin in ALLOWED_ORIGINS, so
    the build page can read the grid. Other methods are CLI calls and get no CORS headers. */
 
 import { approveRoute, blankedRoute, blockRoute, liveRoute, queueRoute, rejectRoute, trustRoute } from './admin.js';
-import { requireUser } from './auth.js';
+import { isCachedAdmin, requireUser } from './auth.js';
 import { error, json, nowIso } from './db.js';
 import { claimRoute, releaseRoute } from './cells.js';
 import { runCron } from './cron.js';
@@ -62,6 +70,48 @@ const routes = [
   ['POST', /^\/v1\/sheets$/, openSheetRoute],
   ['POST', /^\/v1\/seed$/, seedRoute],
 ];
+
+const ADMIN_PATH = /^\/v1\/(queue|inkorg\/.+|approve|reject|trust|block|live|blanked|seed)$/;
+const PUBLIC_READ = /^\/v1\/(sheets|cities|grid\/[a-z0-9-]+)$/;
+const PUBLIC_CACHE_MAX = 64;
+/** @type {Map<string, { until: number, status: number, body: string, headers: [string, string][] }>} */
+const publicCache = new Map();
+
+/** Empties the in-memory cache of public reads. For tests. */
+export function clearPublicCache() {
+  publicCache.clear();
+}
+
+/**
+ * Seconds a public read is kept in memory.
+ * @param {import('./db.js').Env} env
+ * @returns {number}
+ */
+function publicSeconds(env) {
+  const raw = Number(env.PUBLIC_CACHE_SECONDS ?? 60);
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+/**
+ * Answers a public read from memory, or runs it and keeps a 200 answer for the window.
+ * @param {string} pathname
+ * @param {import('./db.js').Env} env
+ * @param {() => Promise<Response>} run
+ * @returns {Promise<Response>}
+ */
+async function cachedPublic(pathname, env, run) {
+  const seconds = publicSeconds(env);
+  if (!seconds) return run();
+  const hit = publicCache.get(pathname);
+  if (hit && hit.until > Date.now()) return new Response(hit.body, { status: hit.status, headers: hit.headers });
+  const response = await run();
+  if (response.status !== 200) return response;
+  const body = await response.text();
+  const headers = [...response.headers.entries()];
+  if (publicCache.size >= PUBLIC_CACHE_MAX) publicCache.delete(publicCache.keys().next().value);
+  publicCache.set(pathname, { until: Date.now() + seconds * 1000, status: 200, body, headers });
+  return new Response(body, { status: 200, headers });
+}
 
 /**
  * Finds the first route matching the method and path.
@@ -153,13 +203,15 @@ export default {
     if (env.PIXELBYGGET_STANGD === '1' && request.method !== 'GET') {
       return withCors(error(503, 'closed', 'Pixelbygget is closed for the moment. Try again later.', { 'Retry-After': '300' }), request, env);
     }
-    if (await overRate(env, clientKey(request))) {
+    if ((await overRate(env, clientKey(request))) && !(ADMIN_PATH.test(url.pathname) && (await isCachedAdmin(request, env)))) {
       return withCors(error(429, 'rate_limited', 'Too many requests. Wait half a minute.', { 'Retry-After': '30' }), request, env);
     }
     const route = match(request.method, url.pathname);
     let response;
     try {
-      response = route ? await route.handler(request, env, ctx, route.params, now) : error(404, 'not_found', 'No such route.');
+      if (!route) response = error(404, 'not_found', 'No such route.');
+      else if (request.method === 'GET' && PUBLIC_READ.test(url.pathname)) response = await cachedPublic(url.pathname, env, () => route.handler(request, env, ctx, route.params, now));
+      else response = await route.handler(request, env, ctx, route.params, now);
     } catch (e) {
       // A storage outage or a dropped upload body ends here, as JSON the CLI can read.
       console.log(JSON.stringify({ fel: String(e), path: url.pathname, method: request.method }));

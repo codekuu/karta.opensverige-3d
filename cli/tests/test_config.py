@@ -26,6 +26,7 @@ class ConfigTests(unittest.TestCase):
                 os.environ[name] = value
         self.tmp.cleanup()
 
+    @unittest.skipIf(os.name == "nt", "Windows does not report POSIX file modes")
     def test_token_roundtrip_is_0600(self) -> None:
         write_token("github-token")
         path = Path(self.tmp.name) / "token"

@@ -1,6 +1,6 @@
 // The Worker pixelbygget: rut-tjänsten. Locks grid cells, takes cell uploads into the inbox
 // bucket, serves the grid, and lets the admin review. The rules are in src/index.js and the
-// design in docs/superpowers/specs/2026-11-17-pixelbygget-design.md.
+// design in docs/pixelbygget/DESIGN.md.
 //
 // Deploy: npx wrangler@4.163.0 deploy (Node 22 or newer, logged in with wrangler login).
 // Tests:  npx vitest run
@@ -31,6 +31,8 @@
     "ADMIN_GITHUB_ID": "0",
     // "1" closes the service: every request but GET gets 503.
     "PIXELBYGGET_STANGD": "0",
+    // Seconds a public read (sheets, cities, grid) is kept in memory per isolate. "0" turns it off.
+    "PUBLIC_CACHE_SECONDS": "60",
     // Origins that may read GET endpoints from a browser, comma separated.
     "ALLOWED_ORIGINS": "https://karta.opensverige.se, https://techembassy.se, https://www.techembassy.se"
   }

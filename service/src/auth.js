@@ -66,6 +66,26 @@ async function lookupGithub(token) {
 }
 
 /**
+ * True when the request carries a token the KV cache already knows as the admin's. It never
+ * asks GitHub, so it is cheap enough to run before the rate limit; a token GitHub has not
+ * vouched for in the last ten minutes simply does not pass.
+ * @param {Request} request
+ * @param {import('./db.js').Env} env
+ * @returns {Promise<boolean>}
+ */
+export async function isCachedAdmin(request, env) {
+  const token = bearer(request);
+  const admin = String(env.ADMIN_GITHUB_ID || '');
+  if (!token || !admin || admin === '0') return false;
+  try {
+    const identity = await env.GH.get('gh:' + (await sha256Hex(token)), 'json');
+    return Boolean(identity) && String(identity.id) === admin;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolves the caller to a user row, creating it on first sight.
  * Returns a Response when the caller must stop: 401 no_token, 401 bad_token, 403 blocked,
  * 503 github_down.

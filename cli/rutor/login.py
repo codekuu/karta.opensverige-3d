@@ -26,7 +26,7 @@ TERMS = "\n".join(
         "The PNG you upload is contributed under the MIT license.",
         "It may be shown on karta.opensverige.se.",
         "You are credited by your GitHub login.",
-        "You use your own Google key, on your own Google account, under your own agreement with Google.",
+        "The source render is built from open data and stays on your machine.",
     ]
 )
 

@@ -19,7 +19,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_check_pins_ignores_empty_pins(self) -> None:
         self.assertEqual(
-            check_pins({"model_revision": "abc", "lora_sha256": "def", "diffusers_commit": "fff"}),
+            check_pins({"model_revision": "abc", "lora_revision": "def", "diffusers_version": "fff"}),
             [],
         )
 
@@ -28,7 +28,7 @@ class PipelineTests(unittest.TestCase):
         PINS["model_revision"] = "pinned-hash"
         try:
             self.assertEqual(
-                check_pins({"model_revision": "other", "lora_sha256": "", "diffusers_commit": ""}),
+                check_pins({"model_revision": "other", "lora_revision": "", "diffusers_version": ""}),
                 ["model_revision"],
             )
         finally:

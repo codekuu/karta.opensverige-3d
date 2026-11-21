@@ -328,8 +328,8 @@ class RenderTests(unittest.TestCase):
             images.append(np.asarray(image.convert("RGB")).astype(np.int16))
         left = images[0][:, 1024:1536]
         right = images[1][:, 0:512]
-        same = (np.abs(left - right).sum(axis=-1) == 0).mean()
-        self.assertGreater(same, 0.999)
+        differing = int((np.abs(left - right).sum(axis=-1) != 0).sum())
+        self.assertEqual(differing, 0, f"{differing} pixels differ in the east-west overlap")
 
         # The cell to the south overlaps the bottom third of this window.
         c = camera_for(sheet, 64, 53)
@@ -348,8 +348,52 @@ class RenderTests(unittest.TestCase):
             sheet_x0=int(c["window_x0"]),
         )
         lower = np.asarray(below.convert("RGB")).astype(np.int16)
-        same_ns = (np.abs(images[0][1024:1536] - lower[0:512]).sum(axis=-1) == 0).mean()
-        self.assertGreater(same_ns, 0.999)
+        differing_ns = int((np.abs(images[0][1024:1536] - lower[0:512]).sum(axis=-1) != 0).sum())
+        self.assertEqual(differing_ns, 0, f"{differing_ns} pixels differ in the north-south overlap")
+
+    @unittest.skipUnless(DRAWING, "pillow and numpy are not installed")
+    def test_tree_areas_from_relations_and_repeated_ways(self) -> None:
+        import numpy as np
+        from PIL import Image
+
+        from rutor.renderer.draw import draw
+
+        camera = camera_for(_sheet(), 64, 52)
+        lat, lon = camera["center_lat"], camera["center_lon"]
+        d_lon = 60.0 / (111320.0 * math.cos(math.radians(lat)))
+        d_lat = 60.0 / 111320.0
+        ring = [
+            {"type": "node", "id": 1, "lat": lat - d_lat, "lon": lon - d_lon},
+            {"type": "node", "id": 2, "lat": lat - d_lat, "lon": lon + d_lon},
+            {"type": "node", "id": 3, "lat": lat + d_lat, "lon": lon + d_lon},
+            {"type": "node", "id": 4, "lat": lat + d_lat, "lon": lon - d_lon},
+        ]
+        orto = Image.new("RGB", (int(camera["ortho_width"]), int(camera["ortho_height"])), (120, 120, 110))
+
+        def render(trees: dict[str, object]) -> np.ndarray:
+            image = draw(
+                orto, {"elements": []}, trees, lat, lon,
+                camera["west"], camera["south"], camera["east"], camera["north"], camera["lift_m"],
+                grid_lat=57.707, sheet_x0=int(camera["window_x0"]),
+            )
+            return np.asarray(image.convert("RGB")).astype(np.int16)
+
+        bare = render({"elements": ring + [{"type": "way", "id": 30, "nodes": [1, 2, 3, 4, 1]}]})
+        # A forest mapped as a multipolygon: the tags sit on the relation, the way is untagged.
+        relation = render({
+            "elements": ring
+            + [
+                {"type": "way", "id": 30, "nodes": [1, 2, 3, 4, 1]},
+                {"type": "relation", "id": 40, "tags": {"type": "multipolygon", "landuse": "forest"},
+                 "members": [{"type": "way", "ref": 30, "role": "outer"}]},
+            ]
+        })
+        self.assertGreater(int((np.abs(relation - bare).sum(axis=-1) != 0).sum()), 1000)
+        # Overpass may send the same way twice, tagged and then as a bare member: tags must win.
+        tagged = {"type": "way", "id": 30, "nodes": [1, 2, 3, 4, 1], "tags": {"landuse": "forest"}}
+        once = render({"elements": ring + [tagged]})
+        twice = render({"elements": ring + [tagged, {"type": "way", "id": 30, "nodes": [1, 2, 3, 4, 1]}]})
+        self.assertEqual(int((np.abs(once - twice).sum(axis=-1) != 0).sum()), 0)
 
     def test_unknown_sheet_is_exit_3(self) -> None:
         sheet = _sheet()
@@ -398,9 +442,10 @@ class RenderTests(unittest.TestCase):
         load_sources("goteborg-norr", 64, 52, camera, fetch=fetch)
         self.assertEqual(calls["n"], 14)
         cache = self.root / "work" / "goteborg-norr" / "sources" / "64_52"
-        self.assertTrue((cache / "orto.png").is_file())
-        self.assertTrue((cache / "osm.json").is_file())
-        self.assertTrue((cache / "trees.json").is_file())
+        # The photo file is keyed by its box and layer, the OSM files by the pinned date.
+        self.assertEqual(len(list(cache.glob("orto_*.png"))), 1)
+        self.assertTrue((cache / "osm_2026-11-15T00-00-00Z.json").is_file())
+        self.assertTrue((cache / "trees_2026-11-15T00-00-00Z.json").is_file())
 
     @unittest.skipUnless(DRAWING, "pillow and numpy are not installed")
     def test_neighbours_share_photo_tiles_and_pixels(self) -> None:

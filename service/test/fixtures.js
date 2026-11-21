@@ -29,6 +29,7 @@ export async function clearDb() {
     env.DB.prepare('DELETE FROM cells'),
     env.DB.prepare('DELETE FROM users'),
     env.DB.prepare('DELETE FROM sheets'),
+    env.DB.prepare('DELETE FROM purge'),
   ]);
   const keys = await env.GH.list();
   await Promise.all(keys.keys.map((k) => env.GH.delete(k.name)));

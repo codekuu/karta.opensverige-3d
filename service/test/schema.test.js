@@ -2,11 +2,11 @@ import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
 describe('schema', () => {
-  it('has the four tables', async () => {
+  it('has the five tables', async () => {
     const { results } = await env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'd1_%' ORDER BY name",
     ).all();
-    expect(results.map((r) => r.name)).toEqual(['cells', 'events', 'sheets', 'users']);
+    expect(results.map((r) => r.name)).toEqual(['cells', 'events', 'purge', 'sheets', 'users']);
   });
 
   it('refuses a cell state outside the spec', async () => {

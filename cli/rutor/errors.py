@@ -1,7 +1,7 @@
 """Exit-coded errors for the rutor command.
 
 Codes: 1 bad input, 2 refused by the service, 3 environment, 4 network,
-5 the redrawn cell failed the quality check.
+5 the redrawn cell failed the quality check, 6 the SE3 price is high, try later.
 """
 
 from __future__ import annotations
@@ -32,3 +32,7 @@ def network(message: str) -> RutorError:
 
 def check_failed(message: str) -> RutorError:
     return RutorError(5, message)
+
+
+def wait(message: str) -> RutorError:
+    return RutorError(6, message)

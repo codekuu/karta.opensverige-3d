@@ -6,7 +6,15 @@ Pixelbygget is the volunteer grid for the OpenSverige map. A city is a sheet of 
 
 Code contributions are open now: the renderer, the open-data sources, the quality check and the docs. GPU contributions open when the service is live. Until then `rutor login` has no service to talk to.
 
-Start with an issue labelled `good first issue`. Open a pull request against `main`. The tests must pass.
+Start with an issue labelled `good first issue`. Open a pull request against `main`. The tests must pass. How the parts fit together is in [docs/pixelbygget/DESIGN.md](docs/pixelbygget/DESIGN.md).
+
+A code change needs no GPU:
+
+```bash
+python -m pip install -e "cli[render]"
+```
+
+To try `rutor render` against a real service, run one on your machine with `service/scripts/local.sh`. It needs no GitHub app and no real token.
 
 ## What this is
 
@@ -14,21 +22,26 @@ This repository is the `rutor` tool and the pinned redraw pipeline. You do not p
 
 Run the tool from `cli/` with `python -m rutor`, or install it into the virtualenv with `python -m pip install -e cli` and then call `rutor`. Output lines look like `claimed: goteborg-norr 64_59 expires 2026-11-19T12:00:00Z`. An agent reads [AGENTS.md](AGENTS.md) before it runs anything. The rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## The five steps
+## The steps
 
 ```bash
 rutor login --accept-terms
+rutor preflight
 rutor claim goteborg-norr --next
 rutor render goteborg-norr 64_59
 rutor redraw goteborg-norr 64_59
 rutor upload goteborg-norr 64_59
 ```
 
-`rutor claim` prints the cell you got. Use that `col_row` in render, redraw and upload. `rutor login` prints a device code. Approve it in the browser at the URL it prints. That approval is the step that needs a person.
+`rutor login` prints the terms and a device code. Read the terms first: `--accept-terms` means you accept them. Approve the code in the browser at the URL it prints. That approval is the step that needs a person.
 
-`rutor redraw --wait-for-cheap` runs the SE3 price check first and does not redraw while the price is high. Without the flag the price check is advice only: `python -m rutor.se3_price`.
+`rutor claim` prints the cell you got. Use that `col_row` in render, redraw and upload. `rutor status` shows your open locks, `rutor whoami` your login and whether you are trusted.
 
-`rutor preflight` checks Python, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login. Do not render or redraw when any line says `missing`.
+`rutor redraw --wait-for-cheap` runs the SE3 price check first. While the price is high it exits 6 and you keep your lock; run it again after the time it prints. Without the flag the price check is advice only: `python -m rutor.se3_price`.
+
+`rutor preflight` checks Python, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login, so run it after `rutor login`. Do not claim, render or redraw when any line says `missing`.
+
+Exit codes: 0 done, 1 bad input, 2 refused by the service, 3 something missing on this machine, 4 network, 5 the redraw failed the quality check, 6 the SE3 price is high (try later).
 
 ## Setup
 
@@ -91,7 +104,7 @@ python -m pip install -e cli
 rutor preflight
 ```
 
-A Mac can install, log in, claim and check the SE3 price. Preflight reports CUDA missing, and the redraw does not run there.
+A Mac can install, log in, check the SE3 price and run the tests. Preflight reports CUDA missing and the redraw does not run there, so do not claim a cell on a Mac.
 
 Without `pip install -e cli`, the same commands work as `python -m rutor` from the `cli/` directory.
 
@@ -110,5 +123,11 @@ The PNG you upload is contributed under the MIT license. See [LICENSE](LICENSE).
 This does not download the model:
 
 ```bash
-cd cli && python3 -m unittest discover -s tests -v
+cd cli && python -m unittest discover -s tests -v
+```
+
+The renderer tests need Pillow and numpy; without them they are skipped, not passed. The service tests need Node 22 or newer:
+
+```bash
+cd service && npm ci && npm test
 ```

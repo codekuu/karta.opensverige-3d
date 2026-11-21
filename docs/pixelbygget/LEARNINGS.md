@@ -4,6 +4,18 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-21
 
+### Review before opening
+Four reviews read the code without running the pipeline. What they found and what changed:
+- **The overlap was not exact.** Tree crown tables were float32 and held each cell's own photo x, so 7 pixels differed between east-west neighbours. The test allowed 0.1 percent (786 pixels). Fix: float64, and the test now demands zero.
+- **Uploads shared one inbox key per cell.** A retry, or someone taking the cell during a slow upload, could make the loser delete the winner's image. Fix: one key per upload (cell plus sha256 prefix); a request deletes only its own key, and only when the cell does not point at it.
+- **A removed live cell could be claimed again** before the intake blanked it, and the blanking then deleted the new owner's upload. Fix: no claims while removed.
+- **Uploads after the lock's expiry were accepted** until the hourly cron ran. Fix: the service checks the expiry, and expired locks no longer count against the limit.
+- **Forests mapped as multipolygon relations were never drawn**, and a way Overpass sent twice could lose its tags.
+- **Network timeouts crashed with a traceback** instead of exit 4, and an Overpass error answer with status 200 was cached forever.
+- Docs told contributors to run preflight before login, which can never pass, and the login terms still mentioned a Google key.
+- A second, fresh review of the service fixes found four more races in them: a purged key could be a re-upload with the same bytes (the seed is fixed per cell), the cron could free a lock taken over after it looked, two `/live` calls with the same rev could both move cells, and a reject could free a cell that had just gone live. Each write now names the exact state it read, keys carry a random part, and each race has a test that fails on the code before it. Review your own fixes with fresh eyes too.
+- CRC32 in JavaScript costs about 14 ms of CPU for 8 MB, over the Workers Free limit of 10 ms. The upload checks every chunk's CRC except the image data's.
+
 ### Opening the repository
 - The full history was checked before going public: no images, no keys, no env files, 29 KB packed. The Google-era plate pipeline only exists on the branch `cursor/plate-pipeline-7eb5`, as code.
 - A service test seeded uploads at a fixed date while the route counts the last 24 hours from the real clock, so it failed from 2026-11-18. Tests that meet the real clock must seed relative to it.
@@ -12,9 +24,9 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 ## 2026-11-20
 
 ### First end-to-end contributor run
-- The whole volunteer flow ran on Gustaf's gaming PC (Windows, RTX 5070, 12 GB) against the service running locally with `wrangler dev`: preflight, claim `--next`, render from open data, redraw, quality check, upload, then the admin's queue, inbox download (same sha256) and approve. Every step worked without code changes.
+- The whole volunteer flow ran on a Windows gaming PC (RTX 5070, 12 GB) against the service running locally with `wrangler dev`: preflight, claim `--next`, render from open data, redraw, quality check, upload, then the admin's queue, inbox download (same sha256) and approve. Every step worked without code changes.
 - Login without a GitHub app: the service caches who a token belongs to in KV under `gh:<sha256 of token>`, so a local test seeds two fake users with `wrangler kv key put --binding GH --local` and uses made-up tokens. GitHub is never asked and no real token is used. The admin id comes from `service/.dev.vars` (`ADMIN_GITHUB_ID`), which is now ignored by git.
-- Reaching the Mac from the PC: the macOS firewall blocked port 8787 over Tailscale. A reverse SSH tunnel (`ssh -N -R 8787:localhost:8787 mogadishu`) works.
+- Reaching a service on one machine from another: when a firewall blocks the port, a reverse SSH tunnel (`ssh -N -R 8787:localhost:8787 <gpu-host>`) works.
 - RTX 5070 with 12 GB is enough: one full `rutor redraw` took 133 s including model load and the check.
 - The same cell and seed is not pixel-identical across GPUs and library versions (RTX 5070 with diffusers 0.42.1 against an L4 with the pinned commit: mean difference 23). The look is the same; blending covers the seams, but a cell cannot be reproduced exactly on another machine.
 - `rutor queue --state godkand` printed approved cells as "waiting"; fixed.
@@ -57,7 +69,7 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 - Open water has almost no edges to align against. A source with under 3 percent clear edges skips the alignment test; the other checks still apply.
 
 ### Running on rented boxes
-- Gustaf's uplink measured about 20 kB/s. Render sources on the box from the open WMS, upload only code and OSM extracts (a few MB, gzipped).
+- A slow home uplink (about 20 kB/s) makes uploads to rented boxes the bottleneck. Render sources on the box from the open WMS, upload only code and OSM extracts (a few MB, gzipped).
 - The `pytorch/pytorch:2.8.0` image ships old `brotli` and `zstandard`; Hugging Face downloads then crash in `httpx2` with `process() takes no keyword arguments`. Fix: `pip install -U brotli zstandard`.
 - Start long jobs with `setsid nohup ... &` and `ssh -n`, or the job dies with the SSH session. Vast boxes can refuse the direct port for minutes while they install SSH; the `sshN.vast.ai` proxy address may also lag.
 - `pgrep -f pattern` over SSH matches the SSH command line itself. Grep the process list for the script name instead.

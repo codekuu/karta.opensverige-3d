@@ -30,3 +30,6 @@ Thumbs.db
 .mypy_cache/
 work/
 cli/**/__pycache__/
+
+# pip install -e leaves this behind
+*.egg-info/
