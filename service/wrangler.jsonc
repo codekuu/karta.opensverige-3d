@@ -31,6 +31,8 @@
     "ADMIN_GITHUB_ID": "0",
     // "1" closes the service: every request but GET gets 503.
     "PIXELBYGGET_STANGD": "0",
+    // Seconds a public read (sheets, cities, grid) is kept in memory per isolate. "0" turns it off.
+    "PUBLIC_CACHE_SECONDS": "60",
     // Origins that may read GET endpoints from a browser, comma separated.
     "ALLOWED_ORIGINS": "https://karta.opensverige.se, https://techembassy.se, https://www.techembassy.se"
   }

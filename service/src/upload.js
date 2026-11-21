@@ -1,6 +1,10 @@
 /* The upload: one PNG per cell into the inbox bucket, with its manifest beside it. The Worker
-   checks ownership, size, manifest, PNG shape and hash before anything is written, so a
-   refused upload leaves no object behind and the cell stays locked. */
+   checks ownership, expiry, size, manifest, PNG chunks and hash before anything is written, so
+   a refused upload leaves no object behind and the cell stays locked.
+
+   Every upload has its own inbox key, the cell plus the first 16 hex of its sha256. A request
+   that loses its lock half-way deletes only its own key, and only when the cell does not point
+   at that key: two requests with the same bytes share a key, and the winner keeps it. */
 
 import { requireAdmin, requireUser } from './auth.js';
 import { logEvent } from './cells.js';
@@ -14,11 +18,20 @@ const MANIFEST_KEYS = ['pipeline', 'sha256', 'width', 'height', 'source', 'gpu',
 
 /**
  * @typedef {{ pipeline: string, seed: number|null, sha256: string, width: number, height: number,
- *   source: { provider: string, version: string }, gpu: string, renderedAt: string }} Manifest
+ *   source: { provider: string, version: string, sha256?: string }, gpu: string, renderedAt: string,
+ *   check: string, source_sha256?: string }} Manifest
  */
 
+const STRING_MAX = 200;
+
+/** True for a string of at most STRING_MAX characters. */
+function shortString(value) {
+  return typeof value === 'string' && value.length <= STRING_MAX;
+}
+
 /**
- * Decodes the X-Manifest header: base64 JSON with every key but seed required.
+ * Decodes the X-Manifest header: base64 JSON with every key but seed required. Only the known
+ * keys are kept, and every string is at most 200 characters, so the stored JSON stays small.
  * @param {string|null} header
  * @returns {Manifest|null}
  */
@@ -32,24 +45,101 @@ export function parseManifest(header) {
   }
   if (!parsed || typeof parsed !== 'object') return null;
   for (const key of MANIFEST_KEYS) if (!(key in parsed)) return null;
-  if (typeof parsed.pipeline !== 'string' || typeof parsed.sha256 !== 'string') return null;
+  if (!shortString(parsed.pipeline) || !shortString(parsed.sha256)) return null;
   if (!Number.isInteger(parsed.width) || !Number.isInteger(parsed.height)) return null;
-  if (!parsed.source || typeof parsed.source.provider !== 'string' || typeof parsed.source.version !== 'string') return null;
-  if (typeof parsed.gpu !== 'string' || typeof parsed.renderedAt !== 'string') return null;
-  return { ...parsed, seed: Number.isInteger(parsed.seed) ? parsed.seed : null };
+  const source = parsed.source;
+  if (!source || typeof source !== 'object' || !shortString(source.provider) || !shortString(source.version)) return null;
+  if (source.sha256 !== undefined && !shortString(source.sha256)) return null;
+  if (!shortString(parsed.gpu) || !shortString(parsed.renderedAt)) return null;
+  if (parsed.check !== undefined && !shortString(parsed.check)) return null;
+  if (parsed.source_sha256 !== undefined && !shortString(parsed.source_sha256)) return null;
+  /** @type {Manifest} */
+  const manifest = {
+    pipeline: parsed.pipeline,
+    seed: Number.isInteger(parsed.seed) ? parsed.seed : null,
+    sha256: parsed.sha256,
+    width: parsed.width,
+    height: parsed.height,
+    source: { provider: source.provider, version: source.version, ...(source.sha256 ? { sha256: source.sha256 } : {}) },
+    gpu: parsed.gpu,
+    renderedAt: parsed.renderedAt,
+    check: typeof parsed.check === 'string' ? parsed.check : '',
+  };
+  if (typeof parsed.source_sha256 === 'string') manifest.source_sha256 = parsed.source_sha256;
+  return manifest;
 }
 
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
 /**
- * Width and height from a PNG's IHDR, or null when the bytes are not a PNG.
+ * CRC-32 as PNG uses it.
+ * @param {Uint8Array} bytes
+ * @returns {number}
+ */
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/** Bit depths each PNG colour type allows. */
+const DEPTHS = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+
+/**
+ * Width and height of a well-formed PNG, or null. Every chunk is walked and its CRC checked:
+ * IHDR first with 13 bytes and a valid depth and colour type, at least one IDAT, and IEND as
+ * the very last bytes, so nothing can hide after the image.
  * @param {Uint8Array} bytes
  * @returns {{ width: number, height: number }|null}
  */
 export function inspectPng(bytes) {
-  if (bytes.length < 24) return null;
+  if (bytes.length < 8 + 25 + 12) return null;
   for (let i = 0; i < 8; i += 1) if (bytes[i] !== PNG_SIGNATURE[i]) return null;
-  if (bytes[12] !== 0x49 || bytes[13] !== 0x48 || bytes[14] !== 0x44 || bytes[15] !== 0x52) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return { width: view.getUint32(16), height: view.getUint32(20) };
+  let pos = 8;
+  let size = null;
+  let images = 0;
+  while (pos + 12 <= bytes.length) {
+    const length = view.getUint32(pos);
+    if (length > bytes.length - pos - 12) return null;
+    const type = String.fromCharCode(bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]);
+    if (crc32(bytes.subarray(pos + 4, pos + 8 + length)) !== view.getUint32(pos + 8 + length)) return null;
+    if (size === null) {
+      if (type !== 'IHDR' || length !== 13) return null;
+      const depth = bytes[pos + 16];
+      const colour = bytes[pos + 17];
+      if (!(DEPTHS[colour] || []).includes(depth)) return null;
+      if (bytes[pos + 18] !== 0 || bytes[pos + 19] !== 0 || bytes[pos + 20] > 1) return null;
+      size = { width: view.getUint32(pos + 8), height: view.getUint32(pos + 12) };
+    } else if (type === 'IHDR') {
+      return null;
+    }
+    if (type === 'IDAT') images += 1;
+    pos += 12 + length;
+    if (type === 'IEND') return length === 0 && images > 0 && pos === bytes.length ? size : null;
+  }
+  return null;
+}
+
+/**
+ * The inbox key of one upload: the cell and the first 16 hex of its sha256. The objects are
+ * `${key}.png` and `${key}.json`.
+ * @param {string} sheet
+ * @param {number} col
+ * @param {number} row
+ * @param {string} sha
+ * @returns {string}
+ */
+export function inboxKey(sheet, col, row, sha) {
+  return `${sheet}/${col}_${row}.${sha.slice(0, 16)}`;
 }
 
 /**
@@ -80,59 +170,66 @@ export const uploadRoute = requireUser(async (request, env, ctx, params, now, us
   const sheet = params.sheet;
   const col = Number(params.col);
   const row = Number(params.row);
-  const cell = await env.DB.prepare('SELECT state, owner_id FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
+  const cell = await env.DB.prepare('SELECT state, owner_id, expires_at FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
   if (!cell) return error(404, 'no_cell', 'No such cell.');
   if (cell.owner_id !== user.github_id || cell.state !== 'last') return error(403, 'not_yours', 'You do not hold a lock on that cell.');
+  if (!cell.expires_at || cell.expires_at <= now) return error(409, 'lock_expired', 'Your lock on that cell has expired. Claim it again, then upload.');
   const declared = Number(request.headers.get('Content-Length'));
   if (!Number.isInteger(declared) || declared <= 0) return error(411, 'no_length', 'Send Content-Length.');
   if (declared > MAX_UPLOAD) return error(413, 'too_big', `A cell is at most ${MAX_UPLOAD} bytes.`);
   const manifest = parseManifest(request.headers.get('X-Manifest'));
-  if (!manifest) return error(400, 'bad_manifest', 'X-Manifest must be base64 JSON with pipeline, sha256, width, height, source, gpu and renderedAt.');
+  if (!manifest) return error(400, 'bad_manifest', 'X-Manifest must be base64 JSON with pipeline, sha256, width, height, source, gpu and renderedAt, each string at most 200 characters.');
+  if (manifest.check !== 'ok') return error(422, 'not_checked', 'This cell has not passed rutor check. Run it, then upload.');
   const sheetRow = await env.DB.prepare('SELECT pipeline FROM sheets WHERE id = ?').bind(sheet).first();
   if (!sheetRow) return error(404, 'no_sheet', 'No such sheet.');
   if (manifest.pipeline !== sheetRow.pipeline) {
     return error(422, 'wrong_pipeline', `This sheet is drawn with pipeline ${sheetRow.pipeline}; your manifest says ${manifest.pipeline}. Update the template.`);
   }
+  if (!user.trusted && (await uploadsLastDay(env.DB, user.github_id, now)) >= DAILY_UPLOADS_NEW) {
+    return error(429, 'daily_limit', `New builders may upload ${DAILY_UPLOADS_NEW} cells a day. Try again tomorrow.`, { 'Retry-After': '3600' });
+  }
   const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.length !== declared) return error(400, 'short_body', `Content-Length said ${declared} bytes, ${bytes.length} arrived.`);
   const png = inspectPng(bytes);
-  if (!png) return error(415, 'not_png', 'The body is not a PNG.');
+  if (!png) return error(415, 'not_png', 'The body is not a well-formed PNG.');
   if (png.width !== png.height || !ALLOWED_SIDES.includes(png.width) || png.width !== manifest.width || png.height !== manifest.height) {
     return error(422, 'bad_size', `A cell is a square of ${ALLOWED_SIDES.join(' or ')} px and the manifest must say so.`);
   }
   const sha = await sha256Hex(bytes);
   if (sha !== manifest.sha256) return error(422, 'sha_mismatch', 'The file does not match the sha256 in the manifest.');
-  if (!user.trusted && (await uploadsLastDay(env.DB, user.github_id, now)) >= DAILY_UPLOADS_NEW) {
-    return error(429, 'daily_limit', `New builders may upload ${DAILY_UPLOADS_NEW} cells a day. Try again tomorrow.`, { 'Retry-After': '3600' });
-  }
-  const key = `${sheet}/${col}_${row}`;
+  const key = inboxKey(sheet, col, row, sha);
   await env.INKORG.put(`${key}.png`, bytes, { httpMetadata: { contentType: 'image/png' } });
   await env.INKORG.put(`${key}.json`, JSON.stringify({ ...manifest, sheet, col, row, login: user.login, github_id: user.github_id, uploadedAt: now }), {
     httpMetadata: { contentType: 'application/json' },
   });
   const state = user.trusted ? 'godkand' : 'vantar';
   // The lock may have expired or been freed while the file was written: the cell changes
-  // state only if it is still this user's lock, otherwise the objects go again.
+  // state only if it is still this user's live lock, otherwise our objects go again.
   const result = await env.DB.prepare(
-    "UPDATE cells SET state = ?, uploaded_at = ?, bytes = ?, sha256 = ?, approved_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'last' AND owner_id = ?",
+    "UPDATE cells SET state = ?, uploaded_at = ?, bytes = ?, sha256 = ?, inbox_key = ?, approved_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'last' AND owner_id = ? AND expires_at > ?",
   )
-    .bind(state, now, bytes.length, sha, user.trusted ? now : null, now, sheet, col, row, user.github_id)
+    .bind(state, now, bytes.length, sha, key, user.trusted ? now : null, now, sheet, col, row, user.github_id, now)
     .run();
   if (result.meta.changes !== 1) {
-    await env.INKORG.delete([`${key}.png`, `${key}.json`]);
+    const after = await env.DB.prepare('SELECT inbox_key FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
+    // A twin request with the same bytes may have won with this very key: then it stays.
+    if (!after || after.inbox_key !== key) await env.INKORG.delete([`${key}.png`, `${key}.json`]);
     return error(409, 'lock_lost', 'Your lock on that cell ended before the upload finished. Claim it again, then upload.');
   }
   await logEvent(env.DB, { at: now, github_id: user.github_id, login: user.login, action: 'upload', sheet, col, row, detail: `${bytes.length} bytes, ${png.width} px, ${state}` });
-  return json(201, { state, url: `https://karta.opensverige.se/pixelbygget#${key}` });
+  return json(201, { state, url: `https://karta.opensverige.se/pixelbygget#${sheet}/${col}_${row}` });
 });
 
-/** GET /v1/inkorg/:sheet/:col_:row.(png|json), admin only. */
+/** GET /v1/inkorg/:sheet/:col_:row.(png|json), admin only: the cell's current upload. */
 export const inkorgRoute = requireAdmin(async (request, env, ctx, params) => {
-  const key = `${params.sheet}/${params.col}_${params.row}.${params.ext}`;
-  const object = await env.INKORG.get(key);
-  if (!object) return error(404, 'not_found', 'Nothing in the inbox under that name.');
+  const cell = await env.DB.prepare('SELECT inbox_key FROM cells WHERE sheet = ? AND col = ? AND row = ?')
+    .bind(params.sheet, Number(params.col), Number(params.row))
+    .first();
+  const object = cell && cell.inbox_key ? await env.INKORG.get(`${cell.inbox_key}.${params.ext}`) : null;
+  if (!object) return error(404, 'not_found', 'Nothing in the inbox for that cell.');
   const headers = new Headers();
   headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
   headers.set('Cache-Control', 'private, no-store');
+  headers.set('X-Inbox-Key', cell.inbox_key);
   return new Response(object.body, { status: 200, headers });
 });

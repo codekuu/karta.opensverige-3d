@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { claimCell } from '../src/cells.js';
+import { nowIso } from '../src/db.js';
 import { ALLOWED_SIDES, MAX_UPLOAD, inspectPng, parseManifest } from '../src/upload.js';
 import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser, setCell } from './fixtures.js';
 import { manifestHeader, minimalPng, sha256Hex } from './png.js';
@@ -46,7 +47,7 @@ beforeEach(async () => {
 describe('helpers', () => {
   it('manifest round-trips and rejects a missing key', () => {
     const m = parseManifest(manifestHeader({ sha256: 'abc' }));
-    expect(m).toMatchObject({ pipeline: '2026.11-a', seed: 7, sha256: 'abc', width: 1024, source: { provider: 'google-3d-tiles' } });
+    expect(m).toMatchObject({ pipeline: '2026.11-a', seed: 7, sha256: 'abc', width: 1024, source: { provider: 'opengeodata.goteborg.se orto_2025' } });
     expect(parseManifest(null)).toBeNull();
     expect(parseManifest(btoa('{"pipeline":"x"}'))).toBeNull();
     expect(parseManifest('not base64 json')).toBeNull();
@@ -62,16 +63,17 @@ describe('helpers', () => {
 
 describe('PUT /v1/upload', () => {
   it('writes png and json and sets vantar', async () => {
-    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW);
+    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, nowIso());
     const bytes = minimalPng(1024, 1024);
     const r = await put(user, bytes);
     expect(r.status).toBe(201);
     const body = await r.json();
     expect(body).toMatchObject({ state: 'vantar', url: 'https://karta.opensverige.se/pixelbygget#goteborg-norr/1_1' });
-    const png = await env.INKORG.get('goteborg-norr/1_1.png');
+    const key = (await getCell('goteborg-norr', 1, 1)).inbox_key;
+    const png = await env.INKORG.get(`${key}.png`);
     expect(png.httpMetadata.contentType).toBe('image/png');
     expect(new Uint8Array(await png.arrayBuffer())).toEqual(bytes);
-    const json = await env.INKORG.get('goteborg-norr/1_1.json');
+    const json = await env.INKORG.get(`${key}.json`);
     expect(JSON.parse(await json.text()).pipeline).toBe('2026.11-a');
     const cell = await getCell('goteborg-norr', 1, 1);
     expect(cell).toMatchObject({ state: 'vantar', bytes: bytes.length, sha256: await sha256Hex(bytes) });
@@ -81,7 +83,7 @@ describe('PUT /v1/upload', () => {
   });
 
   it('sends a trusted user straight to godkand', async () => {
-    await claimCell(env.DB, trusted, 'goteborg-norr', 1, 1, NOW);
+    await claimCell(env.DB, trusted, 'goteborg-norr', 1, 1, nowIso());
     const r = await put(trusted, minimalPng(1536, 1536), { width: 1536, height: 1536 });
     expect(r.status).toBe(201);
     expect((await r.json()).state).toBe('godkand');
@@ -89,7 +91,7 @@ describe('PUT /v1/upload', () => {
   });
 
   it('refuses a cell that is not yours and writes nothing', async () => {
-    await claimCell(env.DB, trusted, 'goteborg-norr', 1, 1, NOW);
+    await claimCell(env.DB, trusted, 'goteborg-norr', 1, 1, nowIso());
     const r = await put(user, minimalPng(1024, 1024));
     expect(r.status).toBe(403);
     expect((await r.json()).error).toBe('not_yours');
@@ -97,14 +99,14 @@ describe('PUT /v1/upload', () => {
   });
 
   it('refuses the wrong pipeline version', async () => {
-    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW);
+    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, nowIso());
     const r = await put(user, minimalPng(1024, 1024), { pipeline: '2025.01-z' });
     expect(r.status).toBe(422);
     expect((await r.json()).error).toBe('wrong_pipeline');
   });
 
   it('leaves the cell locked when the body is shorter than Content-Length', async () => {
-    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW);
+    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, nowIso());
     const bytes = minimalPng(1024, 1024);
     const r = await put(user, bytes, {}, { 'Content-Length': String(bytes.length + 50) });
     expect(r.status).toBe(400);
@@ -114,14 +116,14 @@ describe('PUT /v1/upload', () => {
   });
 
   it('refuses a sha that does not match the manifest', async () => {
-    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW);
+    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, nowIso());
     const r = await put(user, minimalPng(1024, 1024), { sha256: 'deadbeef' });
     expect(r.status).toBe(422);
     expect((await r.json()).error).toBe('sha_mismatch');
   });
 
   it('refuses a png that is not a square of an allowed side', async () => {
-    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW);
+    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, nowIso());
     const r = await put(user, minimalPng(1024, 512), { height: 512 });
     expect(r.status).toBe(422);
     expect((await r.json()).error).toBe('bad_size');
@@ -131,7 +133,7 @@ describe('PUT /v1/upload', () => {
   });
 
   it('refuses over 8 MB before reading the body', async () => {
-    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW);
+    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, nowIso());
     const r = await put(user, minimalPng(1024, 1024), {}, { 'Content-Length': '8388609' });
     expect(r.status).toBe(413);
     expect((await r.json()).error).toBe('too_big');
@@ -145,7 +147,7 @@ describe('PUT /v1/upload', () => {
       statements.push(env.DB.prepare("INSERT INTO events (at, github_id, login, action, sheet, col, row) VALUES (?, 4242, 'klang', 'upload', 'goteborg-norr', 0, 0)").bind(anHourAgo));
     }
     await env.DB.batch(statements);
-    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW);
+    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, nowIso());
     const r = await put(user, minimalPng(1024, 1024));
     expect(r.status).toBe(429);
     expect((await r.json()).error).toBe('daily_limit');
@@ -155,7 +157,7 @@ describe('PUT /v1/upload', () => {
 
 describe('PUT /v1/upload, lock lost mid-flight', () => {
   it('answers 409 lock_lost, removes what it wrote and leaves the cell as it found it', async () => {
-    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, NOW);
+    await claimCell(env.DB, user, 'goteborg-norr', 1, 1, nowIso());
     const bytes = minimalPng(1024, 1024);
     const sha = await sha256Hex(bytes);
     let flipped = false;
@@ -190,7 +192,8 @@ describe('PUT /v1/upload, lock lost mid-flight', () => {
 
 describe('GET /v1/inkorg', () => {
   it('serves the object to the admin only', async () => {
-    await env.INKORG.put('goteborg-norr/1_1.png', minimalPng(1024, 1024), { httpMetadata: { contentType: 'image/png' } });
+    await setCell('goteborg-norr', 1, 1, { state: 'vantar', owner_id: 4242, owner_login: 'klang', inbox_key: 'goteborg-norr/1_1.abcabcabcabcabca' });
+    await env.INKORG.put('goteborg-norr/1_1.abcabcabcabcabca.png', minimalPng(1024, 1024), { httpMetadata: { contentType: 'image/png' } });
     loginAs(user);
     const denied = await call(new Request('https://x/v1/inkorg/goteborg-norr/1_1.png', { headers: { Authorization: 'Bearer t' } }));
     expect(denied.status).toBe(403);

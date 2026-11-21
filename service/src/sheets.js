@@ -90,10 +90,14 @@ export async function openSheet(db, body, now) {
  * @returns {Promise<{ ok: true, live: number } | { ok: false, status: number, code: string, cell?: string }>}
  */
 export async function seedCells(db, sheet, cells, login, githubId, now) {
-  for (const [col, row] of cells) {
-    const cell = await db.prepare('SELECT state FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
-    if (!cell || cell.state !== 'fri') return { ok: false, status: 422, code: 'seed_outside_mask', cell: `${col}_${row}` };
-  }
+  // One query for the whole list: the first listed cell that is missing or not free, if any.
+  const { results: free } = await db
+    .prepare("SELECT col, row FROM cells WHERE sheet = ? AND state = 'fri' AND (col, row) IN (SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?))")
+    .bind(sheet, JSON.stringify(cells))
+    .all();
+  const ok = new Set(free.map((c) => `${c.col}_${c.row}`));
+  const bad = cells.find(([col, row]) => !ok.has(`${col}_${row}`));
+  if (bad) return { ok: false, status: 422, code: 'seed_outside_mask', cell: `${bad[0]}_${bad[1]}` };
   const update = db.prepare(
     "UPDATE cells SET state = 'live', owner_id = ?, owner_login = ?, approved_at = ?, live_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'fri'",
   );

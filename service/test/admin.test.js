@@ -7,9 +7,10 @@ import { minimalPng } from './png.js';
 const LATER = '2026-11-17T13:00:00Z';
 
 async function uploaded(col, row, state = 'vantar', owner = { id: 4242, login: 'klang' }) {
-  await setCell('goteborg-norr', col, row, { state, owner_id: owner.id, owner_login: owner.login, uploaded_at: NOW, sha256: 'abc', bytes: 10 });
-  await env.INKORG.put(`goteborg-norr/${col}_${row}.png`, minimalPng(1024, 1024), { httpMetadata: { contentType: 'image/png' } });
-  await env.INKORG.put(`goteborg-norr/${col}_${row}.json`, '{}', { httpMetadata: { contentType: 'application/json' } });
+  const key = `goteborg-norr/${col}_${row}.abcabcabcabcabca`;
+  await setCell('goteborg-norr', col, row, { state, owner_id: owner.id, owner_login: owner.login, uploaded_at: NOW, sha256: 'abc', bytes: 10, inbox_key: key });
+  await env.INKORG.put(`${key}.png`, minimalPng(1024, 1024), { httpMetadata: { contentType: 'image/png' } });
+  await env.INKORG.put(`${key}.json`, '{}', { httpMetadata: { contentType: 'application/json' } });
 }
 
 async function inboxKeys() {
@@ -57,19 +58,24 @@ describe('approveCell', () => {
 });
 
 describe('rejectCell', () => {
-  it('frees the cell, keeps the comment and keeps the inbox objects for the purge', async () => {
+  it('frees the cell, keeps the comment and puts the inbox objects on the purge list', async () => {
     await uploaded(1, 1);
     const r = await rejectCell(env.DB, env.INKORG, 'goteborg-norr', 1, 1, 'vattnet saknar kant', LATER);
     expect(r).toEqual({ ok: true });
-    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'fri', owner_id: null, owner_login: null, uploaded_at: null, sha256: null, bytes: null, rejected_at: LATER, comment: 'vattnet saknar kant' });
-    expect(await inboxKeys()).toEqual(['goteborg-norr/1_1.json', 'goteborg-norr/1_1.png']);
+    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'fri', owner_id: null, owner_login: null, uploaded_at: null, sha256: null, bytes: null, inbox_key: null, rejected_at: LATER, comment: 'vattnet saknar kant' });
+    expect(await inboxKeys()).toEqual(['goteborg-norr/1_1.abcabcabcabcabca.json', 'goteborg-norr/1_1.abcabcabcabcabca.png']);
+    const { results } = await env.DB.prepare('SELECT key, due FROM purge ORDER BY key').all();
+    expect(results).toEqual([
+      { key: 'goteborg-norr/1_1.abcabcabcabcabca.json', due: '2026-12-17T13:00:00Z' },
+      { key: 'goteborg-norr/1_1.abcabcabcabcabca.png', due: '2026-12-17T13:00:00Z' },
+    ]);
   });
 
   it('marks a live cell removed, keeps its objects and logs live-removed', async () => {
     await uploaded(1, 1, 'live');
     await rejectCell(env.DB, env.INKORG, 'goteborg-norr', 1, 1, 'fel hus', LATER);
-    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'fri', removed_at: LATER, rejected_at: null });
-    expect(await inboxKeys()).toEqual(['goteborg-norr/1_1.json', 'goteborg-norr/1_1.png']);
+    expect(await getCell('goteborg-norr', 1, 1)).toMatchObject({ state: 'fri', removed_at: LATER, rejected_at: null, inbox_key: 'goteborg-norr/1_1.abcabcabcabcabca' });
+    expect(await inboxKeys()).toEqual(['goteborg-norr/1_1.abcabcabcabcabca.json', 'goteborg-norr/1_1.abcabcabcabcabca.png']);
     const ev = await env.DB.prepare("SELECT detail FROM events WHERE action = 'reject'").first();
     expect(ev.detail).toContain('live-removed');
     const removed = await listQueue(env.DB, 'removed');
@@ -86,11 +92,11 @@ describe('rejectCell', () => {
 
 describe('trust and block', () => {
   it('sets and clears trust and block by login', async () => {
-    expect(await setTrust(env.DB, 'klang', 1)).toEqual({ ok: true });
+    expect(await setTrust(env.DB, { login: 'klang' }, 1)).toEqual({ ok: true });
     expect((await env.DB.prepare('SELECT trusted FROM users WHERE login = ?').bind('klang').first()).trusted).toBe(1);
-    expect(await setBlock(env.DB, 'klang', 1)).toEqual({ ok: true });
+    expect(await setBlock(env.DB, { login: 'klang' }, 1)).toEqual({ ok: true });
     expect((await env.DB.prepare('SELECT blocked FROM users WHERE login = ?').bind('klang').first()).blocked).toBe(1);
-    expect(await setTrust(env.DB, 'nobody', 1)).toMatchObject({ ok: false, status: 404, code: 'no_user' });
+    expect(await setTrust(env.DB, { login: 'nobody' }, 1)).toMatchObject({ ok: false, status: 404, code: 'no_user' });
   });
 });
 

@@ -51,23 +51,27 @@ export async function claimCell(db, user, sheet, col, row, now) {
   const sheetRow = await db.prepare('SELECT id, state FROM sheets WHERE id = ?').bind(sheet).first();
   if (!sheetRow) return { ok: false, status: 404, code: 'no_sheet' };
   if (sheetRow.state !== 'open') return { ok: false, status: 403, code: 'sheet_closed' };
-  const cell = await db.prepare('SELECT state FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
+  const cell = await db.prepare('SELECT state, removed_at FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
   if (!cell) return { ok: false, status: 404, code: 'no_cell' };
   if (cell.state === 'ute') return { ok: false, status: 422, code: 'outside' };
+  // A removed live cell waits for the intake to blank its tiles before anyone may draw it again.
+  if (cell.removed_at) return { ok: false, status: 409, code: 'being_removed' };
   const limit = lockLimit(user);
-  const held = await db.prepare("SELECT COUNT(*) AS n FROM cells WHERE owner_id = ? AND state = 'last'").bind(user.github_id).first();
+  // A lock past its expiry no longer counts and may be taken over, even before the cron frees it.
+  const held = await db.prepare("SELECT COUNT(*) AS n FROM cells WHERE owner_id = ? AND state = 'last' AND expires_at > ?").bind(user.github_id, now).first();
   if (held.n >= limit) return { ok: false, status: 403, code: 'too_many_locks' };
   const expires_at = plusHours(now, LOCK_HOURS);
   // The lock and the limit are decided by this one statement, so parallel claims cannot
   // slip past the count read above.
   const result = await db
     .prepare(
-      "UPDATE cells SET state = 'last', owner_id = ?, owner_login = ?, locked_at = ?, expires_at = ?, rejected_at = NULL, comment = NULL, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'fri' AND (SELECT COUNT(*) FROM cells WHERE owner_id = ? AND state = 'last') < ?",
+      "UPDATE cells SET state = 'last', owner_id = ?, owner_login = ?, locked_at = ?, expires_at = ?, rejected_at = NULL, comment = NULL, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND removed_at IS NULL AND (state = 'fri' OR (state = 'last' AND expires_at <= ? AND uploaded_at IS NULL)) AND (SELECT COUNT(*) FROM cells WHERE owner_id = ? AND state = 'last' AND expires_at > ?) < ?",
     )
-    .bind(user.github_id, user.login, now, expires_at, now, sheet, col, row, user.github_id, limit)
+    .bind(user.github_id, user.login, now, expires_at, now, sheet, col, row, now, user.github_id, now, limit)
     .run();
   if (result.meta.changes !== 1) {
-    const after = await db.prepare('SELECT state FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
+    const after = await db.prepare('SELECT state, removed_at FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
+    if (after && after.removed_at) return { ok: false, status: 409, code: 'being_removed' };
     if (after && after.state === 'fri') return { ok: false, status: 403, code: 'too_many_locks' };
     return { ok: false, status: 409, code: 'taken' };
   }
@@ -107,6 +111,7 @@ const MESSAGES = {
   outside: 'That cell lies outside the city and is not drawn.',
   too_many_locks: 'You already hold as many cells as you may. Finish or release one first.',
   taken: 'Someone else holds that cell. Pick another.',
+  being_removed: 'That cell is being taken off the map. Try again in an hour.',
   not_yours: 'That cell is not yours.',
   already_uploaded: 'That cell is already uploaded and cannot be released.',
 };
