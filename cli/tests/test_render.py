@@ -401,7 +401,7 @@ class RenderTests(unittest.TestCase):
         self.svc.state["sheets"] = {"malmo-norr": sheet}
         code, _out, err = self.run_cmd(["render", "malmo-norr", "1_1"])
         self.assertEqual(code, 3)
-        self.assertIn("no open orthophoto source for sheet malmo-norr yet", err)
+        self.assertIn("no source decided for sheet malmo-norr yet", err)
         self.assertFalse((self.root / "work" / "malmo-norr" / "1_1.src.png").exists())
 
     def test_overpass_gives_up_after_five_tries(self) -> None:

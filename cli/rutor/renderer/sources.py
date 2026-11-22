@@ -91,6 +91,22 @@ TREE_FILTERS = (
 )
 
 
+# Which renderer draws a sheet. "open" is the orthophoto and OpenStreetMap renderer in this
+# package; "google" is Google's Photorealistic 3D Tiles through Cesium ion, with the
+# contributor's own token. A sheet has one kind, so neighbouring cells share a source.
+SHEET_KINDS: dict[str, str] = {
+    "goteborg-norr": "open",
+    "stockholm-norr": "google",
+}
+
+
+def sheet_kind(sheet_id: str) -> str:
+    found = SHEET_KINDS.get(sheet_id)
+    if found is None:
+        raise environment(f"no source decided for sheet {sheet_id} yet")
+    return found
+
+
 def ortho_source(sheet_id: str) -> OrthoSource:
     found = ORTHO_SOURCES.get(sheet_id)
     if found is None:

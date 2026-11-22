@@ -34,7 +34,7 @@ Replace `64_59` with the cell `rutor claim` prints. `rutor preflight` checks the
 
 `rutor login` prints a code and `url: https://github.com/login/device`. A person approves that code in the browser. The token is stored in `~/.config/pixelbygget/token` (override with `PIXELBYGGET_HOME`), mode `0600` on Linux and macOS. `PIXELBYGGET_URL` points the CLI at another service, such as a local one. That approval is the step that needs a person.
 
-`rutor render` builds the source render from open data. Göteborgs Stad orthophoto is CC0. OpenStreetMap is ODbL. Only `goteborg-norr` has a source so far. That step needs Pillow and numpy, which are in the repository `requirements.txt` and in the `render` extra (`pip install -e "cli[render]"`). The OpenStreetMap data is pinned to one date per sheet, so every contributor renders the same map.
+`rutor render` builds the source render from the sheet's source: open data on `goteborg-norr`, Google's tiles through Cesium ion on `stockholm-norr` (see the main README for the token and `npm ci` in `cli/google-render`). The open-data path needs Pillow and numpy, which are in the repository `requirements.txt` and in the `render` extra (`pip install -e "cli[render]"`). The OpenStreetMap data is pinned to one date per sheet, so every contributor renders the same map.
 
 `rutor redraw` checks its own result before it finishes. A blank, too dark, posterised, shifted or unchanged redraw exits with code 5 and one `check:` line per problem. `rutor upload` refuses a cell until the check has passed. `rutor check <sheet> <col>_<row>` runs the check again on the files in `work/`.
 

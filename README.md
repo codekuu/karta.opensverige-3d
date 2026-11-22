@@ -110,13 +110,24 @@ Without `pip install -e cli`, the same commands work as `python -m rutor` from t
 
 ## Source render
 
-`rutor render` builds the source render from open data. Göteborgs Stad orthophoto is CC0. OpenStreetMap is ODbL. Only `goteborg-norr` has a source so far.
+Each sheet has one source, so neighbouring cells match:
+
+- `goteborg-norr` is drawn from open data. Göteborgs Stad orthophoto is CC0. OpenStreetMap is ODbL.
+- `stockholm-norr` is drawn from Google Photorealistic 3D Tiles through Cesium ion. It is not open yet.
+
+A Google sheet needs three things on your machine:
+
+- A free account at [ion.cesium.com](https://ion.cesium.com) and a token with the default scopes, in `CESIUM_ION_TOKEN`. A free account covers about 1 000 cells a month.
+- Node 22 or newer.
+- `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome for headless rendering, about 750 MB.
+
+Google's terms bind your token, not this project's MIT license. Google can ask for cells drawn from its tiles to be taken down. `rutor render` prints this on every Google cell, and the manifest names the source.
 
 The source render (`work/<sheet>/<col>_<row>.src.png`) stays on your machine. `rutor upload` sends only the redrawn PNG.
 
 ## Licence and credit
 
-The PNG you upload is contributed under the MIT license. See [LICENSE](LICENSE). It may be shown on karta.opensverige.se. You are credited by your GitHub login. The model weights stay under their own licenses.
+The PNG you upload is contributed under the MIT license, except that a cell drawn from Google's tiles is also under Google's terms. See [LICENSE](LICENSE). It may be shown on karta.opensverige.se. You are credited by your GitHub login. The model weights stay under their own licenses.
 
 ## Local checks
 

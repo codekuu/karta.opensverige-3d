@@ -33,3 +33,6 @@ cli/**/__pycache__/
 
 # pip install -e leaves this behind
 *.egg-info/
+
+# npm ci in cli/google-render
+node_modules/
