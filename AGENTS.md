@@ -3,7 +3,7 @@
 There are two kinds of work here. Find out which one your human wants before you run anything.
 
 - **A code change.** Open now. You edit the CLI, the renderer, the check, the service or the docs, and open a pull request.
-- **A GPU run.** You help one person add one map cell from their own NVIDIA GPU. This opens when the service is live. Until then `rutor login` has no service to talk to.
+- **A GPU run.** You help one person add one map cell from their own NVIDIA GPU.
 
 The commands are in [README.md](README.md), the rules in [CONTRIBUTING.md](CONTRIBUTING.md), and how the parts fit together in [docs/pixelbygget/DESIGN.md](docs/pixelbygget/DESIGN.md).
 
@@ -50,7 +50,6 @@ The source render comes from open data: Göteborgs Stad orthophoto (CC0) and Ope
 
 - Preflight prints any `check: <name> missing` line. Do not claim, render or redraw.
 - Preflight says there is no CUDA GPU, for example on a Mac. Do not claim a cell on that machine.
-- `rutor login` refuses because the GitHub client id is still the placeholder.
 - The service refuses the same step twice. Report the `error:` line. Do not loop.
 - Exit 4: the network failed. Try once more later, then report it.
 - The redraw fails. Report the last lines. Do not change the redraw to get past it.

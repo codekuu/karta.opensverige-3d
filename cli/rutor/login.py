@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from rutor import __version__
 from rutor.api import get
-from rutor.config import PLACEHOLDER_CLIENT_ID, github_client_id, write_token
+from rutor.config import github_client_id, write_token
 from rutor.errors import bad_input, environment, network, refused
 
 DEVICE_CODE_URL = "https://github.com/login/device/code"
@@ -122,10 +122,8 @@ def _accepted(args: argparse.Namespace) -> None:
 
 def cmd_login(args: argparse.Namespace) -> int:
     client_id = github_client_id()
-    if client_id == PLACEHOLDER_CLIENT_ID:
-        raise environment(
-            "GitHub client id is still REPLACE_WITH_CLIENT_ID. Set PIXELBYGGET_GITHUB_CLIENT_ID."
-        )
+    if not client_id.strip():
+        raise environment("PIXELBYGGET_GITHUB_CLIENT_ID is set but empty. Unset it or give a client id.")
     _accepted(args)
     started = start_device_flow(client_id)
     user_code = started.get("user_code")

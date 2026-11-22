@@ -1,4 +1,4 @@
-"""GitHub device flow: polling, the placeholder client id, and the terms."""
+"""GitHub device flow: polling, the client id, and the terms."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from rutor.__main__ import main
+from rutor.config import github_client_id
 from rutor.errors import RutorError
 from rutor.login import TERMS, poll_for_token, start_device_flow
 
@@ -96,12 +97,16 @@ class LoginTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 3)
         self.assertIn("login", caught.exception.message)
 
-    def test_placeholder_client_id_refused(self) -> None:
+    def test_default_client_id_is_the_pixelbygget_app(self) -> None:
+        self.assertEqual(github_client_id(), "Ov23liulid4VoLnmJCVH")
+
+    def test_empty_client_id_refused(self) -> None:
+        os.environ["PIXELBYGGET_GITHUB_CLIENT_ID"] = ""
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             code = main(["login"])
         self.assertEqual(code, 3)
-        self.assertIn("REPLACE_WITH_CLIENT_ID", stderr.getvalue())
+        self.assertIn("PIXELBYGGET_GITHUB_CLIENT_ID", stderr.getvalue())
 
     def test_login_requires_accept_terms_or_prints_terms(self) -> None:
         os.environ["PIXELBYGGET_GITHUB_CLIENT_ID"] = "Iv1.real"
