@@ -5,17 +5,18 @@
 
   const TILE_WAIT_MS = 240000;
 
+  function cartesian(v) {
+    return new Cesium.Cartesian3(v[0], v[1], v[2]);
+  }
+
+  /* The live map's camera: position and axes in the earth-centred frame, from
+     rutor/renderer/google.py. Only the position changes from cell to cell. */
   function applyCamera(viewer, view) {
-    const target = Cesium.Cartesian3.fromDegrees(view.lon, view.lat, view.height_m);
-    const heading = Cesium.Math.toRadians(view.heading_deg);
-    const pitch = Cesium.Math.toRadians(view.pitch_deg);
-    // The camera sits range_m back along the view direction, in east-north-up at the target.
-    const offset = new Cesium.Cartesian3(
-      -Math.sin(heading) * Math.cos(pitch) * view.range_m,
-      -Math.cos(heading) * Math.cos(pitch) * view.range_m,
-      -Math.sin(pitch) * view.range_m,
-    );
-    viewer.camera.lookAt(target, offset);
+    viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+    viewer.camera.position = cartesian(view.position);
+    viewer.camera.direction = cartesian(view.direction);
+    viewer.camera.up = cartesian(view.up);
+    viewer.camera.right = cartesian(view.right);
     const frustum = new Cesium.OrthographicOffCenterFrustum();
     frustum.left = view.frustum.left;
     frustum.right = view.frustum.right;
@@ -124,6 +125,10 @@
     if ("foveatedScreenSpaceError" in tileset) tileset.foveatedScreenSpaceError = false;
     useOrthographicScreenSpaceError(tileset);
     scene.primitives.add(tileset);
+    scene.light = new Cesium.DirectionalLight({
+      direction: cartesian(view.light.direction),
+      intensity: view.light.intensity,
+    });
 
     applyCamera(viewer, view);
     const tiles = await waitForTiles(viewer, tileset);

@@ -4,6 +4,12 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-22
 
+### The Google camera is the live map's camera
+- The live tiles were rendered by `renderer/grid-config.ts` on the PC: one orthographic camera per sheet, fixed at the origin's tangent plane, moved sideways per shot. The site's `geometri.ts` projects with the same frame. Copying that pose into `google.py` matches the old code to 5e-10 m.
+- The first Google camera reused the open renderer's shortcut, a target at `ground_height - lift_m` with local axes. Against the live pose it missed by 16 to 65 px vertically, and by up to 352 px across at the sheet's corners.
+- The open renderer has the same two gaps against the live map. `camera_for` maps degrees to metres with one cos(origin_lat): Göteborg's masked cells sit a median 41 px and at most 176 px (44 m) from the live frame, mostly across. And it draws all ground at one height: cell 63_19 lies 110 m above the sea, about 300 px higher on the live map, and an edge match put it about 230 px off.
+- The Overpass tree query for 63_19 failed five times: out of memory once, then HTTP 502.
+
 ### Stockholm's mask is the live island
 - Stockholm norr is already on the map, so it is redrawn cell for cell. Its mask is every cell the live island covers: 5 036 of 10 080, read from the map's edge picture (`oar/norr-kant.png`, 8 px per cell).
 - The urban area rule gives 6 247 cells here, 2 250 of them off the island, and it misses 1 039 cells that are on it. Lidingö is its own urban area but sits on the island. A cell off the island would also need a new edge picture.
@@ -11,12 +17,11 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ### A Google source per sheet
 - Google stopped serving Photorealistic 3D Tiles to EEA-billed Map Tiles projects after 2025-07-08, but Cesium ion still streams them as asset 2275207, and a free ion account works from Sweden: about 1 000 root loads a month.
-- The open renderer's 34.7 m lift says where the ground sits on screen. Aiming Cesium at `ground_height - lift_m` puts Google's ground on the same rows, so both sources share one camera.
 - A wrong token comes back from ion as 401 on `/v1/assets/2275207/endpoint` within five seconds, before any tile loads.
 - Chrome, Cesium and the Chrome download come to about 750 MB, kept out of the Python package in `cli/google-render`.
 
 ### The service is live
-- `pixelbygget.gustaf-garnow.workers.dev` runs with D1, R2 and KV in Western Europe. Only `goteborg-norr` is open; `stockholm-norr` answers 404 until it is opened with its Google source.
+- `pixelbygget.gustaf-garnow.workers.dev` runs with D1, R2 and KV in Western Europe. Only `goteborg-norr` is open; `stockholm-norr` opened on 2026-11-22 with its Google source and 5 036 cells.
 - A municipal orthophoto stops at the municipal border. Göteborg's is pure white over Partille, Mölndal and Kungälv, which lie inside the Göteborg urban area. A sheet's mask therefore needs both rules: the urban area plus 500 m, and full photo cover over the cell's whole photo box. Göteborg norr: 5 349 cells by area, 3 071 with photo.
 - overpass-api.de answers 406 to curl's default User-Agent. With `pixelbygget-rutor/0.1` a small query took 28 s, and 42 s with the pinned date: history queries are slower.
 

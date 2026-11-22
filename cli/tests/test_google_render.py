@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from rutor import commands
 from rutor.errors import RutorError
-from rutor.render import LIFT_M, METRES_PER_PIXEL, WINDOW_PX, camera_for, render_cell
+from rutor.render import CELL_PX, METRES_PER_PIXEL, WINDOW_PX, render_cell
 from rutor.renderer import google, sources
 from tests.png import minimal_png
 from tests.test_review_fixes import ServiceCase
@@ -103,39 +103,54 @@ class SheetKindTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 3)
 
 
+# The pose the live map's own renderer gives these cells (grid-config.ts, stockholm-grid-north,
+# buildShotCamera moved to the cell's window centre), earth-centred metres and unit vectors.
+LIVE_DIRECTION = (-0.9211572317553505, -0.30028003318712004, -0.24759090462688976)
+LIVE_UP = (-0.23539939060885046, -0.07673579969573188, 0.9688646675083359)
+LIVE_RIGHT = (-0.3099298005771652, 0.9507594431370107, 0.0)
+LIVE_POSITIONS = {
+    (85, 24): (3099955.598567919, 1015239.582872198, 5465807.445436383),
+    (143, 69): (3108677.2931785844, 1033699.6814787069, 5457498.371687988),
+}
+
+
 class GoogleCameraTests(unittest.TestCase):
-    def test_the_camera_is_the_cell_window(self) -> None:
-        camera = camera_for(_sheet(), 10, 12)
-        view = google.google_camera(camera)
-        self.assertEqual(view["lat"], camera["center_lat"])
-        self.assertEqual(view["lon"], camera["center_lon"])
-        self.assertEqual((view["heading_deg"], view["pitch_deg"]), (0.0, -45.0))
+    def test_the_pose_is_the_one_that_drew_the_live_map(self) -> None:
+        for (col, row), position in LIVE_POSITIONS.items():
+            with self.subTest(cell=f"{col}_{row}"):
+                view = google.google_camera(_sheet(), col, row)
+                for name, expected in (("direction", LIVE_DIRECTION), ("up", LIVE_UP), ("right", LIVE_RIGHT)):
+                    for got, want in zip(view[name], expected):
+                        self.assertAlmostEqual(got, want, places=12)
+                for got, want in zip(view["position"], position):
+                    self.assertAlmostEqual(got, want, delta=1e-6)
+
+    def test_the_window_is_1536_px_at_a_quarter_metre(self) -> None:
+        view = google.google_camera(_sheet(), 10, 12)
         self.assertEqual((view["width"], view["height"]), (WINDOW_PX, WINDOW_PX))
         half = WINDOW_PX / 2 * METRES_PER_PIXEL
         frustum = view["frustum"]
-        self.assertEqual((frustum["left"], frustum["right"]), (-half, half))
-        self.assertEqual((frustum["bottom"], frustum["top"]), (-half, half))
-        self.assertLess(frustum["near"], view["range_m"])
-        self.assertGreater(frustum["far"], view["range_m"])
+        self.assertEqual((frustum["left"], frustum["right"], frustum["bottom"], frustum["top"]), (-half, half, -half, half))
+        self.assertLess(frustum["near"], google.RANGE_M)
+        self.assertGreater(frustum["far"], google.RANGE_M)
 
-    def test_ground_lands_where_the_open_renderer_draws_it(self) -> None:
-        """A point on the ground, north of the cell centre, on the same screen row in both renderers.
+    def test_neighbours_differ_by_exactly_one_cell_in_the_picture_plane(self) -> None:
+        a = google.google_camera(_sheet(), 40, 30)
+        b = google.google_camera(_sheet(), 41, 31)
+        step = [q - p for p, q in zip(a["position"], b["position"])]
+        across = sum(s * r for s, r in zip(step, a["right"]))
+        up = sum(s * u for s, u in zip(step, a["up"]))
+        self.assertAlmostEqual(across, CELL_PX * METRES_PER_PIXEL, places=6)
+        self.assertAlmostEqual(up, -CELL_PX * METRES_PER_PIXEL, places=6)
 
-        The open renderer puts ground at screen row 768 - (north + lift) * cos45 / 0.25, with the
-        ground at the sheet's ground_height. Cesium looks at the target along heading 0 and pitch
-        -45, so a point's screen height is its north offset times sin45 plus its up offset times
-        cos45, measured from the target.
-        """
-        sheet = _sheet()
-        camera = camera_for(sheet, 10, 12)
-        view = google.google_camera(camera)
-        t = math.sqrt(0.5)
-        for north in (-120.0, 0.0, 85.5):
-            up = float(sheet["ground_height"]) - view["height_m"]
-            screen_m = north * t + up * t
-            row_cesium = WINDOW_PX / 2 - screen_m / METRES_PER_PIXEL
-            row_open = WINDOW_PX / 2 - (north + LIFT_M) * t / METRES_PER_PIXEL
-            self.assertAlmostEqual(row_cesium, row_open, places=9)
+    def test_the_axes_are_a_right_handed_unit_frame(self) -> None:
+        view = google.google_camera(_sheet(), 0, 0)
+        d, u, r = view["direction"], view["up"], view["right"]
+        for vector in (d, u, r):
+            self.assertAlmostEqual(math.hypot(*vector), 1.0, places=12)
+        cross = (d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0])
+        for got, want in zip(cross, r):
+            self.assertAlmostEqual(got, want, places=12)
 
 
 class PinTests(unittest.TestCase):
