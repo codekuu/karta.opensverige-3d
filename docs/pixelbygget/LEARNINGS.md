@@ -4,8 +4,19 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-22
 
+### Stockholm's mask is the live island
+- Stockholm norr is already on the map, so it is redrawn cell for cell. Its mask is every cell the live island covers: 5 036 of 10 080, read from the map's edge picture (`oar/norr-kant.png`, 8 px per cell).
+- The urban area rule gives 6 247 cells here, 2 250 of them off the island, and it misses 1 039 cells that are on it. Lidingö is its own urban area but sits on the island. A cell off the island would also need a new edge picture.
+- Google covers the whole sheet, so the photo cover rule does not apply.
+
+### A Google source per sheet
+- Google stopped serving Photorealistic 3D Tiles to EEA-billed Map Tiles projects after 2025-07-08, but Cesium ion still streams them as asset 2275207, and a free ion account works from Sweden: about 1 000 root loads a month.
+- The open renderer's 34.7 m lift says where the ground sits on screen. Aiming Cesium at `ground_height - lift_m` puts Google's ground on the same rows, so both sources share one camera.
+- A wrong token comes back from ion as 401 on `/v1/assets/2275207/endpoint` within five seconds, before any tile loads.
+- Chrome, Cesium and the Chrome download come to about 750 MB, kept out of the Python package in `cli/google-render`.
+
 ### The service is live
-- `pixelbygget.gustaf-garnow.workers.dev` runs with D1, R2 and KV in Western Europe. Only `goteborg-norr` is open; `stockholm-norr` answers 404 until it has an open photo source.
+- `pixelbygget.gustaf-garnow.workers.dev` runs with D1, R2 and KV in Western Europe. Only `goteborg-norr` is open; `stockholm-norr` answers 404 until it is opened with its Google source.
 - A municipal orthophoto stops at the municipal border. Göteborg's is pure white over Partille, Mölndal and Kungälv, which lie inside the Göteborg urban area. A sheet's mask therefore needs both rules: the urban area plus 500 m, and full photo cover over the cell's whole photo box. Göteborg norr: 5 349 cells by area, 3 071 with photo.
 - overpass-api.de answers 406 to curl's default User-Agent. With `pixelbygget-rutor/0.1` a small query took 28 s, and 42 s with the pinned date: history queries are slower.
 

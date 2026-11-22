@@ -1,0 +1,14 @@
+{
+  "name": "pixelbygget-google-render",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Renders one Pixelbygget cell from Google Photorealistic 3D Tiles through Cesium ion. Called by rutor render.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "cesium": "1.147.0",
+    "puppeteer": "25.16.0"
+  }
+}

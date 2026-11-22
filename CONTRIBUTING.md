@@ -11,7 +11,7 @@ This page holds the rules. The commands and the install are in [README.md](READM
 - About 20 GB of free disk for the model download.
 - Windows or Linux for the redraw. A Mac can log in and check the price. It cannot redraw, so do not claim a cell on a Mac.
 - Python 3.11 or newer, and a GitHub account.
-- The source render comes from open data. Göteborgs Stad orthophoto is CC0. OpenStreetMap is ODbL. Only `goteborg-norr` has a source so far.
+- The source render comes from the sheet's source. `goteborg-norr` is open data: Göteborgs Stad orthophoto (CC0) and OpenStreetMap (ODbL). `stockholm-norr` is Google's tiles through your own Cesium ion token, Node 22 and `npm ci` in `cli/google-render`. Google's terms bind that token, and Google can ask for those cells to be taken down.
 
 Clone, install, log in, and run `rutor preflight`. Go on only when every line says `ok`.
 

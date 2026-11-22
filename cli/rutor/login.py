@@ -26,7 +26,9 @@ TERMS = "\n".join(
         "The PNG you upload is contributed under the MIT license.",
         "It may be shown on karta.opensverige.se.",
         "You are credited by your GitHub login.",
-        "The source render is built from open data and stays on your machine.",
+        "The source render stays on your machine.",
+        "It is built from open data, except on sheets drawn from Google's tiles.",
+        "rutor render says so on those sheets. Google's terms then bind your Cesium ion token.",
     ]
 )
 

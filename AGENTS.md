@@ -43,13 +43,16 @@ Only these need a person. Do not invent a way around them.
 
 - Read the terms `rutor login` prints and decide to accept them. Pass `--accept-terms` only after your human said yes.
 - Approve the GitHub device login in the browser, at the URL `rutor login` prints.
+- On a Google sheet (`stockholm-norr`), make the Cesium ion account and its token. Do not make an account for your human. They put the token in `CESIUM_ION_TOKEN` themselves.
 
-The source render comes from open data: Göteborgs Stad orthophoto (CC0) and OpenStreetMap (ODbL). Only `goteborg-norr` has a source so far.
+The source render comes from the sheet's source. `goteborg-norr` is open data: Göteborgs Stad orthophoto (CC0) and OpenStreetMap (ODbL). A Google sheet needs Node 22 and `npm ci` once in `cli/google-render`; `rutor render` prints what Google's terms mean for the cell.
 
 ### Stop and tell your human
 
 - Preflight prints any `check: <name> missing` line. Do not claim, render or redraw.
 - Preflight says there is no CUDA GPU, for example on a Mac. Do not claim a cell on that machine.
+- `rutor render` says `CESIUM_ION_TOKEN is not set` or `Cesium ion refused the token`. Ask your human for a token. Do not look for one.
+- `rutor render` says the Cesium ion quota is used up. Release the cell, or try again tomorrow.
 - The service refuses the same step twice. Report the `error:` line. Do not loop.
 - Exit 4: the network failed. Try once more later, then report it.
 - The redraw fails. Report the last lines. Do not change the redraw to get past it.

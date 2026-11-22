@@ -4,7 +4,7 @@ How the parts fit together. The commands are in [README.md](../../README.md), th
 
 ## The idea
 
-The pixel cities on karta.opensverige.se are drawn cell by cell. Anyone with an NVIDIA card claims a cell, renders it from open data, redraws it as pixel art on their own machine and uploads the result. An admin reviews it, and the cell lights up on the map with the builder's GitHub login.
+The pixel cities on karta.opensverige.se are drawn cell by cell. Anyone with an NVIDIA card claims a cell, renders it from the sheet's source, redraws it as pixel art on their own machine and uploads the result. An admin reviews it, and the cell lights up on the map with the builder's GitHub login.
 
 ## Sheets and cells
 
@@ -35,6 +35,10 @@ Contributors never get write access to a repo, a bucket or a key. The only thing
 
 ## The render
 
+Each sheet has one source, set in `SHEET_KINDS` in `cli/rutor/renderer/sources.py`, so neighbouring cells never mix sources.
+
+### Open data (`goteborg-norr`)
+
 `rutor render` builds the 1536 px source window from open data only:
 
 - **Orthophoto** from a WMS, fetched as shared 1024 px tiles on the sheet's 0.25 m grid, so every cell cuts its photo from the same pixels. Göteborgs Stad (CC0) today. Lidingö and Lantmäteriet are open issues.
@@ -42,6 +46,16 @@ Contributors never get write access to a repo, a bucket or a key. The only thing
 - Buildings are extruded with the camera's fixed lift. Facades, windows and tree crowns come from rules keyed to world position, never to the cell.
 
 The rule that matters: **two neighbouring cells draw identical pixels in their 512 px overlap, on any machine.** `test_neighbour_cells_agree_in_their_overlap` pins it with zero differing pixels. A change to the renderer must keep that test green.
+
+### Google (`stockholm-norr`)
+
+`cli/google-render/render.mjs` opens Cesium in headless Chrome, loads Google Photorealistic 3D Tiles (Cesium ion asset 2275207) with the contributor's own token, and captures one orthographic 1536 px frame.
+
+- The camera is the open renderer's: the cell centre, heading 0, pitch -45, 0.25 m per pixel. The target sits `lift_m` below the sheet's `ground_height`, where the open renderer puts the ground. `test_ground_lands_where_the_open_renderer_draws_it` pins that.
+- The token goes to node in its environment and to the page in memory, never on a command line, in a file or in a logged URL.
+- Streamed tiles are not pixel-identical between machines, so the overlap test does not apply. The intake blends the seams.
+- Google's terms bind the token. `rutor render` prints that on every Google cell, and the manifest names the source, so those cells can be found and taken down if Google asks.
+- The sheet is already live, so its mask is the live island: 5 036 cells, the ones the map's edge picture draws. It is redrawn, not extended.
 
 ## The redraw
 

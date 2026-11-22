@@ -18,7 +18,8 @@ from rutor.errors import RutorError, bad_input, check_failed, environment, netwo
 from rutor.manifest import build_manifest, encode_manifest, png_size, sha256_file, write_manifest
 from rutor.check import problems as check_problems
 from rutor.render import render_cell
-from rutor.renderer.sources import ortho_source, osm_date
+from rutor.renderer import google
+from rutor.renderer.sources import ortho_source, osm_date, sheet_kind
 
 
 def require_token() -> str:
@@ -271,20 +272,38 @@ def cmd_render(args: argparse.Namespace) -> int:
     col, row = parse_cell(args.cell)
     sheet = _sheet_body(token, args.sheet)
     out = config.work_dir(args.sheet) / f"{col}_{row}.src.png"
+    if sheet_kind(args.sheet) == "google":
+        for line in GOOGLE_NOTICE:
+            print(f"note: {line}")
     render_cell(sheet, col, row, out)
     _write_source_info(args.sheet, out)
     print(f"rendered: {args.sheet} {col}_{row} {out}")
     return 0
 
 
+GOOGLE_NOTICE = (
+    "This sheet is drawn from Google Photorealistic 3D Tiles through your own Cesium ion token.",
+    "Google's terms bind that token, not this project's MIT license.",
+    "Google can ask for cells drawn from its tiles to be taken down.",
+)
+
+
 def _write_source_info(sheet_id: str, png: Path) -> None:
     """Record what the source PNG was made from, next to the PNG itself."""
-    source = ortho_source(sheet_id)
-    info = {
-        "provider": f"{urllib.parse.urlsplit(source.endpoint).netloc} {source.layer}",
-        "version": f"osm {osm_date(sheet_id)}; ortho {source.layer}",
-        "sha256": sha256_file(png),
-    }
+    if sheet_kind(sheet_id) == "google":
+        rendered = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        info = {
+            "provider": f"Google Photorealistic 3D Tiles via Cesium ion asset {google.ION_ASSET}",
+            "version": f"cesium {google.CESIUM_VERSION}; rendered {rendered}",
+            "sha256": sha256_file(png),
+        }
+    else:
+        source = ortho_source(sheet_id)
+        info = {
+            "provider": f"{urllib.parse.urlsplit(source.endpoint).netloc} {source.layer}",
+            "version": f"osm {osm_date(sheet_id)}; ortho {source.layer}",
+            "sha256": sha256_file(png),
+        }
     png.with_suffix(".json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
 
 
