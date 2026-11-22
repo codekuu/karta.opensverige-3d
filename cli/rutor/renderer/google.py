@@ -4,15 +4,20 @@ The contributor's own Cesium ion token is read from CESIUM_ION_TOKEN and handed 
 environment, never on a command line or in a file. Google's terms bind that token. The render
 stays on the contributor's machine like any source render.
 
-The camera is the open renderer's camera: the same cell centre, heading 0, pitch -45, an
-orthographic 1536 px window at 0.25 m per pixel. The target sits lift_m below the sheet's
-ground_height, which is where the open renderer puts the ground on the screen.
+The camera is the one that drew the live map: one orthographic camera per sheet, looking along
+the sheet's heading and 45 degrees down, fixed in the earth-centred frame at the sheet's origin.
+Every cell moves it sideways in its own picture plane, so neighbours line up to the pixel and a
+cell lands on the map pixels it replaces. A point at east e, north n and height h in the plane
+that touches the ellipsoid at the origin lands at picture X = e cos a - n sin a,
+Y = (e sin a + n cos a + h) / sqrt 2, and map pixel (X - x_meters, y_meters - Y) / 0.25. No
+ground height enters: Google's tiles carry their own heights.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -21,15 +26,22 @@ from pathlib import Path
 
 from rutor import config
 from rutor.errors import environment, network
-from rutor.render import METRES_PER_PIXEL, WINDOW_PX, camera_for
+from rutor.render import CELL_PX, METRES_PER_PIXEL, WINDOW_PX, _number
 
 ION_ASSET = 2275207
 # Must match cli/google-render/package.json; a test holds them together.
 CESIUM_VERSION = "1.147.0"
 TOKEN_ENV = "CESIUM_ION_TOKEN"
 NODE_MAJOR = 22
-RANGE_M = 3000.0
-DEPTH_M = 2000.0
+# Distance and depth the live map's renders used (near 700 m before the target, far 350 m behind).
+RANGE_M = 4000.0
+NEAR_M = RANGE_M - 700.0
+FAR_M = RANGE_M + 350.0
+# The live renders' light: east-north-up at the sheet origin, intensity 2.2.
+LIGHT_ENU = (-0.45, -0.55, -0.7)
+LIGHT_INTENSITY = 2.2
+WGS84_A = 6378137.0
+WGS84_F = 1 / 298.257223563
 # A render with less spread than this is the black background: no tiles arrived.
 MIN_SPREAD = 4.0
 NODE_TIMEOUT = 900
@@ -42,24 +54,81 @@ def default_render_dir() -> Path:
     return config.repo_root() / "cli" / "google-render"
 
 
-def google_camera(camera: dict[str, float]) -> dict[str, object]:
-    """What render.mjs needs to point Cesium at one cell."""
+Vec = tuple[float, float, float]
+
+
+def _ecef(lat_deg: float, lon_deg: float, height: float) -> Vec:
+    lat = math.radians(lat_deg)
+    lon = math.radians(lon_deg)
+    e2 = WGS84_F * (2 - WGS84_F)
+    n = WGS84_A / math.sqrt(1 - e2 * math.sin(lat) ** 2)
+    return (
+        (n + height) * math.cos(lat) * math.cos(lon),
+        (n + height) * math.cos(lat) * math.sin(lon),
+        (n * (1 - e2) + height) * math.sin(lat),
+    )
+
+
+def _mix(*parts: tuple[Vec, float]) -> Vec:
+    return (
+        sum(v[0] * k for v, k in parts),
+        sum(v[1] * k for v, k in parts),
+        sum(v[2] * k for v, k in parts),
+    )
+
+
+def sheet_basis(sheet: dict[str, object]) -> dict[str, Vec]:
+    """East, north and up at the sheet origin, and the camera's axes in the earth-centred frame."""
+    lat = math.radians(_number(sheet, "origin_lat"))
+    lon = math.radians(_number(sheet, "origin_lon"))
+    # Like camera_for: a missing or malformed heading is 0.
+    heading_raw = sheet.get("heading", 0)
+    valid = isinstance(heading_raw, (int, float)) and not isinstance(heading_raw, bool)
+    heading = math.radians(float(heading_raw) if valid else 0.0)
+    east: Vec = (-math.sin(lon), math.cos(lon), 0.0)
+    north: Vec = (-math.sin(lat) * math.cos(lon), -math.sin(lat) * math.sin(lon), math.cos(lat))
+    up: Vec = (math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat))
+    r = math.sqrt(0.5)
+    forward = _mix((east, math.sin(heading)), (north, math.cos(heading)))
+    return {
+        "east": east,
+        "north": north,
+        "up": up,
+        "forward": forward,
+        "direction": _mix((forward, r), (up, -r)),
+        "camera_up": _mix((forward, r), (up, r)),
+        "right": _mix((east, math.cos(heading)), (north, -math.sin(heading))),
+    }
+
+
+def google_camera(sheet: dict[str, object], col: int, row: int) -> dict[str, object]:
+    """What render.mjs needs to point Cesium at one cell: the live map's camera, moved to the cell."""
+    basis = sheet_basis(sheet)
+    origin = _ecef(_number(sheet, "origin_lat"), _number(sheet, "origin_lon"), 0.0)
+    # The window centre in picture metres: the middle of the cell, as camera_for counts it.
+    x = _number(sheet, "x_meters") + (col * CELL_PX + CELL_PX // 2) * METRES_PER_PIXEL
+    y = _number(sheet, "y_meters") - (row * CELL_PX + CELL_PX // 2) * METRES_PER_PIXEL
+    centre = _mix((origin, 1.0), (basis["right"], x), (basis["forward"], y * math.sqrt(2.0)))
+    position = _mix((centre, 1.0), (basis["direction"], -RANGE_M))
+    norm = math.sqrt(sum(c * c for c in LIGHT_ENU))
+    light = _mix(
+        (basis["east"], LIGHT_ENU[0] / norm), (basis["north"], LIGHT_ENU[1] / norm), (basis["up"], LIGHT_ENU[2] / norm)
+    )
     half = WINDOW_PX / 2 * METRES_PER_PIXEL
     return {
-        "lat": camera["center_lat"],
-        "lon": camera["center_lon"],
-        "height_m": camera["ground_height"] - camera["lift_m"],
-        "heading_deg": float(camera["heading"]),
-        "pitch_deg": -45.0,
-        "range_m": RANGE_M,
+        "position": list(position),
+        "direction": list(basis["direction"]),
+        "up": list(basis["camera_up"]),
+        "right": list(basis["right"]),
         "frustum": {
             "left": -half,
             "right": half,
             "bottom": -half,
             "top": half,
-            "near": RANGE_M - DEPTH_M,
-            "far": RANGE_M + DEPTH_M,
+            "near": NEAR_M,
+            "far": FAR_M,
         },
+        "light": {"direction": list(light), "intensity": LIGHT_INTENSITY},
         "width": WINDOW_PX,
         "height": WINDOW_PX,
         "ion_asset": ION_ASSET,
@@ -147,7 +216,7 @@ def render_google(
         )
     node = _node(which, run, environ)
     _require_installed(root)
-    view = google_camera(camera_for(sheet, col, row))
+    view = google_camera(sheet, col, row)
     out.parent.mkdir(parents=True, exist_ok=True)
     camera_path = out.with_name(out.stem + ".camera.json")
     raw_path = out.with_name(out.stem + ".google.png")

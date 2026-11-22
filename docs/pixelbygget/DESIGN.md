@@ -51,7 +51,7 @@ The rule that matters: **two neighbouring cells draw identical pixels in their 5
 
 `cli/google-render/render.mjs` opens Cesium in headless Chrome, loads Google Photorealistic 3D Tiles (Cesium ion asset 2275207) with the contributor's own token, and captures one orthographic 1536 px frame.
 
-- The camera is the open renderer's: the cell centre, heading 0, pitch -45, 0.25 m per pixel. The target sits `lift_m` below the sheet's `ground_height`, where the open renderer puts the ground. `test_ground_lands_where_the_open_renderer_draws_it` pins that.
+- The camera is the one that drew the live map: one orthographic camera per sheet, fixed in the earth-centred frame at the sheet origin, looking along the heading and 45 degrees down, moved sideways in its picture plane to each cell. A point lands on the map pixel the site's own projection gives it, terrain included, because Google's tiles carry their heights. `test_the_pose_is_the_one_that_drew_the_live_map` pins it to numbers from that renderer (`grid-config.ts`).
 - The token goes to node in its environment and to the page in memory, never on a command line, in a file or in a logged URL.
 - Streamed tiles are not pixel-identical between machines, so the overlap test does not apply. The intake blends the seams.
 - Google's terms bind the token. `rutor render` prints that on every Google cell, and the manifest names the source, so those cells can be found and taken down if Google asks.
