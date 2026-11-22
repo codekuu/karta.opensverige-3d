@@ -26,6 +26,9 @@ from pathlib import Path
 
 from rutor import config
 from rutor.errors import environment, network
+from rutor.frame import ecef as _ecef
+from rutor.frame import mix as _mix
+from rutor.frame import sheet_basis
 from rutor.render import CELL_PX, METRES_PER_PIXEL, WINDOW_PX, _number
 
 ION_ASSET = 2275207
@@ -40,8 +43,6 @@ FAR_M = RANGE_M + 350.0
 # The live renders' light: east-north-up at the sheet origin, intensity 2.2.
 LIGHT_ENU = (-0.45, -0.55, -0.7)
 LIGHT_INTENSITY = 2.2
-WGS84_A = 6378137.0
-WGS84_F = 1 / 298.257223563
 # A render with less spread than this is the black background: no tiles arrived.
 MIN_SPREAD = 4.0
 NODE_TIMEOUT = 900
@@ -52,53 +53,6 @@ Which = Callable[[str], str | None]
 
 def default_render_dir() -> Path:
     return config.repo_root() / "cli" / "google-render"
-
-
-Vec = tuple[float, float, float]
-
-
-def _ecef(lat_deg: float, lon_deg: float, height: float) -> Vec:
-    lat = math.radians(lat_deg)
-    lon = math.radians(lon_deg)
-    e2 = WGS84_F * (2 - WGS84_F)
-    n = WGS84_A / math.sqrt(1 - e2 * math.sin(lat) ** 2)
-    return (
-        (n + height) * math.cos(lat) * math.cos(lon),
-        (n + height) * math.cos(lat) * math.sin(lon),
-        (n * (1 - e2) + height) * math.sin(lat),
-    )
-
-
-def _mix(*parts: tuple[Vec, float]) -> Vec:
-    return (
-        sum(v[0] * k for v, k in parts),
-        sum(v[1] * k for v, k in parts),
-        sum(v[2] * k for v, k in parts),
-    )
-
-
-def sheet_basis(sheet: dict[str, object]) -> dict[str, Vec]:
-    """East, north and up at the sheet origin, and the camera's axes in the earth-centred frame."""
-    lat = math.radians(_number(sheet, "origin_lat"))
-    lon = math.radians(_number(sheet, "origin_lon"))
-    # Like camera_for: a missing or malformed heading is 0.
-    heading_raw = sheet.get("heading", 0)
-    valid = isinstance(heading_raw, (int, float)) and not isinstance(heading_raw, bool)
-    heading = math.radians(float(heading_raw) if valid else 0.0)
-    east: Vec = (-math.sin(lon), math.cos(lon), 0.0)
-    north: Vec = (-math.sin(lat) * math.cos(lon), -math.sin(lat) * math.sin(lon), math.cos(lat))
-    up: Vec = (math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat))
-    r = math.sqrt(0.5)
-    forward = _mix((east, math.sin(heading)), (north, math.cos(heading)))
-    return {
-        "east": east,
-        "north": north,
-        "up": up,
-        "forward": forward,
-        "direction": _mix((forward, r), (up, -r)),
-        "camera_up": _mix((forward, r), (up, r)),
-        "right": _mix((east, math.cos(heading)), (north, -math.sin(heading))),
-    }
 
 
 def google_camera(sheet: dict[str, object], col: int, row: int) -> dict[str, object]:

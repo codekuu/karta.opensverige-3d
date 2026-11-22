@@ -2,28 +2,42 @@
 
 Roofs and ground come from the orthophoto. Building footprints come from
 OpenStreetMap and are lifted to a height from their tags. Walls get storeys,
-window rows, a shopfront ground floor and a cornice. The camera is the pixel
-cities' 45-degree oblique orthographic view, 0.25 m per pixel, east as is,
-north compressed by cos 45, height lifted by sin 45.
+window rows, a shopfront ground floor and a cornice.
+
+Every photo pixel is placed by the live map's own camera (rutor/frame.py): its
+latitude and longitude on the sheet's photo grid, at the ground height under it
+above the ellipsoid, land on one map pixel. The ground height is sampled every
+GROUND_STEP photo pixels on a lattice counted from the sheet origin, so two
+cells that see the same ground use the same numbers. Trigonometry runs in
+Python's math per row and per column; the per-pixel work is only +, - and *,
+which round the same way on every machine and in every cell.
 """
 
 from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Callable, Mapping
 
 import numpy as np
 from PIL import Image, ImageDraw
+
+from rutor.frame import WGS84_A, WGS84_E2, SheetFrame
 
 MPP = 0.25
 PHOTO_LUM_MEAN = 118.0
 PHOTO_LUM_STD = 52.0
 SIDE = 1536
-T = math.sqrt(0.5)
 DEFAULT_HEIGHT = 18.0
 STOREY = 3.3
 GROUND_STOREY = 4.0
 BAY_PX = 12  # one window bay is 3 m at 4 px per metre east-west
+# The ground model is read every 8 photo pixels (2 m) and interpolated between.
+GROUND_STEP = 8
+# The canvas reaches this far past the window on every side, so gaps between
+# photo pixels are filled from the same neighbours in every cell that sees them.
+PAD = 32
+METRES_PER_DEGREE = 111320.0
 
 # Göteborg plaster, stone and brick, light to dark.
 PALETTE = np.array(
@@ -167,23 +181,52 @@ def _coord(element: dict[str, object], key: str) -> float:
     return float(value)
 
 
+def ground_lattice(
+    camera: Mapping[str, float],
+    rows: int,
+    cols: int,
+    ground: Callable[[float, float], float],
+) -> tuple[np.ndarray, int, int]:
+    """Ground heights above the ellipsoid at every GROUND_STEP-th photo pixel centre of the box.
+
+    Returns the heights and the lattice index of their first column and row.
+    """
+    grid_lat = float(camera["grid_lat"])
+    grid_lon = float(camera["grid_lon"])
+    lon_px = MPP / (METRES_PER_DEGREE * math.cos(math.radians(grid_lat)))
+    lat_px = MPP / METRES_PER_DEGREE
+    gx0 = int(camera["photo_gx0"])
+    gy0 = int(camera["photo_gy0"])
+    i0, i1 = gx0 // GROUND_STEP, (gx0 + cols - 1) // GROUND_STEP + 1
+    j0, j1 = gy0 // GROUND_STEP, (gy0 + rows - 1) // GROUND_STEP + 1
+    lons = [grid_lon + (GROUND_STEP * i + 0.5) * lon_px for i in range(i0, i1 + 1)]
+    heights = np.empty((j1 - j0 + 1, i1 - i0 + 1), dtype=np.float64)
+    for j in range(j0, j1 + 1):
+        node_lat = grid_lat - (GROUND_STEP * j + 0.5) * lat_px
+        heights[j - j0] = [ground(node_lat, node_lon) for node_lon in lons]
+    return heights, i0, j0
+
+
 def draw(
     orto_image: Image.Image,
     osm: dict[str, object],
     trees: dict[str, object],
-    lat: float,
-    lon: float,
-    west: float,
-    south: float,
-    east: float,
-    north: float,
-    lift_m: float = 0.0,
-    grid_lat: float | None = None,
-    sheet_x0: int = 0,
+    camera: Mapping[str, float],
+    frame: SheetFrame,
+    ground: Callable[[float, float], float],
 ) -> Image.Image:
-    """Project one orthophoto and its OSM documents into the 1536 px cell window."""
+    """Project one orthophoto and its OSM documents into the 1536 px cell window.
+
+    camera is camera_for's box; ground gives the height of the ground above the
+    ellipsoid at a latitude and longitude.
+    """
     orto = np.asarray(orto_image.convert("RGB"))
     rows, cols = orto.shape[:2]
+    west = float(camera["west"])
+    south = float(camera["south"])
+    east = float(camera["east"])
+    north = float(camera["north"])
+    grid_lat = float(camera["grid_lat"])
     elements = _elements(osm)
     nodes = {
         _ident(element): (_coord(element, "lat"), _coord(element, "lon"))
@@ -241,7 +284,7 @@ def draw(
     tnodes = {_ident(element): element for element in tree_elements if element.get("type") == "node"}
     tways = _merged_ways(tree_elements)
     # One longitude scale per sheet keeps every cell on the same metre grid.
-    cos_ref = math.cos(math.radians(lat if grid_lat is None else grid_lat))
+    cos_ref = math.cos(math.radians(grid_lat))
     ppm_x = cols / ((east - west) * 111320.0 * cos_ref)
     ppm_y = rows / ((north - south) * 111320.0)
     crown_img = Image.new("F", (cols, rows), 0.0)
@@ -516,72 +559,105 @@ def draw(
     top_rgb = np.clip(top_rgb, 0, 255).astype(np.uint8)
     height = np.where(on_building, height, crown_h)
 
-    lon_c = west + (np.arange(cols) + 0.5) / cols * (east - west)
-    lat_r = north - (np.arange(rows) + 0.5) / rows * (north - south)
-    x_m = (lon_c - lon) * 111320.0 * cos_ref
-    y_m = (lat_r - lat) * 111320.0
-    # Pixel centres land on half-pixel screen positions when the box is snapped to
-    # the sheet grid, so floor (the column that holds the centre), never round.
-    sx = np.floor(SIDE / 2 + x_m / MPP).astype(np.int32)
-    col_ok = (sx >= 0) & (sx < SIDE)
+    # Where every photo pixel lands: its centre on the sheet's photo grid, at the ground height
+    # under it, through the live map's camera. Trigonometry per row and per column in Python's math.
+    grid_lon = float(camera["grid_lon"])
+    lon_px = MPP / (METRES_PER_DEGREE * cos_ref)
+    lat_px = MPP / METRES_PER_DEGREE
+    gx0 = int(camera["photo_gx0"])
+    gy0 = int(camera["photo_gy0"])
+    gx = gx0 + np.arange(cols)
+    lon_angles = [math.radians(grid_lon + (gx0 + c + 0.5) * lon_px) for c in range(cols)]
+    cos_lon = np.array([math.cos(a) for a in lon_angles], dtype=np.float64)
+    sin_lon = np.array([math.sin(a) for a in lon_angles], dtype=np.float64)
+    lattice, i0, j0 = ground_lattice(camera, rows, cols, ground)
+    lattice_col = gx // GROUND_STEP - i0
+    frac_x = (gx % GROUND_STEP) / GROUND_STEP
+    o_x, o_y, o_z = frame.origin
+    r_x, r_y, r_z = frame.right
+    u_x, u_y, u_z = frame.camera_up
+    # The canvas's top-left corner in map pixels.
+    left = int(camera["window_x0"]) - PAD
+    top_edge = int(camera["window_y0"]) - PAD
+    side = SIDE + 2 * PAD
 
-    canvas = np.zeros((SIDE, SIDE, 3), dtype=np.uint8)
-    filled = np.zeros((SIDE, SIDE), dtype=bool)
+    canvas = np.zeros((side, side, 3), dtype=np.uint8)
+    filled = np.zeros((side, side), dtype=bool)
 
     for row_index in range(rows):
-        base = SIDE / 2 - (y_m[row_index] + lift_m) * T / MPP
+        gy = gy0 + row_index
+        lat_angle = math.radians(grid_lat - (gy + 0.5) * lat_px)
+        sin_lat = math.sin(lat_angle)
+        cos_lat = math.cos(lat_angle)
+        prime = WGS84_A / math.sqrt(1 - WGS84_E2 * sin_lat * sin_lat)
+        lattice_row = gy // GROUND_STEP - j0
+        frac_y = (gy % GROUND_STEP) / GROUND_STEP
+        upper = lattice[lattice_row, lattice_col] * (1 - frac_x) + lattice[lattice_row, lattice_col + 1] * frac_x
+        lower = lattice[lattice_row + 1, lattice_col] * (1 - frac_x) + lattice[lattice_row + 1, lattice_col + 1] * frac_x
+        ground_h = upper * (1 - frac_y) + lower * frac_y
+        rho = (prime + ground_h) * cos_lat
+        d_x = rho * cos_lon - o_x
+        d_y = rho * sin_lon - o_y
+        d_z = (prime * (1 - WGS84_E2) + ground_h) * sin_lat - o_z
+        picture_x = d_x * r_x + d_y * r_y + d_z * r_z
+        picture_y = d_x * u_x + d_y * u_y + d_z * u_z
+        map_x = (picture_x - frame.x_meters) / MPP
+        map_y = (frame.y_meters - picture_y) / MPP
+        # Picture metres up per metre of height, with the local up at this pixel.
+        up_factor = cos_lat * cos_lon * u_x + cos_lat * sin_lon * u_y + sin_lat * u_z
+        # Floor in map pixels, then move to the canvas by whole pixels, so every cell agrees.
+        sx = np.floor(map_x).astype(np.int64) - left
+        base_i = np.floor(map_y).astype(np.int64) - top_edge
+        col_ok = (sx >= 0) & (sx < side)
         row_height = height[row_index]
-        lift = row_height * T / MPP
-        top = np.round(base - lift).astype(np.int32)
-        base_i = int(round(base))
+        lift = row_height * up_factor / MPP
+        top = np.floor(map_y - lift).astype(np.int64) - top_edge
         tree_cols = np.nonzero((crown_h[row_index] > 0) & col_ok)[0]
         if tree_cols.size:
-            if 0 <= base_i < SIDE:
-                canvas[base_i, sx[tree_cols]] = np.clip(photo[row_index, tree_cols], 0, 255).astype(np.uint8)
-                filled[base_i, sx[tree_cols]] = True
-            side = (crown_rgb[row_index, tree_cols] * 0.62).astype(np.uint8)
+            ground_ok = (base_i[tree_cols] >= 0) & (base_i[tree_cols] < side)
+            at = tree_cols[ground_ok]
+            canvas[base_i[at], sx[at]] = np.clip(photo[row_index, at], 0, 255).astype(np.uint8)
+            filled[base_i[at], sx[at]] = True
+            side_rgb = (crown_rgb[row_index, tree_cols] * 0.62).astype(np.uint8)
             tree_lift = lift[tree_cols]
             for k in range(int(tree_lift.min() * 0.62), int(tree_lift.max()) + 1):
-                screen_y = base_i - k
-                if screen_y < 0 or screen_y >= SIDE:
-                    continue
-                selected = (tree_lift >= k) & (k >= tree_lift * 0.62)
+                screen_y = base_i[tree_cols] - k
+                selected = (tree_lift >= k) & (k >= tree_lift * 0.62) & (screen_y >= 0) & (screen_y < side)
                 if selected.any():
-                    canvas[screen_y, sx[tree_cols[selected]]] = side[selected]
-                    filled[screen_y, sx[tree_cols[selected]]] = True
+                    canvas[screen_y[selected], sx[tree_cols[selected]]] = side_rgb[selected]
+                    filled[screen_y[selected], sx[tree_cols[selected]]] = True
         wall_cols = np.nonzero((row_height > 0) & col_ok & (ids[row_index] > 0))[0]
         if wall_cols.size:
             kmax = int(lift[wall_cols].max())
             for k in range(0, kmax + 1):
-                screen_y = base_i - k
-                if screen_y < 0 or screen_y >= SIDE:
+                screen_y = base_i[wall_cols] - k
+                selected = (lift[wall_cols] >= k) & (screen_y >= 0) & (screen_y < side)
+                if not selected.any():
                     continue
-                selected_cols = wall_cols[lift[wall_cols] >= k]
-                if selected_cols.size == 0:
-                    continue
-                metres = np.full(selected_cols.size, k * MPP / T, dtype=np.float32)
+                selected_cols = wall_cols[selected]
+                metres = (k * MPP / up_factor[selected_cols]).astype(np.float32)
                 colour = wall_pixels(
                     metres,
-                    sx[selected_cols] + sheet_x0,
+                    sx[selected_cols] + left,
                     plaster_lut[ids[row_index, selected_cols]],
                     row_height[selected_cols],
                 )
                 # Shade against each wall's own height, never the tallest wall in the
                 # row: the row reaches outside the window and differs between cells.
                 shade = 0.9 + 0.1 * (k / np.maximum(1.0, lift[selected_cols]))
-                canvas[screen_y, sx[selected_cols]] = np.clip(colour * shade[:, None], 0, 255).astype(np.uint8)
-                filled[screen_y, sx[selected_cols]] = True
-        ok = col_ok & (top >= 0) & (top < SIDE)
+                canvas[screen_y[selected], sx[selected_cols]] = np.clip(colour * shade[:, None], 0, 255).astype(np.uint8)
+                filled[screen_y[selected], sx[selected_cols]] = True
+        ok = col_ok & (top >= 0) & (top < side)
         idx = np.nonzero(ok)[0]
         canvas[top[idx], sx[idx]] = top_rgb[row_index, idx]
         filled[top[idx], sx[idx]] = True
 
     # Columns the orthophoto grid skipped: copy from the left neighbour.
-    for column in range(1, SIDE):
+    for column in range(1, side):
         gap = ~filled[:, column] & filled[:, column - 1]
         canvas[gap, column] = canvas[gap, column - 1]
         filled[gap, column] = True
-    for screen_y in range(1, SIDE):
+    for screen_y in range(1, side):
         gap = ~filled[screen_y]
         canvas[screen_y, gap] = canvas[screen_y - 1, gap]
-    return Image.fromarray(canvas)
+    return Image.fromarray(np.ascontiguousarray(canvas[PAD : PAD + SIDE, PAD : PAD + SIDE]))

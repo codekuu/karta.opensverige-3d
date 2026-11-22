@@ -81,8 +81,8 @@ BUILDING_FILTERS = (
     'relation["building"]',
 )
 
+# Single trees (node natural=tree) are not in this list: see tree_nodes_query.
 TREE_FILTERS = (
-    'node["natural"="tree"]',
     'way["natural"~"tree_row|wood|scrub|grassland"]',
     'way["landuse"~"grass|forest|meadow|village_green|recreation_ground|cemetery"]',
     'way["leisure"~"park|garden|playground|pitch"]',
@@ -191,6 +191,35 @@ def buildings_query(south: float, west: float, north: float, east: float, date: 
 
 def trees_query(south: float, west: float, north: float, east: float, date: str | None = None) -> str:
     return _query(TREE_FILTERS, south, west, north, east, date)
+
+
+def tree_nodes_query(south: float, west: float, north: float, east: float, date: str | None = None) -> str:
+    """Single trees, without the date index.
+
+    At a pinned date Overpass looks single trees up in its global node tag history and runs out
+    of memory (2 GB) on overpass-api.de and maps.mail.ru alike, even for one cell. Today's trees
+    whose current version is older than the pin are the same set, as long as nobody edits or
+    deletes them later, and that query is cheap.
+    """
+    west_s, south_s, east_s, north_s = _box_text(west, south, east, north)
+    box = f"({south_s},{west_s},{north_s},{east_s})"
+    older = "" if date is None else f'(if: timestamp() < "{date}")'
+    return f'[out:json][timeout:90];\nnode["natural"="tree"]{box}{older};\nout body;\n'
+
+
+def _merge_elements(*payloads: bytes) -> bytes:
+    """One Overpass answer from several. A tagged copy of an element wins over a bare one."""
+    merged: dict[tuple[str, int], dict[str, object]] = {}
+    for payload in payloads:
+        parsed = json.loads(payload.decode("utf-8"))
+        for element in parsed["elements"]:
+            if not isinstance(element, dict):
+                continue
+            key = (str(element.get("type")), int(element.get("id", 0)))
+            known = merged.get(key)
+            if known is None or (element.get("tags") and not known.get("tags")):
+                merged[key] = element
+    return json.dumps({"elements": list(merged.values())}).encode("utf-8")
 
 
 def build_request(url: str, data: bytes | None) -> urllib.request.Request:
@@ -404,5 +433,7 @@ def load_sources(
     if not _usable_osm(osm_path):
         _store(osm_path, fetch_overpass(buildings_query(south, west, north, east, date), fetch=getter))
     if not _usable_osm(trees_path):
-        _store(trees_path, fetch_overpass(trees_query(south, west, north, east, date), fetch=getter))
+        areas = fetch_overpass(trees_query(south, west, north, east, date), fetch=getter)
+        single = fetch_overpass(tree_nodes_query(south, west, north, east, date), fetch=getter)
+        _store(trees_path, _merge_elements(areas, single))
     return orto_path, osm_path, trees_path

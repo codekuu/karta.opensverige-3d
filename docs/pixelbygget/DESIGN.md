@@ -42,10 +42,11 @@ Each sheet has one source, set in `SHEET_KINDS` in `cli/rutor/renderer/sources.p
 `rutor render` builds the 1536 px source window from open data only:
 
 - **Orthophoto** from a WMS, fetched as shared 1024 px tiles on the sheet's 0.25 m grid, so every cell cuts its photo from the same pixels. Göteborgs Stad (CC0) today. Lidingö and Lantmäteriet are open issues.
-- **OpenStreetMap** from Overpass, pinned to one date per sheet, for buildings, roads, water and trees.
-- Buildings are extruded with the camera's fixed lift. Facades, windows and tree crowns come from rules keyed to world position, never to the cell.
+- **Ground heights** from the city's terrain model, Göteborgs Stad Höjdmodell 2022 (CC0, laser scanned, 0.5 m, RH 2000). Each 1 km tile is read out of the city's 10 km zip with HTTP range requests, about 7 MB, and cached for the whole sheet. Lantmäteriet's national model needs a login, so it is not used.
+- **OpenStreetMap** from Overpass, pinned to one date per sheet, for buildings, roads, water and trees. Single trees come from their own query: today's trees whose current version is older than the pin, because Overpass runs out of memory on them at a pinned date.
+- Every photo pixel is placed by the live map's own camera (`cli/rutor/frame.py`): its latitude and longitude, at the ground height under it above the ellipsoid (RH 2000 plus a geoid height of 36.7 m), land on one map pixel. Buildings and trees rise from that ground by their own height. Facades, windows and tree crowns come from rules keyed to world position, never to the cell.
 
-The rule that matters: **two neighbouring cells draw identical pixels in their 512 px overlap, on any machine.** `test_neighbour_cells_agree_in_their_overlap` pins it with zero differing pixels. A change to the renderer must keep that test green.
+The rule that matters: **two neighbouring cells draw identical pixels in their 512 px overlap, on any machine.** `test_neighbour_cells_agree_in_their_overlap` pins it with zero differing pixels, on hilly ground steep enough to leave gaps between photo rows. A change to the renderer must keep that test green. What keeps it: positions are computed in map pixels from the photo grid's global indices, floored, then moved by whole pixels; trigonometry runs in Python's `math` per row and per column, the per-pixel work is only `+`, `-` and `*`; ground heights are read on a lattice every 2 m counted from the origin; and the canvas reaches 32 px past the window, so gaps are filled from the same neighbours in both cells.
 
 ### Google (`stockholm-norr`)
 

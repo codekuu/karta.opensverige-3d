@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 
 from rutor.errors import bad_input
+from rutor.frame import SheetFrame, sheet_number
 
 METRES_PER_PIXEL = 0.25
 CELL_PX = 1024
@@ -13,65 +14,63 @@ WINDOW_PX = 1536
 METRES_PER_DEGREE = 111320.0
 HALF_EW_M = 260.0
 HALF_NS_M = 420.0
-LIFT_M = 34.7
 ORTHO_WIDTH = int(2 * HALF_EW_M / METRES_PER_PIXEL)
 ORTHO_HEIGHT = int(2 * HALF_NS_M / METRES_PER_PIXEL)
 
 
 def _number(sheet: dict[str, object], name: str) -> float:
-    value = sheet.get(name)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise bad_input(f"sheet is missing {name}")
-    return float(value)
+    return sheet_number(sheet, name)
 
 
-def camera_for(sheet: dict[str, object], col: int, row: int) -> dict[str, float]:
-    """Centre and fetch box of the 1536 px window on the 1024 px cell.
+def camera_for(
+    sheet: dict[str, object],
+    col: int,
+    row: int,
+    ground_ellipsoid_m: float | None = None,
+) -> dict[str, float]:
+    """The ground under the 1536 px window, and the photo box around it.
 
-    The sheet is a 45-degree oblique view, so ground y is the screen y divided
-    by cos 45. Heading is not stored on the sheet by the service. A missing
-    heading is 0, which is the camera the sheet definition uses when it does
-    not say otherwise. lift_m is the fixed height offset measured for the live
-    sheets.
+    The centre is the point on the ground that the live map's camera put on the middle of the
+    cell (rutor/frame.py), at ground_ellipsoid_m above the ellipsoid. Without it the sheet's
+    ground_height is used. Higher ground lands higher in the picture, so its centre lies
+    further south. The photo box is snapped to the sheet's 0.25 m photo grid, counted from the
+    origin with one longitude scale per sheet, so neighbouring cells sample identical pixels.
     """
     origin_lat = _number(sheet, "origin_lat")
     origin_lon = _number(sheet, "origin_lon")
-    x_metres = _number(sheet, "x_meters")
-    y_metres = _number(sheet, "y_meters")
     ground_height = _number(sheet, "ground_height")
-    heading_raw = sheet.get("heading", 0)
-    if isinstance(heading_raw, bool) or not isinstance(heading_raw, (int, float)):
-        heading = 0.0
-    else:
-        heading = float(heading_raw)
-    x = x_metres + (col * CELL_PX + CELL_PX // 2) * METRES_PER_PIXEL
-    y_ground = (y_metres - (row * CELL_PX + CELL_PX // 2) * METRES_PER_PIXEL) / math.cos(math.radians(45.0))
-    center_lat = origin_lat + y_ground / METRES_PER_DEGREE
+    ground = ground_height if ground_ellipsoid_m is None else float(ground_ellipsoid_m)
+    frame = SheetFrame.from_sheet(sheet)
+    window_x0 = col * CELL_PX - (WINDOW_PX - CELL_PX) // 2
+    window_y0 = row * CELL_PX - (WINDOW_PX - CELL_PX) // 2
+    center_lat, center_lon = frame.ground_point(col * CELL_PX + CELL_PX / 2, row * CELL_PX + CELL_PX / 2, ground)
     lon_scale = METRES_PER_DEGREE * math.cos(math.radians(origin_lat))
-    center_lon = origin_lon + x / lon_scale
-    # Snap the fetch box to the sheet's own 0.25 m pixel grid, measured from the
-    # origin, so neighbouring cells sample the photo on identical pixels.
     lon_px = METRES_PER_PIXEL / lon_scale
     lat_px = METRES_PER_PIXEL / METRES_PER_DEGREE
-    west = origin_lon + round((center_lon - HALF_EW_M / lon_scale - origin_lon) / lon_px) * lon_px
-    south = origin_lat + round((center_lat - HALF_NS_M / METRES_PER_DEGREE - origin_lat) / lat_px) * lat_px
+    photo_gx0 = round((center_lon - HALF_EW_M / lon_scale - origin_lon) / lon_px)
+    photo_gy0 = round((origin_lat - (center_lat + HALF_NS_M / METRES_PER_DEGREE)) / lat_px)
+    west = origin_lon + photo_gx0 * lon_px
+    north = origin_lat - photo_gy0 * lat_px
     return {
         "center_lat": center_lat,
         "center_lon": center_lon,
         "half_ew_m": HALF_EW_M,
         "half_ns_m": HALF_NS_M,
         "west": west,
-        "south": south,
+        "south": north - ORTHO_HEIGHT * lat_px,
         "east": west + ORTHO_WIDTH * lon_px,
-        "north": south + ORTHO_HEIGHT * lat_px,
+        "north": north,
         "ortho_width": ORTHO_WIDTH,
         "ortho_height": ORTHO_HEIGHT,
         "grid_lat": origin_lat,
         "grid_lon": origin_lon,
-        "window_x0": col * CELL_PX - (WINDOW_PX - CELL_PX) // 2,
-        "heading": heading,
+        "photo_gx0": photo_gx0,
+        "photo_gy0": photo_gy0,
+        "window_x0": window_x0,
+        "window_y0": window_y0,
+        "heading": frame.heading,
         "ground_height": ground_height,
-        "lift_m": LIFT_M,
+        "ground_ellipsoid_m": ground,
     }
 
 

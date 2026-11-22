@@ -299,6 +299,8 @@ class OsmDateTests(ServiceCase):
         header = f'[out:json][timeout:90][date:"{PINNED_DATE}"];\n'
         self.assertTrue(buildings.startswith(header))
         self.assertTrue(trees.startswith(header))
+        nodes = sources.tree_nodes_query(57.70, 11.96, 57.71, 11.97, date=PINNED_DATE)
+        self.assertIn(f'(if: timestamp() < "{PINNED_DATE}")', nodes)
 
     def test_a_query_without_a_date_keeps_the_plain_header(self) -> None:
         self.assertTrue(sources.buildings_query(57.70, 11.96, 57.71, 11.97).startswith("[out:json][timeout:90];\n"))
@@ -324,7 +326,8 @@ class OsmDateTests(ServiceCase):
         self.assertIn("2026-11-15T00-00-00Z", first_osm.name)
         with patch.dict(sources.OSM_DATES, {SHEET: "2026-12-01T00:00:00Z"}):
             _orto, second_osm, _trees = sources.load_sources(SHEET, 64, 59, camera, fetch=fetch)
-        self.assertEqual(fetch.overpass, before + 2)
+        # Buildings, tree areas and single trees.
+        self.assertEqual(fetch.overpass, before + 3)
         self.assertIn("2026-12-01T00-00-00Z", second_osm.name)
         self.assertNotEqual(first_osm.name, second_osm.name)
 
