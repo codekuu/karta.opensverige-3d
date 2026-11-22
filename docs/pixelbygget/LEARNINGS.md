@@ -2,6 +2,28 @@
 
 What we tried, what we measured and what we changed. Newest first. One entry per finding, with the number that decided it. Images, renders and raw logs stay outside the repository; this file keeps the conclusions.
 
+## 2026-11-23
+
+### The open renderer is placed by the live map's camera, on real ground
+- `rutor/frame.py` holds the live frame for both sources. Its points match `grid-config.ts` to 1e-6 m at the origin, at the sheet's corners and on a 110 m hill.
+- Before: `camera_for` mapped degrees to metres with one cos(origin_lat), and `draw.py` put all ground 34.7 m above a flat plane. Over Göteborg's 3 071 masked cells that missed the live map at sea level by a median 40 px and at most 174 px, mostly sideways. Higher ground missed by 2.8 px more per metre. 20 km from the origin, curvature alone drops the ground 31 m.
+- Ground heights come from Göteborgs Stad Höjdmodell 2022 (CC0, 0.5 m, RH 2000). It covers all 3 071 masked cells. Lantmäteriet's national model answers 401 without a login. The city ships it as 10 km zips of up to 700 MB, but a zip has its directory at the end: six HTTP range requests in 1.2 s fetch one 1 km tile, about 7 MB. Pillow reads the LZW float32 GeoTIFF, so nothing new is installed.
+- RH 2000 to the ellipsoid: SWEN17_RH2000 is 36.49 m and 36.92 m at Lantmäteriet's two nearest control points. A plane through three points gives 36.7 m at the origin, within about 0.5 m (1.5 px) over the sheet. The old renderer's comment already said "sea level in Gothenburg about 36 m".
+- The SWEREF 99 TM formula is checked against Lantmäteriet's STAC box for tile 640_32 to 1e-7 degrees.
+- Compared with the live tiles by correlating blurred brightness in boxes around strong ground features. Edge correlation over a whole cell is useless against pixel art (score 0.05).
+  - Cell 64_52, the canals by the origin, rendered from real data in 168 s: 0 to 8 px off in four boxes (correlation 0.58 to 0.73).
+  - Cell 63_19, a forested hill, rendered in 78 s: 14 to 46 px off in three boxes (0.56 to 0.68), 0 px over the whole cell (0.40). The old renderer was 34 to 120 px off in the same boxes. Google's mesh over a forest is the canopy, not the ground, which may explain part of the rest.
+- The new boxes sit where the cells really are, so the mask's photo cover rule moves with them. Rerun with the sheet's ground height, 9 of the 3 071 masked cells no longer have full photo cover: 36_55, 40_55, 58_95, 62_62, 72_59, 74_59, 77_60, 78_60 and 84_42.
+- Keeping neighbours identical on slopes: positions are floored in map pixels and moved by whole pixels. Trigonometry runs in Python per row and per column, so per-pixel work is only `+`, `-` and `*`. Ground is read on a 2 m lattice counted from the origin. The canvas reaches 32 px past the window, so gaps on slopes steeper than 22 degrees are filled from the same neighbours in both cells. The overlap test now runs on a ridge that is 58 degrees at its steepest and still finds 0 differing pixels.
+- Real neighbours 63_19 and 64_19, each centred on its own ground with its own photo box and terrain tiles, drew identical pixels in all 786 432 of their overlap.
+- The source manifest's version now ends in `terrain hojdmodell_2022`. The service does not check it, so a render from an older checkout can only be caught in review.
+- A photo row lands 0.7 px below the row north of it and paints over it, so the southern row of a mark can hide under the next row. A test of where a pixel lands must look at a row that something nearer cannot cover.
+
+### Single trees at a pinned date break Overpass
+- `node["natural"="tree"]` with `[date:...]` runs out of memory (2 GB, `node_tags_global.bin`) on overpass-api.de and maps.mail.ru, even for one cell and even with the box first. kumi.systems and private.coffee timed out. Tree areas and relations at the same date answer in about 33 s.
+- Single trees now come from their own query without the date: today's trees whose current version is older than the pin (`(if: timestamp() < "...")`). For 63_19 that is all 159 of today's trees. A tree someone edits or deletes later drops out of later renders, and neighbours rendered on either side of that edit can differ by that tree. The intake blends seams.
+- A friend's agent hit the same failure on an Eslöv cell and fixed it in their own way. That fix is not in this repo.
+
 ## 2026-11-22
 
 ### The Google camera is the live map's camera

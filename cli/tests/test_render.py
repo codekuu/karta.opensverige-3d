@@ -18,6 +18,7 @@ from unittest.mock import patch
 from rutor.__main__ import main
 from rutor.config import write_token
 from rutor.errors import RutorError
+from rutor.frame import SheetFrame
 from rutor.render import camera_for
 from rutor.renderer.sources import (
     BACKOFF_SECONDS,
@@ -25,6 +26,7 @@ from rutor.renderer.sources import (
     build_request,
     fetch_overpass,
     load_sources,
+    tree_nodes_query,
     trees_query,
     wms_url,
 )
@@ -144,22 +146,25 @@ class RenderTests(unittest.TestCase):
 
     def test_camera_for_center_of_cell(self) -> None:
         camera = camera_for(_sheet(), 64, 52)
-        self.assertAlmostEqual(camera["center_lat"], 57.705374, delta=1e-6)
-        self.assertAlmostEqual(camera["center_lon"], 11.969152, delta=1e-6)
-        self.assertAlmostEqual(camera["south"], 57.70160, delta=2e-5)
-        self.assertAlmostEqual(camera["north"], 57.70915, delta=2e-5)
-        self.assertAlmostEqual(camera["west"], 11.96478, delta=2e-5)
-        self.assertAlmostEqual(camera["east"], 11.97352, delta=2e-5)
+        lon_m = 111320.0 * math.cos(math.radians(57.707))
+        # The box is 260 m east-west and 420 m north-south either side of the centre, to a pixel.
+        self.assertAlmostEqual((camera["center_lat"] - camera["south"]) * 111320.0, 420.0, delta=0.25)
+        self.assertAlmostEqual((camera["north"] - camera["center_lat"]) * 111320.0, 420.0, delta=0.25)
+        self.assertAlmostEqual((camera["center_lon"] - camera["west"]) * lon_m, 260.0, delta=0.25)
+        self.assertAlmostEqual((camera["east"] - camera["center_lon"]) * lon_m, 260.0, delta=0.25)
+        self.assertEqual(camera["window_x0"], 64 * 1024 - 256)
+        self.assertEqual(camera["window_y0"], 52 * 1024 - 256)
         self.assertEqual(camera["half_ew_m"], 260.0)
         self.assertEqual(camera["half_ns_m"], 420.0)
         self.assertEqual(camera["ground_height"], 40.0)
         self.assertEqual(camera["heading"], 0.0)
-        self.assertEqual(camera["lift_m"], 34.7)
+        self.assertNotIn("lift_m", camera)
+        self.assertEqual(camera["ground_ellipsoid_m"], 40.0)
         self.assertNotIn("half_width_m", camera)
         self.assertNotIn("half_height_m", camera)
         other = camera_for(_sheet(), 60, 54)
-        self.assertAlmostEqual(other["center_lat"], 57.698869, delta=1e-6)
-        self.assertAlmostEqual(other["center_lon"], 11.951934, delta=1e-6)
+        self.assertLess(other["center_lat"], camera["center_lat"])
+        self.assertLess(other["center_lon"], camera["center_lon"])
         bare = dict(_sheet())
         del bare["heading"]
         self.assertEqual(camera_for(bare, 64, 52)["heading"], 0.0)
@@ -192,7 +197,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(query["WIDTH"], ["2080"])
         self.assertEqual(query["HEIGHT"], ["3360"])
         self.assertEqual(query["FORMAT"], ["image/png"])
-        box = "(57.70160,11.96478,57.70915,11.97352)"
+        box = f"({camera['south']:.5f},{camera['west']:.5f},{camera['north']:.5f},{camera['east']:.5f})"
         buildings = buildings_query(camera["south"], camera["west"], camera["north"], camera["east"])
         self.assertIn(f'way["building"]{box};', buildings)
         self.assertIn(f'way["building:part"]{box};', buildings)
@@ -201,7 +206,8 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(buildings.startswith("[out:json][timeout:90];\n"))
         self.assertTrue(buildings.endswith("out body; >; out skel qt;\n"))
         trees = trees_query(camera["south"], camera["west"], camera["north"], camera["east"])
-        self.assertIn(f'node["natural"="tree"]{box};', trees)
+        # Single trees come from their own query: see test_tree_nodes_skip_the_date_index.
+        self.assertNotIn('node["natural"="tree"]', trees)
         self.assertIn(f'way["natural"~"tree_row|wood|scrub|grassland"]{box};', trees)
         self.assertIn(f'relation["landuse"~"grass|forest"]{box};', trees)
 
@@ -266,8 +272,17 @@ class RenderTests(unittest.TestCase):
             rgb = np.stack([green * 0.7, green, green * 0.5], axis=-1).clip(0, 255).astype(np.uint8)
             return Image.fromarray(rgb)
 
-        a = camera_for(sheet, 64, 52)
-        b = camera_for(sheet, 65, 52)
+        frame = SheetFrame.from_sheet(sheet)
+
+        def ground(point_lat: float, point_lon: float) -> float:
+            # Rising north at 30 percent with a ridge every 94 m that is 58 degrees at its steepest,
+            # and 10 percent east: photo rows spread apart on the ridges and leave gaps to fill.
+            north_m = (point_lat - 57.70) * 111320.0
+            east_m = (point_lon - 11.96) * 59480.0
+            return 60.0 + 0.3 * north_m + 20.0 * math.sin(north_m / 15.0) + 0.1 * east_m
+
+        a = camera_for(sheet, 64, 52, ground_ellipsoid_m=ground(57.7054, 11.9692))
+        b = camera_for(sheet, 65, 52, ground_ellipsoid_m=ground(57.7054, 11.9735))
         seam_lon = (a["center_lon"] + b["center_lon"]) / 2
         lat = a["center_lat"]
         d_lon = 40.0 / (111320.0 * math.cos(math.radians(lat)))
@@ -311,20 +326,7 @@ class RenderTests(unittest.TestCase):
         }
         images = []
         for camera in (a, b):
-            image = draw(
-                world_orto(camera),
-                osm,
-                trees,
-                camera["center_lat"],
-                camera["center_lon"],
-                camera["west"],
-                camera["south"],
-                camera["east"],
-                camera["north"],
-                camera["lift_m"],
-                grid_lat=origin_lat,
-                sheet_x0=int(camera["window_x0"]),
-            )
+            image = draw(world_orto(camera), osm, trees, camera, frame, ground)
             images.append(np.asarray(image.convert("RGB")).astype(np.int16))
         left = images[0][:, 1024:1536]
         right = images[1][:, 0:512]
@@ -332,21 +334,8 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(differing, 0, f"{differing} pixels differ in the east-west overlap")
 
         # The cell to the south overlaps the bottom third of this window.
-        c = camera_for(sheet, 64, 53)
-        below = draw(
-            world_orto(c),
-            osm,
-            trees,
-            c["center_lat"],
-            c["center_lon"],
-            c["west"],
-            c["south"],
-            c["east"],
-            c["north"],
-            c["lift_m"],
-            grid_lat=origin_lat,
-            sheet_x0=int(c["window_x0"]),
-        )
+        c = camera_for(sheet, 64, 53, ground_ellipsoid_m=ground(57.7020, 11.9692))
+        below = draw(world_orto(c), osm, trees, c, frame, ground)
         lower = np.asarray(below.convert("RGB")).astype(np.int16)
         differing_ns = int((np.abs(images[0][1024:1536] - lower[0:512]).sum(axis=-1) != 0).sum())
         self.assertEqual(differing_ns, 0, f"{differing_ns} pixels differ in the north-south overlap")
@@ -371,11 +360,7 @@ class RenderTests(unittest.TestCase):
         orto = Image.new("RGB", (int(camera["ortho_width"]), int(camera["ortho_height"])), (120, 120, 110))
 
         def render(trees: dict[str, object]) -> np.ndarray:
-            image = draw(
-                orto, {"elements": []}, trees, lat, lon,
-                camera["west"], camera["south"], camera["east"], camera["north"], camera["lift_m"],
-                grid_lat=57.707, sheet_x0=int(camera["window_x0"]),
-            )
+            image = draw(orto, {"elements": []}, trees, camera, SheetFrame.from_sheet(_sheet()), lambda _a, _b: 40.0)
             return np.asarray(image.convert("RGB")).astype(np.int16)
 
         bare = render({"elements": ring + [{"type": "way", "id": 30, "nodes": [1, 2, 3, 4, 1]}]})
@@ -425,6 +410,34 @@ class RenderTests(unittest.TestCase):
         request = build_request("https://overpass-api.de/api/interpreter", b"data=query")
         self.assertEqual(request.get_header("User-agent"), "pixelbygget-rutor/0.1")
 
+    def test_tree_nodes_skip_the_date_index(self) -> None:
+        # Overpass runs out of memory on single trees at a pinned date (node_tags_global), on
+        # overpass-api.de and maps.mail.ru alike. Today's trees whose current version is older
+        # than the pin are the same set, as long as nobody edits or deletes them later.
+        query = tree_nodes_query(57.70, 11.96, 57.71, 11.97, "2026-11-15T00:00:00Z")
+        self.assertTrue(query.startswith("[out:json][timeout:90];\n"))
+        self.assertIn('node["natural"="tree"](57.70000,11.96000,57.71000,11.97000)(if: timestamp() < "2026-11-15T00:00:00Z");', query)
+        self.assertNotIn("[date:", query)
+
+    def test_trees_file_holds_areas_and_single_trees(self) -> None:
+        def fetch(url: str, data: bytes | None = None, timeout: float = 120.0) -> tuple[int, bytes]:
+            del timeout
+            if data is None:
+                return 200, _world_png(url)
+            body = urllib.parse.unquote_plus(data.decode("utf-8"))
+            if "timestamp()" in body:
+                return 200, b'{"elements":[{"type":"node","id":7,"lat":57.7,"lon":11.97,"tags":{"natural":"tree"}}]}'
+            if "tree_row" in body:
+                return 200, b'{"elements":[{"type":"way","id":20,"nodes":[1,2],"tags":{"natural":"tree_row"}},{"type":"node","id":7,"lat":57.7,"lon":11.97}]}'
+            return 200, b'{"elements":[]}'
+
+        camera = camera_for(_sheet(), 64, 52)
+        _orto, _osm, trees_path = load_sources("goteborg-norr", 64, 52, camera, fetch=fetch)
+        elements = json.loads(trees_path.read_text(encoding="utf-8"))["elements"]
+        self.assertEqual([(e["type"], e["id"]) for e in elements], [("way", 20), ("node", 7)])
+        # The tagged copy of node 7 wins over the bare one the way pulled in.
+        self.assertEqual(elements[1]["tags"], {"natural": "tree"})
+
     def test_cached_sources_are_reused(self) -> None:
         calls = {"n": 0}
 
@@ -437,10 +450,10 @@ class RenderTests(unittest.TestCase):
 
         camera = camera_for(_sheet(), 64, 52)
         load_sources("goteborg-norr", 64, 52, camera, fetch=fetch)
-        # 3 x 4 photo tiles plus two Overpass queries.
-        self.assertEqual(calls["n"], 14)
+        # 3 x 4 photo tiles plus three Overpass queries.
+        self.assertEqual(calls["n"], 15)
         load_sources("goteborg-norr", 64, 52, camera, fetch=fetch)
-        self.assertEqual(calls["n"], 14)
+        self.assertEqual(calls["n"], 15)
         cache = self.root / "work" / "goteborg-norr" / "sources" / "64_52"
         # The photo file is keyed by its box and layer, the OSM files by the pinned date.
         self.assertEqual(len(list(cache.glob("orto_*.png"))), 1)
@@ -476,7 +489,13 @@ class RenderTests(unittest.TestCase):
         with Image.open(path_b) as opened:
             b = np.asarray(opened.convert("RGB"))
         self.assertEqual(a.shape, (3360, 2080, 3))
-        self.assertTrue((a[:, 1024:] == b[:, : 2080 - 1024]).all())
+        # The two boxes sit on one photo grid, so where they overlap they hold the same pixels.
+        dx = int(second["photo_gx0"]) - int(first["photo_gx0"])
+        dy = int(second["photo_gy0"]) - int(first["photo_gy0"])
+        self.assertGreater(dx, 1000)
+        rows = slice(max(0, dy), 3360 + min(0, dy))
+        rows_b = slice(max(0, -dy), 3360 + min(0, -dy))
+        self.assertTrue((a[rows, dx:] == b[rows_b, : 2080 - dx]).all())
         # The top-left pixel is the sheet pixel the snapped box starts at.
         lon_px = 0.25 / (111320.0 * math.cos(math.radians(57.707)))
         lat_px = 0.25 / 111320.0
@@ -512,12 +531,15 @@ class RenderTests(unittest.TestCase):
                 return 200, _world_png(url)
             return 200, b'{"elements":[]}'
 
-        with patch("rutor.renderer.sources.http_request", side_effect=fetch):
+        # No terrain tiles: the ground reads as sea level.
+        with patch("rutor.renderer.sources.http_request", side_effect=fetch), patch(
+            "rutor.terrain.ranged_http", return_value=(404, 0, b"")
+        ):
             code, out, err = self.run_cmd(["render", "goteborg-norr", "64_52"])
         self.assertEqual(err, "")
         self.assertEqual(code, 0)
         self.assertIn("rendered: goteborg-norr 64_52", out)
-        self.assertEqual(calls["n"], 14)
+        self.assertEqual(calls["n"], 15)
         png = self.root / "work" / "goteborg-norr" / "64_52.src.png"
         with Image.open(png) as image:
             self.assertEqual(image.size, (1536, 1536))
@@ -529,18 +551,17 @@ class RenderTests(unittest.TestCase):
 
         from rutor.renderer.draw import draw
 
-        orto = Image.new("RGB", (24, 24), (150, 140, 120))
-        for x in range(24):
-            for y in range(0, 24, 3):
-                orto.putpixel((x, y), (180 + x, 100, 80))
-        west, south, east, north = 11.97000, 57.70500, 11.97040, 57.70530
-        lat, lon = 57.70515, 11.97020
+        camera = camera_for(_sheet(), 64, 52)
+        lat, lon = camera["center_lat"], camera["center_lon"]
+        orto = Image.new("RGB", (int(camera["ortho_width"]), int(camera["ortho_height"])), (150, 140, 120))
+        d_lat = 12.0 / 111320.0
+        d_lon = 10.0 / (111320.0 * math.cos(math.radians(lat)))
         osm = {
             "elements": [
-                {"type": "node", "id": 1, "lat": 57.70510, "lon": 11.97010},
-                {"type": "node", "id": 2, "lat": 57.70510, "lon": 11.97030},
-                {"type": "node", "id": 3, "lat": 57.70522, "lon": 11.97030},
-                {"type": "node", "id": 4, "lat": 57.70522, "lon": 11.97010},
+                {"type": "node", "id": 1, "lat": lat - d_lat, "lon": lon - d_lon},
+                {"type": "node", "id": 2, "lat": lat - d_lat, "lon": lon + d_lon},
+                {"type": "node", "id": 3, "lat": lat + d_lat, "lon": lon + d_lon},
+                {"type": "node", "id": 4, "lat": lat + d_lat, "lon": lon - d_lon},
                 {
                     "type": "way",
                     "id": 9,
@@ -550,11 +571,56 @@ class RenderTests(unittest.TestCase):
             ]
         }
         trees: dict[str, object] = {"elements": []}
-        first = draw(orto, osm, trees, lat, lon, west, south, east, north, 34.7)
-        second = draw(orto, osm, trees, lat, lon, west, south, east, north, 34.7)
+        frame = SheetFrame.from_sheet(_sheet())
+        first = draw(orto, osm, trees, camera, frame, lambda _a, _b: 40.0)
+        second = draw(orto, osm, trees, camera, frame, lambda _a, _b: 40.0)
         self.assertEqual(first.size, (1536, 1536))
         self.assertIn(first.mode, ("RGB", "RGBA"))
         self.assertEqual(first.tobytes(), second.tobytes())
+
+    @unittest.skipUnless(DRAWING, "pillow and numpy are not installed")
+    def test_a_photo_pixel_lands_where_the_live_camera_puts_it(self) -> None:
+        import numpy as np
+        from PIL import Image
+
+        from rutor.renderer.draw import draw
+
+        sheet = _sheet()
+        frame = SheetFrame.from_sheet(sheet)
+        lon_px = 0.25 / (111320.0 * math.cos(math.radians(57.707)))
+        lat_px = 0.25 / 111320.0
+
+        for col, row in ((64, 52), (3, 110), (126, 4)):
+            camera = camera_for(sheet, col, row, ground_ellipsoid_m=80.0)
+            centre_lat, centre_lon = camera["center_lat"], camera["center_lon"]
+
+            def ground(point_lat: float, point_lon: float) -> float:
+                # A plane through the cell centre at 80 m, rising north and east.
+                return 80.0 + 0.2 * (point_lat - centre_lat) * 111320.0 + 0.05 * (point_lon - centre_lon) * 59480.0
+
+            width, height = int(camera["ortho_width"]), int(camera["ortho_height"])
+            # A flat grey photo with a 3 by 3 red mark of the same brightness, so nothing reads it as
+            # busy ground or a lawn. A photo row lands 0.7 px below the one north of it and paints
+            # over it, so the mark's middle row is the one that always shows: the next grey row
+            # lands at least 1.4 px further down.
+            photo = np.full((height, width, 3), 120, dtype=np.uint8)
+            mark_r, mark_c = height // 2 + 37, width // 2 - 51
+            photo[mark_r - 2 : mark_r + 1, mark_c - 1 : mark_c + 2] = (200, 80, 80)
+            image = draw(Image.fromarray(photo), {"elements": []}, {"elements": []}, camera, frame, ground)
+            pixels = np.asarray(image.convert("RGB")).astype(np.int16)
+            gx = int(camera["photo_gx0"]) + mark_c
+            gy = int(camera["photo_gy0"]) + mark_r - 1
+            point_lat = 57.707 - (gy + 0.5) * lat_px
+            point_lon = 11.967 + (gx + 0.5) * lon_px
+            # The ground model is sampled every 2 m and interpolated; this one is a plane, so exact.
+            px, py = frame.map_pixel(point_lat, point_lon, ground(point_lat, point_lon))
+            x = math.floor(px) - int(camera["window_x0"])
+            y = math.floor(py) - int(camera["window_y0"])
+            self.assertTrue(0 <= x < 1536 and 0 <= y < 1536, f"cell {col}_{row}: mark lands outside, at {x}, {y}")
+            red, green = int(pixels[y, x, 0]), int(pixels[y, x, 1])
+            self.assertGreater(red - green, 60, f"cell {col}_{row}: no mark at {x}, {y}")
+            self.assertLess(abs(int(pixels[y + 4, x, 0]) - int(pixels[y + 4, x, 1])), 20)
+            self.assertLess(abs(int(pixels[y, x - 4, 0]) - int(pixels[y, x - 4, 1])), 20)
 
     def test_preflight_lines(self) -> None:
         code, out, err = self.run_cmd(["preflight"])

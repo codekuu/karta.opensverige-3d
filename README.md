@@ -112,7 +112,7 @@ Without `pip install -e cli`, the same commands work as `python -m rutor` from t
 
 Each sheet has one source, so neighbouring cells match:
 
-- `goteborg-norr` is drawn from open data. Göteborgs Stad orthophoto is CC0. OpenStreetMap is ODbL.
+- `goteborg-norr` is drawn from open data. Göteborgs Stad orthophoto and terrain model are CC0. OpenStreetMap is ODbL. The first render in an area also reads about 7 MB of terrain per square kilometre.
 - `stockholm-norr` is drawn from Google Photorealistic 3D Tiles through Cesium ion. It is not open yet.
 
 A Google sheet needs three things on your machine:

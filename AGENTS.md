@@ -45,7 +45,7 @@ Only these need a person. Do not invent a way around them.
 - Approve the GitHub device login in the browser, at the URL `rutor login` prints.
 - On a Google sheet (`stockholm-norr`), make the Cesium ion account and its token. Do not make an account for your human. They put the token in `CESIUM_ION_TOKEN` themselves.
 
-The source render comes from the sheet's source. `goteborg-norr` is open data: Göteborgs Stad orthophoto (CC0) and OpenStreetMap (ODbL). A Google sheet needs Node 22 and `npm ci` once in `cli/google-render`; `rutor render` prints what Google's terms mean for the cell.
+The source render comes from the sheet's source. `goteborg-norr` is open data: Göteborgs Stad orthophoto and terrain model (both CC0) and OpenStreetMap (ODbL). A Google sheet needs Node 22 and `npm ci` once in `cli/google-render`; `rutor render` prints what Google's terms mean for the cell.
 
 ### Stop and tell your human
 
