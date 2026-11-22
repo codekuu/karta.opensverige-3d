@@ -6,7 +6,9 @@ import os
 from pathlib import Path
 
 DEFAULT_SERVICE_URL = "https://pixelbygget.gustaf-garnow.workers.dev"
-PLACEHOLDER_CLIENT_ID = "REPLACE_WITH_CLIENT_ID"
+# The "Pixelbygget" OAuth App under the opensverige organisation. A client id is public; the
+# device flow needs no secret.
+GITHUB_CLIENT_ID = "Ov23liulid4VoLnmJCVH"
 
 
 def home() -> Path:
@@ -46,7 +48,7 @@ def service_url() -> str:
 
 
 def github_client_id() -> str:
-    return os.environ.get("PIXELBYGGET_GITHUB_CLIENT_ID", PLACEHOLDER_CLIENT_ID)
+    return os.environ.get("PIXELBYGGET_GITHUB_CLIENT_ID", GITHUB_CLIENT_ID)
 
 
 def repo_root() -> Path:

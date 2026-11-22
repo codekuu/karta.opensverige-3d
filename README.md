@@ -4,7 +4,7 @@ Pixelbygget is the volunteer grid for the OpenSverige map. A city is a sheet of 
 
 ## Status
 
-Code contributions are open now: the renderer, the open-data sources, the quality check and the docs. GPU contributions open when the service is live. Until then `rutor login` has no service to talk to.
+Code contributions are open now: the renderer, the open-data sources, the quality check and the docs. GPU contributions are open too, on `goteborg-norr` for now.
 
 Start with an issue labelled `good first issue`. Open a pull request against `main`. The tests must pass. How the parts fit together is in [docs/pixelbygget/DESIGN.md](docs/pixelbygget/DESIGN.md).
 

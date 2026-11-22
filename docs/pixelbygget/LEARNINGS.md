@@ -2,6 +2,13 @@
 
 What we tried, what we measured and what we changed. Newest first. One entry per finding, with the number that decided it. Images, renders and raw logs stay outside the repository; this file keeps the conclusions.
 
+## 2026-11-22
+
+### The service is live
+- `pixelbygget.gustaf-garnow.workers.dev` runs with D1, R2 and KV in Western Europe. Only `goteborg-norr` is open; `stockholm-norr` answers 404 until it has an open photo source.
+- A municipal orthophoto stops at the municipal border. Göteborg's is pure white over Partille, Mölndal and Kungälv, which lie inside the Göteborg urban area. A sheet's mask therefore needs both rules: the urban area plus 500 m, and full photo cover over the cell's whole photo box. Göteborg norr: 5 349 cells by area, 3 071 with photo.
+- overpass-api.de answers 406 to curl's default User-Agent. With `pixelbygget-rutor/0.1` a small query took 28 s, and 42 s with the pinned date: history queries are slower.
+
 ## 2026-11-21
 
 ### Review before opening

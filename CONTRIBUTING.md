@@ -1,6 +1,6 @@
 # Contributing
 
-Two ways to help. A code change is open now. A GPU run, where the map gets one cell credited to your GitHub login, opens when the service is live.
+Two ways to help. A code change is open now. A GPU run puts one cell on the map, credited to your GitHub login.
 
 This page holds the rules. The commands and the install are in [README.md](README.md). If an agent runs the commands for you, it reads [AGENTS.md](AGENTS.md) first.
 
@@ -40,7 +40,7 @@ Each step is explained in [README.md](README.md).
 
 ## Code contributions
 
-Code contributions are open now. GPU runs open when the service is live.
+Code contributions and GPU runs are both open. GPU runs need an NVIDIA card and work on `goteborg-norr` only for now.
 
 - Pick an issue, or open one before a large change.
 - Branch from `main` and open a pull request against `main`.
