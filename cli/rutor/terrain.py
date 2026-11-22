@@ -68,6 +68,12 @@ TERRAIN_SOURCES: dict[str, TerrainSource] = {
 }
 
 
+def terrain_label(sheet_id: str) -> str:
+    """The terrain model a sheet is drawn on, for the source manifest: flat when it has none."""
+    found = TERRAIN_SOURCES.get(sheet_id)
+    return "flat" if found is None else found.label
+
+
 def terrain_source(sheet_id: str) -> TerrainSource:
     found = TERRAIN_SOURCES.get(sheet_id)
     if found is None:

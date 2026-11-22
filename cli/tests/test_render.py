@@ -546,6 +546,37 @@ class RenderTests(unittest.TestCase):
             self.assertIn(image.mode, ("RGB", "RGBA"))
 
     @unittest.skipUnless(DRAWING, "pillow and numpy are not installed")
+    def test_an_open_sheet_without_a_terrain_model_draws_flat_ground(self) -> None:
+        from rutor.renderer import sources
+
+        # A new city, like Eslöv, has a photo and OSM but no city terrain model. It is drawn on
+        # flat ground at the sheet's ground_height: there is no older map to line up with.
+        sheet = dict(_sheet())
+        sheet["id"] = "test-open"
+        self.svc.state["sheets"] = {"test-open": sheet}
+
+        def fetch(url: str, data: bytes | None = None, timeout: float = 120.0) -> tuple[int, bytes]:
+            del timeout
+            if data is None:
+                return 200, _world_png(url)
+            return 200, b'{"elements":[]}'
+
+        def no_terrain(url: str, start: int, end: int) -> tuple[int, int, bytes]:
+            raise AssertionError(f"no terrain fetch for a sheet without a model ({url}, {start}, {end})")
+
+        with patch.dict(sources.ORTHO_SOURCES, {"test-open": sources.ORTHO_SOURCES["goteborg-norr"]}), patch.dict(
+            sources.OSM_DATES, {"test-open": "2026-11-15T00:00:00Z"}
+        ), patch.dict(sources.SHEET_KINDS, {"test-open": "open"}), patch(
+            "rutor.renderer.sources.http_request", side_effect=fetch
+        ), patch("rutor.terrain.ranged_http", side_effect=no_terrain):
+            code, out, err = self.run_cmd(["render", "test-open", "64_52"])
+        self.assertEqual(err, "")
+        self.assertEqual(code, 0)
+        self.assertIn("rendered: test-open 64_52", out)
+        info = json.loads((self.root / "work" / "test-open" / "64_52.src.json").read_text(encoding="utf-8"))
+        self.assertTrue(info["version"].endswith("; terrain flat"), info["version"])
+
+    @unittest.skipUnless(DRAWING, "pillow and numpy are not installed")
     def test_draw_is_1536_and_deterministic(self) -> None:
         from PIL import Image
 
