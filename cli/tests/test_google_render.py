@@ -37,11 +37,11 @@ def _sheet(sheet_id: str = GOOGLE_SHEET) -> dict[str, object]:
         "state": "open",
         "cols": 144,
         "rows": 70,
-        "origin_lat": 59.334,
-        "origin_lon": 18.063,
-        "x_meters": -18432,
-        "y_meters": 8960,
-        "ground_height": 30,
+        "origin_lat": 59.335,
+        "origin_lon": 18.055,
+        "x_meters": -17408,
+        "y_meters": 8704,
+        "ground_height": 45,
         "heading": 0,
     }
 

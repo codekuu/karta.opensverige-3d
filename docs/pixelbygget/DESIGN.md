@@ -55,6 +55,7 @@ The rule that matters: **two neighbouring cells draw identical pixels in their 5
 - The token goes to node in its environment and to the page in memory, never on a command line, in a file or in a logged URL.
 - Streamed tiles are not pixel-identical between machines, so the overlap test does not apply. The intake blends the seams.
 - Google's terms bind the token. `rutor render` prints that on every Google cell, and the manifest names the source, so those cells can be found and taken down if Google asks.
+- The sheet is already live, so its mask is the live island: 5 036 cells, the ones the map's edge picture draws. It is redrawn, not extended.
 
 ## The redraw
 
