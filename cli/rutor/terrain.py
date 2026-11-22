@@ -47,6 +47,8 @@ class TerrainSource(NamedTuple):
     false_easting: float
     # Geoid height over the sheet, metres: ellipsoid height = RH 2000 height + this.
     geoid_m: float
+    # Named in the source manifest, so a render placed on real ground can be told from an old one.
+    label: str
     tile_m: int = 1000
     pixel_m: float = 0.5
 
@@ -61,6 +63,7 @@ TERRAIN_SOURCES: dict[str, TerrainSource] = {
         1.0,
         150000.0,
         36.7,
+        "hojdmodell_2022",
     ),
 }
 

@@ -372,7 +372,8 @@ class SourceInfoTests(ServiceCase):
         info_path = self.work() / f"{CELL}.src.json"
         info = json.loads(info_path.read_text(encoding="utf-8"))
         self.assertEqual(info["provider"], "opengeodata.goteborg.se orto_2025")
-        self.assertEqual(info["version"], f"osm {PINNED_DATE}; ortho orto_2025")
+        # The terrain model marks renders placed by the live camera on real ground (2026-11-23).
+        self.assertEqual(info["version"], f"osm {PINNED_DATE}; ortho orto_2025; terrain hojdmodell_2022")
         png = self.work() / f"{CELL}.src.png"
         self.assertEqual(info["sha256"], hashlib.sha256(png.read_bytes()).hexdigest())
         for value in info.values():
