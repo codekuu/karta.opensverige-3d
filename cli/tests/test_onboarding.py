@@ -195,3 +195,17 @@ class CommandsBeforeALockTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReaderThatStopsTests(unittest.TestCase):
+    def test_a_reader_that_stops_reading_ends_the_command_quietly(self) -> None:
+        # `rutor grid <sheet> --free | head` closes the pipe after ten lines. That is not a fault.
+        class Closed(io.TextIOBase):
+            def write(self, _text: str) -> int:
+                raise BrokenPipeError
+
+        stderr = io.StringIO()
+        with redirect_stdout(Closed()), redirect_stderr(stderr):
+            code = main(["--version"])
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")

@@ -64,17 +64,17 @@ No yes, no login.
    - `python -m pip install -r requirements.txt`
 
    The first redraw downloads about 20 GB of model weights.
-2. For `stockholm-norr`: run `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome, about 750 MB. If `node` is missing or older than 22, ask your human to install Node. Do not install it as administrator yourself.
+2. For `stockholm-norr`: run `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome, about 750 MB. If `node` is missing or older than 22, ask your human to install Node. Do not install it yourself. When they have, they close and reopen the program you run in, so that your commands find it.
 3. For `stockholm-norr`: your human sets `CESIUM_ION_TOKEN` themselves, where your commands can read it.
-   - Windows: they run `setx CESIUM_ION_TOKEN "<their token>"` in their own PowerShell, then start your terminal again. A variable set in another window does not reach yours.
+   - Windows: they run `setx CESIUM_ION_TOKEN "<their token>"` in their own PowerShell, then close and reopen the program you run in. A variable set in another window does not reach yours, and a new shell inside a program that was already running does not get it either.
    - Linux: they export it in the shell you run in.
    - Never ask them to paste the token to you, and never read it back.
-4. `rutor login --accept-terms`, only after the yes in step 4. It prints the terms again, then `code:`, `url:` and `waiting:`. Then it keeps running until your human has approved the code, which can take minutes. Read its output while it runs and give the code and the url to your human. Do not stop the command, and do not start a second one. Never open that page or type the code for them.
+4. `rutor login --accept-terms`, only after the yes in step 4. It prints the terms again, then `code:`, `url:` and `waiting:`. Then it keeps running until your human has approved the code, which can take minutes. Start it so that you can read its output while it runs: in the background, or with a time limit of at least 15 minutes. Give the code and the url to your human. Do not stop the command, and do not start a second one. Never open that page or type the code for them.
 5. `rutor preflight --sheet stockholm-norr`. Every line must say `ok`, the lines `check: node`, `check: google renderer` and `check: cesium token` among them.
 
 ## 6. Pick a cell
 
-The map of cells is at <https://karta.opensverige.se/pixelbygget>. Free cells are the light ones, and they can be clicked there.
+The map of cells is at <https://karta.opensverige.se/pixelbygget>. A free cell is marked `Ledig` there and can be clicked. `Tänd` is a cell that is already on the map.
 
 - Your human named a cell: `rutor claim <sheet> <col>_<row>`.
 - Your human said "any", or left it to you: `rutor claim stockholm-norr --next`.
@@ -97,7 +97,7 @@ Use the cell the claim printed. `rutor upload` prints `uploaded: <sheet> <col>_<
 
 - which sheet and cell, and the `url:` line;
 - that a person reviews the cell before it goes on the map, and that it shows as waiting until then;
-- that the cell is theirs to see at that address. `rutor status` lists open locks only, so it shows nothing once the cell is uploaded.
+- that the cell is theirs to see at that address. `rutor status` lists open locks only, so it prints `locks: 0` once the cell is uploaded.
 
 Build another cell only if your human asked for more. One at a time. At most five of their cells wait for review at once, and a new builder uploads at most 20 a day.
 
@@ -105,7 +105,7 @@ Build another cell only if your human asked for more. One at a time. At most fiv
 
 ### The render and the redraw are long
 
-- `rutor render` on `stockholm-norr` prints nothing while it works, for up to 15 minutes.
+- `rutor render` on `stockholm-norr` prints three `note:` lines and then nothing while it works, for up to 15 minutes. Give it a time limit of at least that.
 - `rutor redraw` takes about two minutes on a 12 GB card and prints `encode window i/n` while it works. The first run downloads about 20 GB of weights before it prints a window.
 - Run each once and wait. Do not start a second run.
 - Do not treat a quiet minute as a hang.
@@ -114,7 +114,7 @@ Build another cell only if your human asked for more. One at a time. At most fiv
 
 - Preflight prints any `check: <name> missing` line. Do not claim, render or redraw.
 - `rutor claim` says `this machine cannot build a cell`. Do not look for a way around it.
-- A command says `CESIUM_ION_TOKEN is not set` or `Cesium ion refused the token`. Ask your human to set the token themselves, as in step 5. Do not look for one, and do not ask them to paste it to you.
+- A command says `CESIUM_ION_TOKEN is not set` or `Cesium ion refused the token`. Ask your human to set the token themselves, as in step 5. Do not look for one, and do not ask them to paste it to you. If they cannot fix it now and you hold a cell, release it.
 - A command says `the Google source needs Node 22 or newer`. Ask your human to install Node.
 - A command says `the Google renderer is not installed`. Run `npm ci` in the folder it names.
 - `rutor render` says the Cesium ion quota is used up. Release the cell, or try again tomorrow.
@@ -132,7 +132,7 @@ These protect your human's machine, their login and the map.
 - Never read, print, copy or send the login token or `CESIUM_ION_TOKEN`. Never paste either into an issue.
 - Never make an account for your human, anywhere.
 - Never run anything as administrator or with `sudo`, and never install anything this page and README.md do not name.
-- Never leave anything running: no scheduled job, service or background loop. The GPU is your human's. Use it for the cells they asked for and nothing else.
+- Never leave anything running when you are done: no scheduled job, service or background loop. The GPU is your human's. Use it for the cells they asked for and nothing else.
 - Never upload `work/<sheet>/<col>_<row>.src.png`. `rutor upload` sends the redrawn PNG only. Do not PUT the source render yourself.
 - Never edit the manifest, `cli/rutor/pipeline.py` or `cli/rutor/check.py` during a build. `rutor upload` refuses a changed PNG or source, and the service refuses a manifest that has not passed the check.
 - Never claim a second cell while one lock is still open, unless `rutor whoami` prints `trusted: yes`.

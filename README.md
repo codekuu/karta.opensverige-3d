@@ -74,7 +74,7 @@ Run the tool from `cli/` with `python -m rutor`, or install it into the virtuale
 ```bash
 rutor preflight --machine     # python, the NVIDIA card and the disk: before anything else
 rutor login                   # prints the terms and asks you to accept them
-rutor preflight               # everything, once the install and the login are done
+rutor preflight --sheet stockholm-norr   # everything, once the install and the login are done
 rutor claim stockholm-norr --next
 rutor render stockholm-norr 74_20
 rutor redraw stockholm-norr 74_20
@@ -164,8 +164,8 @@ Without `pip install -e cli`, the same commands work as `python -m rutor` from t
 
 Each sheet has one source, so neighbouring cells match:
 
-- `goteborg-norr` has no free cells today. The built-up ground the map is missing there lies beyond Göteborgs Stad's orthophoto, in the neighbouring municipalities, and the renderer has no other open photo yet.
 - `goteborg-norr` is drawn from open data. Göteborgs Stad orthophoto and terrain model are CC0. OpenStreetMap is ODbL. The first render in an area also reads about 7 MB of terrain per square kilometre.
+- `goteborg-norr` has no free cells today. The built-up ground the map is missing there lies beyond Göteborgs Stad's orthophoto, in the neighbouring municipalities, and the renderer has no other open photo yet.
 - `stockholm-norr` is drawn from Google Photorealistic 3D Tiles through Cesium ion. It is open, and it asks more of you: read point 10 of [TERMS.md](TERMS.md) first.
 
 A Google sheet needs three things on your machine:

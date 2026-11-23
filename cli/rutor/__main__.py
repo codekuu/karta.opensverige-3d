@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable, Sequence
 
@@ -53,6 +54,19 @@ def _open_pipes() -> None:
                 pass
 
 
+def _reader_stopped() -> int:
+    """Whoever read the output stopped reading, as `| head` does. That is not a fault.
+
+    Standard output is pointed at nothing, so that Python does not report the closed pipe
+    once more when it flushes on the way out.
+    """
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    except (OSError, ValueError, AttributeError):
+        pass
+    return 0
+
+
 def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None = None) -> int:
     _open_pipes()
     parser = argparse.ArgumentParser(prog="rutor")
@@ -67,7 +81,10 @@ def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None =
         code = exc.code
         return 0 if code in (0, None) else 1
     if args.version:
-        print(f"rutor {__version__}")
+        try:
+            print(f"rutor {__version__}")
+        except BrokenPipeError:
+            return _reader_stopped()
         return 0
     if not getattr(args, "command", None):
         parser.print_usage(sys.stderr)
@@ -86,6 +103,8 @@ def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None =
     except RutorError as exc:
         print(f"error: {exc.message}", file=sys.stderr)
         return exc.code
+    except BrokenPipeError:
+        return _reader_stopped()
 
 
 if __name__ == "__main__":

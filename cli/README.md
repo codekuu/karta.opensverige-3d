@@ -24,7 +24,7 @@ python -m rutor --version
 ```bash
 rutor preflight --machine
 rutor login
-rutor preflight
+rutor preflight --sheet stockholm-norr
 rutor claim stockholm-norr --next
 rutor render stockholm-norr 74_20
 rutor redraw stockholm-norr 74_20
