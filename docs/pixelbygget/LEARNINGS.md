@@ -4,6 +4,9 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-23
 
+### A new city without a terrain model
+- After PR 17 an open sheet needed a city terrain model, so a new city like Eslöv stopped with "no open terrain model". A sheet without one is now drawn on flat ground at its `ground_height`, and its manifest says `terrain flat`. A new city has no older map to line up with, so flat ground only costs hills their height.
+
 ### The open renderer is placed by the live map's camera, on real ground
 - `rutor/frame.py` holds the live frame for both sources. Its points match `grid-config.ts` to 1e-6 m at the origin, at the sheet's corners and on a 110 m hill.
 - Before: `camera_for` mapped degrees to metres with one cos(origin_lat), and `draw.py` put all ground 34.7 m above a flat plane. Over Göteborg's 3 071 masked cells that missed the live map at sea level by a median 40 px and at most 174 px, mostly sideways. Higher ground missed by 2.8 px more per metre. 20 km from the origin, curvature alone drops the ground 31 m.

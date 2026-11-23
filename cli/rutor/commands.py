@@ -20,7 +20,7 @@ from rutor.check import problems as check_problems
 from rutor.render import render_cell
 from rutor.renderer import google
 from rutor.renderer.sources import ortho_source, osm_date, sheet_kind
-from rutor.terrain import terrain_source
+from rutor.terrain import terrain_label
 
 
 def require_token() -> str:
@@ -302,7 +302,7 @@ def _write_source_info(sheet_id: str, png: Path) -> None:
         source = ortho_source(sheet_id)
         info = {
             "provider": f"{urllib.parse.urlsplit(source.endpoint).netloc} {source.layer}",
-            "version": f"osm {osm_date(sheet_id)}; ortho {source.layer}; terrain {terrain_source(sheet_id).label}",
+            "version": f"osm {osm_date(sheet_id)}; ortho {source.layer}; terrain {terrain_label(sheet_id)}",
             "sha256": sha256_file(png),
         }
     png.with_suffix(".json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")

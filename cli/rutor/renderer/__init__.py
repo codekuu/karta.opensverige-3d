@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from rutor.errors import bad_input, environment, network
 from rutor.frame import SheetFrame
 from rutor.render import camera_for
 from rutor.renderer.sources import Fetch, load_sources
-from rutor.terrain import RangedFetch, load_terrain, projected_box, terrain_source
+from rutor.terrain import TERRAIN_SOURCES, RangedFetch, load_terrain, projected_box
 
 # The first terrain read reaches this far past the flat-ground box, so the centre can move with
 # the ground. The second covers the final box; the margin is wider than one ground lattice step.
@@ -49,15 +50,26 @@ def render(
 ) -> None:
     """Write the 1536 px source render for one cell. `fetch` and `ranged` replace HTTP."""
     sheet_id = _sheet_id(sheet)
-    source = terrain_source(sheet_id)
     frame = SheetFrame.from_sheet(sheet)
     camera = camera_for(sheet, col, row)
-    # Centre the photo box on the ground the cell shows: higher ground lands higher in the
-    # picture, so the box moves south with it. A few rounds settle it on a slope.
-    terrain = load_terrain(sheet_id, projected_box(source, camera, CENTRING_MARGIN_M), ranged=ranged)
-    for _ in range(CENTRING_ROUNDS):
-        camera = camera_for(sheet, col, row, terrain.ellipsoid_at(camera["center_lat"], camera["center_lon"]))
-    terrain = load_terrain(sheet_id, projected_box(source, camera, TERRAIN_MARGIN_M), ranged=ranged)
+    source = TERRAIN_SOURCES.get(sheet_id)
+    ground: Callable[[float, float], float]
+    if source is None:
+        # A sheet without a terrain model, like a new city, is drawn on flat ground at its
+        # ground_height. There is no older map for it to line up with.
+        flat = float(camera["ground_ellipsoid_m"])
+
+        def ground(_lat: float, _lon: float) -> float:
+            return flat
+
+    else:
+        # Centre the photo box on the ground the cell shows: higher ground lands higher in the
+        # picture, so the box moves south with it. A few rounds settle it on a slope.
+        terrain = load_terrain(sheet_id, projected_box(source, camera, CENTRING_MARGIN_M), ranged=ranged)
+        for _ in range(CENTRING_ROUNDS):
+            camera = camera_for(sheet, col, row, terrain.ellipsoid_at(camera["center_lat"], camera["center_lon"]))
+        terrain = load_terrain(sheet_id, projected_box(source, camera, TERRAIN_MARGIN_M), ranged=ranged)
+        ground = terrain.ellipsoid_at
     orto_path, osm_path, trees_path = load_sources(sheet_id, col, row, camera, fetch=fetch)
     # Pillow is imported here so a machine without the render extra can still
     # import the package, run preflight and fail an unknown sheet.
@@ -75,7 +87,7 @@ def render(
     expected = (int(camera["ortho_width"]), int(camera["ortho_height"]))
     if orto.size != expected:
         raise network(f"{orto_path.name} is {orto.size[0]}x{orto.size[1]}, expected {expected[0]}x{expected[1]}")
-    image = draw(orto, _load_json(osm_path), _load_json(trees_path), camera, frame, terrain.ellipsoid_at)
+    image = draw(orto, _load_json(osm_path), _load_json(trees_path), camera, frame, ground)
     out.parent.mkdir(parents=True, exist_ok=True)
     image.save(out)
 
