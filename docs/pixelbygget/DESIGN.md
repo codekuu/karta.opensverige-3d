@@ -29,7 +29,7 @@ Contributors never get write access to a repo, a bucket or a key. The only thing
 
 `fri` → `last` (locked, 48 hours) → `vantar` (uploaded, waiting for review) → `godkand` (approved) → `live` (on the map).
 
-- A new contributor holds one lock at a time and uploads at most 20 cells a day. Their first ten cells are reviewed.
+- A new contributor holds one lock at a time and uploads at most 20 cells a day.
 - A person reviews every upload of a contributor who is not trusted, and at most five of theirs wait at once.
 - Trust is given by the maintainer by hand (`POST /trust`), never by a count: up to eight locks, and uploads go straight to `godkand`.
 - A rejected cell goes back to `fri` with a comment. Its upload is kept for 30 days, then purged.
@@ -58,7 +58,7 @@ The rule that matters: **two neighbouring cells draw identical pixels in their 5
 - The token goes to node in its environment and to the page in memory, never on a command line, in a file or in a logged URL.
 - Streamed tiles are not pixel-identical between machines, so the overlap test does not apply. The intake blends the seams.
 - Google's terms bind the token. `rutor render` prints that on every Google cell, and the manifest names the source, so those cells can be found and taken down if Google asks.
-- The sheet is already live, so its mask is the live island: 5 036 cells, the ones the map's edge picture draws. It is redrawn, not extended.
+- What the live map shows of this sheet, 5 036 cells, is `live` from the start. The free cells are the built-up ground around it that the map has not drawn: 2 378 cells. The sheet is extended, not redrawn.
 
 ## The redraw
 

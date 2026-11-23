@@ -37,7 +37,24 @@ def _builtin_registrars() -> list[Registrar]:
     return [register_login, register_commands, register_review]
 
 
+def _open_pipes() -> None:
+    """Make every line leave when it is printed, as UTF-8.
+
+    An agent runs rutor through a pipe. Python holds a pipe's output back until the program
+    ends, so `rutor login` would wait for an approval of a code nobody had been shown. And a
+    Windows pipe is not UTF-8, so the terms would arrive garbled or not at all.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", line_buffering=True)
+            except (OSError, ValueError):
+                pass
+
+
 def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None = None) -> int:
+    _open_pipes()
     parser = argparse.ArgumentParser(prog="rutor")
     parser.add_argument("--version", action="store_true", help="print the version and exit")
     sub = parser.add_subparsers(dest="command")
@@ -72,9 +89,4 @@ def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None =
 
 
 if __name__ == "__main__":
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8")
-        except (OSError, ValueError):
-            pass
     sys.exit(main())

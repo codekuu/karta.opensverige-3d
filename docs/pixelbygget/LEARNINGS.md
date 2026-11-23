@@ -4,6 +4,14 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-23
 
+### Two fresh agents followed the instructions, and the login never reached them
+After the change to "draw what is missing", two agents that knew nothing of the project were sent in: one ran the instructions for real on a Mac, one traced a Windows PC with a 12 GB card on paper against the code.
+- **`rutor login` printed its code into a buffer.** Through a pipe, which is how an agent runs a command, Python holds output back until the program ends. The login prints a code and then waits for a person to approve it, so the code was never shown and the wait never ended. `rutor` now writes every line when it is printed, as UTF-8, and the login says that it is waiting.
+- **The order asked for the account last.** Today's free cells need Node and the human's own Cesium ion account, and the instructions raised that after the terms, the 20 GB install and the GitHub login. It now comes right after the machine check.
+- **A cell could be locked that the machine could not render.** Without Node, `npm ci` or the token, `rutor render` failed with the cell already held for 48 hours. `rutor claim` now refuses on a Google sheet until all three are in place, and `rutor preflight --sheet` shows them ahead.
+- **No step installed Node or ran `npm ci`,** and nothing said how the human sets the token on Windows so that the agent's terminal sees it.
+- **Stale lines sent agents the old way:** Göteborg offered as the open-data alternative, Stockholm described as "redrawn, not extended", "their first ten cells are reviewed", 20 GB of disk against the code's 25, and `rutor status` named as the place to see an uploaded cell, which it does not list.
+
 ### Volunteers draw what is missing, not what is there
 Both sheets offered exactly the cells the live map already showed: 3 071 on goteborg-norr and 5 036 on stockholm-norr, every one of them drawn. A volunteer's cell would have replaced a finished one, and a cell from open data is plainly lighter and thinner than the map around it. The maintainer saw it on the build page: the lit city was offered and the grey ground around it was not.
 - **Changed on the service the same day.** What the map shows is `live`, credited to `opensverige`: 8 156 cells on goteborg-norr, 5 036 on stockholm-norr. Built-up ground with nothing drawn is `fri`: 2 378 cells on stockholm-norr. Nobody held a lock, so no one's work was touched.

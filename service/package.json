@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "description": "Rut-tjänsten: locks grid cells, takes cell uploads, serves the grid.",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "vitest run",
     "deploy": "wrangler deploy",

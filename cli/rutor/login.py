@@ -118,7 +118,7 @@ def poll_for_token(
 
 def _accepted(args: argparse.Namespace) -> None:
     # Always shown, so an agent that passes --accept-terms has still put them in front of its human.
-    print(TERMS)
+    print(TERMS, flush=True)
     if args.accept_terms:
         return
     if not sys.stdin.isatty():
@@ -140,6 +140,8 @@ def cmd_login(args: argparse.Namespace) -> int:
         raise network("GitHub did not return a device code")
     print(f"code: {user_code}")
     print(f"url: {DEVICE_URL}")
+    # The wait below can last minutes. Whoever reads this through a pipe must have the code first.
+    print("waiting: a person opens the url and types the code. This command ends when they have, or when the code expires.", flush=True)
     interval_raw = started.get("interval", 5)
     interval = interval_raw if isinstance(interval_raw, int) else 5
     token = poll_for_token(client_id, device_code, interval, time.sleep)
