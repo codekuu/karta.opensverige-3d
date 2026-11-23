@@ -22,7 +22,7 @@ from rutor.manifest import build_manifest, encode_manifest, png_size, sha256_fil
 from rutor.check import problems as check_problems
 from rutor.render import render_cell
 from rutor.renderer import google
-from rutor.renderer.sources import ortho_source, osm_date, sheet_kind
+from rutor.renderer.sources import SHEET_KINDS, ortho_source, osm_date, sheet_kind
 from rutor.terrain import terrain_label
 
 
@@ -87,10 +87,15 @@ def cmd_grid(args: argparse.Namespace) -> int:
         print(json.dumps(body))
         return 0
     payload = _object(body, "object")
+    printed = 0
     for cell in _rows(payload.get("cells"), "cells"):
         line = _cell_line(cell, args.free)
         if line is not None:
             print(line)
+            printed += 1
+    if args.free and not printed:
+        # An empty answer reads like a failure. Every cell here is on the map or not offered.
+        print(f"free: none on {args.sheet}")
     return 0
 
 
@@ -138,13 +143,20 @@ def cell_url(sheet: str, col: int, row: int) -> str:
 
 
 def cmd_claim(args: argparse.Namespace) -> int:
-    token = require_token()
     if bool(args.next) == bool(args.cell):
         raise bad_input("Pass a cell like 64_59, or --next, and not both.")
     # A lock holds the cell for 48 hours, so a machine that cannot build one does not take one.
+    # The machine is asked before the login: on one that cannot build, "log in" is no next step.
     problem = _gpu_missing()
     if problem is not None:
         raise environment(f"this machine cannot build a cell: {problem}")
+    # The same for a Google sheet: without Node, the renderer and the human's own token the
+    # render fails with the cell already taken from everyone else.
+    if SHEET_KINDS.get(args.sheet) == "google":
+        problem = google.not_ready()
+        if problem is not None:
+            raise environment(f"this machine cannot render {args.sheet} yet: {problem}")
+    token = require_token()
     if args.next:
         _status, body = api.get(f"/v1/grid/{args.sheet}", token=token)
         payload = _object(body, "object")
@@ -335,6 +347,13 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         ("gpu", _gpu_missing),
         ("disk", _disk_missing),
     ]
+    # What the sheet's source needs, when a sheet is named. None of it needs a login.
+    if SHEET_KINDS.get(getattr(args, "sheet", None) or "") == "google":
+        checks += [
+            ("node", google.node_missing),
+            ("google renderer", google.renderer_missing),
+            ("cesium token", google.token_missing),
+        ]
     if not getattr(args, "machine", False):
         checks += [
             ("torch", _torch_missing),
@@ -721,10 +740,14 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     grid.add_argument("--json", action="store_true")
     grid.set_defaults(func=cmd_grid)
 
-    claim = sub.add_parser("claim", help="lock one cell")
-    claim.add_argument("sheet")
-    claim.add_argument("cell", nargs="?")
-    claim.add_argument("--next", action="store_true")
+    claim = sub.add_parser(
+        "claim",
+        help="lock one cell",
+        description="Lock one free cell for 48 hours. Refuses on a machine that cannot build or render it, before anything is locked.",
+    )
+    claim.add_argument("sheet", help="the sheet, such as stockholm-norr")
+    claim.add_argument("cell", nargs="?", help="the cell as col_row, such as 74_20")
+    claim.add_argument("--next", action="store_true", help="take the free cell beside the map that is nearest the middle of the sheet")
     claim.set_defaults(func=cmd_claim)
 
     release = sub.add_parser("release", help="give a lock back")
@@ -740,6 +763,7 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
 
     preflight = sub.add_parser("preflight", help="check the machine before a redraw")
     preflight.add_argument("--machine", action="store_true", help="only python, the NVIDIA card and the disk: needs no install and no login")
+    preflight.add_argument("--sheet", help="also check what this sheet's source needs, such as Node and a Cesium ion token")
     preflight.set_defaults(func=cmd_preflight)
 
     render = sub.add_parser("render", help="render one cell to a source PNG")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable, Sequence
 
@@ -37,7 +38,37 @@ def _builtin_registrars() -> list[Registrar]:
     return [register_login, register_commands, register_review]
 
 
+def _open_pipes() -> None:
+    """Make every line leave when it is printed, as UTF-8.
+
+    An agent runs rutor through a pipe. Python holds a pipe's output back until the program
+    ends, so `rutor login` would wait for an approval of a code nobody had been shown. And a
+    Windows pipe is not UTF-8, so the terms would arrive garbled or not at all.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", line_buffering=True)
+            except (OSError, ValueError):
+                pass
+
+
+def _reader_stopped() -> int:
+    """Whoever read the output stopped reading, as `| head` does. That is not a fault.
+
+    Standard output is pointed at nothing, so that Python does not report the closed pipe
+    once more when it flushes on the way out.
+    """
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    except (OSError, ValueError, AttributeError):
+        pass
+    return 0
+
+
 def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None = None) -> int:
+    _open_pipes()
     parser = argparse.ArgumentParser(prog="rutor")
     parser.add_argument("--version", action="store_true", help="print the version and exit")
     sub = parser.add_subparsers(dest="command")
@@ -50,7 +81,10 @@ def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None =
         code = exc.code
         return 0 if code in (0, None) else 1
     if args.version:
-        print(f"rutor {__version__}")
+        try:
+            print(f"rutor {__version__}")
+        except BrokenPipeError:
+            return _reader_stopped()
         return 0
     if not getattr(args, "command", None):
         parser.print_usage(sys.stderr)
@@ -69,12 +103,9 @@ def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None =
     except RutorError as exc:
         print(f"error: {exc.message}", file=sys.stderr)
         return exc.code
+    except BrokenPipeError:
+        return _reader_stopped()
 
 
 if __name__ == "__main__":
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8")
-        except (OSError, ValueError):
-            pass
     sys.exit(main())

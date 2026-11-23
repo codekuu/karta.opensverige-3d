@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from rutor import config
-from rutor.errors import environment, network
+from rutor.errors import RutorError, environment, network
 from rutor.frame import ecef as _ecef
 from rutor.frame import mix as _mix
 from rutor.frame import sheet_basis
@@ -129,6 +129,43 @@ def _require_installed(root: Path) -> None:
         raise environment(f"the Google renderer is not installed: run npm ci in {root}")
 
 
+def token_missing(env: Mapping[str, str] | None = None) -> str | None:
+    environ = os.environ if env is None else env
+    if environ.get(TOKEN_ENV, "").strip():
+        return None
+    return (
+        f"{TOKEN_ENV} is not set. The person at this machine makes a free account at "
+        f"https://ion.cesium.com, creates a token with the default scopes and sets {TOKEN_ENV} themselves, "
+        "where this program can read it. An agent does not make the account and does not handle the token"
+    )
+
+
+def node_missing(which: Which | None = None, run: Runner | None = None, env: Mapping[str, str] | None = None) -> str | None:
+    try:
+        _node(which or shutil.which, run or _run, dict(os.environ if env is None else env))
+    except RutorError as exc:
+        return exc.message
+    return None
+
+
+def renderer_missing(root: Path | None = None) -> str | None:
+    try:
+        _require_installed(root or default_render_dir())
+    except RutorError as exc:
+        return exc.message
+    return None
+
+
+def not_ready(
+    env: Mapping[str, str] | None = None,
+    which: Which | None = None,
+    run: Runner | None = None,
+    render_dir: Path | None = None,
+) -> str | None:
+    """The first thing this machine lacks for a Google sheet, or None. Asked before a cell is locked."""
+    return token_missing(env) or node_missing(which, run, env) or renderer_missing(render_dir)
+
+
 def _save_rgb(raw: bytes, out: Path) -> None:
     try:
         import numpy as np
@@ -163,11 +200,9 @@ def render_google(
     environ = dict(os.environ if env is None else env)
     which = which or shutil.which
     root = render_dir or default_render_dir()
-    if not environ.get(TOKEN_ENV, "").strip():
-        raise environment(
-            f"{TOKEN_ENV} is not set. Make a free account at https://ion.cesium.com, create a token "
-            f"with the default scopes, and set {TOKEN_ENV} in this terminal"
-        )
+    no_token = token_missing(environ)
+    if no_token is not None:
+        raise environment(no_token)
     node = _node(which, run, environ)
     _require_installed(root)
     view = google_camera(sheet, col, row)

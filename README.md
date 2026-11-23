@@ -43,7 +43,7 @@ Read this before you start. It is what building a cell asks of you and your mach
 
 - The first time: the install and about 20 GB of model weights.
 - For each cell: the redraw takes about two minutes on an RTX 5070, and the source render a few minutes more.
-- The electricity is yours. `rutor redraw --wait-for-cheap` waits for a cheap hour.
+- The electricity is yours. `rutor redraw --wait-for-cheap` checks the price first and stops when it is high, so you can run it again in a cheap hour.
 
 **The limits**
 
@@ -74,7 +74,7 @@ Run the tool from `cli/` with `python -m rutor`, or install it into the virtuale
 ```bash
 rutor preflight --machine     # python, the NVIDIA card and the disk: before anything else
 rutor login                   # prints the terms and asks you to accept them
-rutor preflight               # everything, once the install and the login are done
+rutor preflight --sheet stockholm-norr   # everything, once the install and the login are done
 rutor claim stockholm-norr --next
 rutor render stockholm-norr 74_20
 rutor redraw stockholm-norr 74_20
@@ -83,13 +83,15 @@ rutor upload stockholm-norr 74_20
 
 `rutor preflight --machine` needs nothing but the light install (`pip install -e cli`) and no login, so run it first: it says whether this machine can build a cell at all. `rutor claim` refuses on a machine that cannot.
 
-`rutor login` prints the terms ([TERMS.md](TERMS.md)) and a device code. `--accept-terms` answers yes for you, so pass it only when you have read them. Approve the code in the browser at the URL it prints. That approval is the step that needs a person.
+`rutor login` prints the terms ([TERMS.md](TERMS.md)), a device code, and then waits until the code is approved. `--accept-terms` answers yes for you, so pass it only when you have read them. Approve the code in the browser at the URL it prints. That approval is the step that needs a person.
+
+Today's free cells are on `stockholm-norr`, which needs Node 22, `npm ci` in `cli/google-render` and your own Cesium ion token: see [Source render](#source-render). Do that before you claim. `rutor preflight --sheet stockholm-norr` checks it.
 
 `rutor claim` prints the cell you got and a `url:` line: the cell on the map, with your login on it within a minute. Use that `col_row` in render, redraw and upload. `rutor status` shows your open locks, `rutor whoami` your login and whether you are trusted.
 
 `rutor redraw --wait-for-cheap` runs the SE3 price check first. While the price is high it exits 6 and you keep your lock; run it again after the time it prints. Without the flag the price check is advice only: `python -m rutor.se3_price`.
 
-`rutor preflight` checks Python, the NVIDIA card, the disk, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login. Do not claim, render or redraw when any line says `missing`.
+`rutor preflight` checks Python, the NVIDIA card, the disk, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login. With `--sheet stockholm-norr` it also checks what that sheet's source needs: Node, the Google renderer and the Cesium ion token. Do not claim, render or redraw when any line says `missing`. `rutor claim` refuses on a Google sheet until those three are in place, so no cell is locked that the machine cannot render.
 
 Exit codes: 0 done, 1 bad input, 2 refused by the service, 3 something missing on this machine, 4 network, 5 the redraw failed the quality check, 6 the SE3 price is high (try later).
 
@@ -117,7 +119,7 @@ python -m pip install --upgrade pip
 python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 python -m pip install -r requirements.txt
 python -m pip install -e cli
-rutor preflight
+rutor preflight --machine
 ```
 
 If activation is blocked for the current window only:
@@ -137,24 +139,24 @@ python -m pip install --upgrade pip
 python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 python -m pip install -r requirements.txt
 python -m pip install -e cli
-rutor preflight
+rutor preflight --machine
 ```
 
 ### macOS
+
+A Mac cannot build a cell: the redraw needs an NVIDIA card. It can change the code and run the tests, and that needs neither the model stack nor a login:
 
 ```bash
 git clone https://github.com/opensverige/karta.opensverige-3d
 cd karta.opensverige-3d
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install torch torchvision
-python -m pip install -r requirements.txt
-python -m pip install -e cli
-rutor preflight
+python -m pip install -e "cli[render]"
+rutor preflight --machine
+cd cli && python -m unittest discover -s tests
 ```
 
-A Mac can install, log in, check the SE3 price and run the tests. Preflight reports CUDA missing and the redraw does not run there, so do not claim a cell on a Mac.
+`rutor preflight --machine` says `check: gpu missing` there. Do not claim a cell on a Mac. `rutor claim` refuses anyway.
 
 Without `pip install -e cli`, the same commands work as `python -m rutor` from the `cli/` directory.
 
@@ -162,9 +164,9 @@ Without `pip install -e cli`, the same commands work as `python -m rutor` from t
 
 Each sheet has one source, so neighbouring cells match:
 
-- `goteborg-norr` has no free cells today. The built-up ground the map is missing there lies beyond Göteborgs Stad's orthophoto, in the neighbouring municipalities, and the renderer has no other open photo yet.
 - `goteborg-norr` is drawn from open data. Göteborgs Stad orthophoto and terrain model are CC0. OpenStreetMap is ODbL. The first render in an area also reads about 7 MB of terrain per square kilometre.
-- `stockholm-norr` is drawn from Google Photorealistic 3D Tiles through Cesium ion. It is open, and it asks more of you: read line 10 of [TERMS.md](TERMS.md) first.
+- `goteborg-norr` has no free cells today. The built-up ground the map is missing there lies beyond Göteborgs Stad's orthophoto, in the neighbouring municipalities, and the renderer has no other open photo yet.
+- `stockholm-norr` is drawn from Google Photorealistic 3D Tiles through Cesium ion. It is open, and it asks more of you: read point 10 of [TERMS.md](TERMS.md) first.
 
 A Google sheet needs three things on your machine:
 
@@ -172,7 +174,7 @@ A Google sheet needs three things on your machine:
 - Node 22 or newer.
 - `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome for headless rendering, about 750 MB.
 
-Google's terms bind your token, not this project's MIT license. Google's Map Tiles policy does not allow deriving new content from its tiles, so read it and decide for yourself. Google can ask for cells drawn from its tiles to be taken down. `rutor render` prints this on every Google cell, and the manifest names the source.
+Google's terms bind your token, not this project's MIT license. Google's Map Tiles policy does not allow deriving new content from its tiles, so read it and decide for yourself. Google can ask for cells drawn from its tiles to be taken down. `rutor render` prints a notice on every Google cell, and the manifest names the source.
 
 The source render (`work/<sheet>/<col>_<row>.src.png`) stays on your machine. `rutor upload` sends only the redrawn PNG.
 

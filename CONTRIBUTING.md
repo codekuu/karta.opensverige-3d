@@ -6,21 +6,23 @@ This page holds the rules. The commands and the install are in [README.md](READM
 
 ## Before you start
 
+A code change needs none of the list below: any machine with Python 3.11 will do, and Node 22 for the service's tests. A GPU run needs all of it. The full list is under "What you need" in [README.md](README.md).
+
 - An NVIDIA GPU with CUDA and 12 GB of memory or more.
 - Time. One cell takes about two minutes on an RTX 5070 or an L4.
-- About 20 GB of free disk for the model download.
-- Windows or Linux for the redraw. A Mac can log in and check the price. It cannot redraw, so do not claim a cell on a Mac.
+- 25 GB of free disk, and about 1 GB more for `stockholm-norr`. The model download is about 20 GB.
+- Windows or Linux for the redraw. A Mac can change the code and run the tests. It cannot redraw, so do not claim a cell on a Mac.
 - Python 3.11 or newer, and a GitHub account.
-- The source render comes from the sheet's source. `goteborg-norr` is open data: Göteborgs Stad orthophoto and terrain model (both CC0) and OpenStreetMap (ODbL). `stockholm-norr` is Google's tiles through your own Cesium ion token, Node 22 and `npm ci` in `cli/google-render`. Google's terms bind that token, and Google can ask for those cells to be taken down.
+- The source render comes from the sheet's source. Today every free cell is on `stockholm-norr`. `goteborg-norr` is open data: Göteborgs Stad orthophoto and terrain model (both CC0) and OpenStreetMap (ODbL). `stockholm-norr` is Google's tiles through your own Cesium ion token, Node 22 and `npm ci` in `cli/google-render`. Google's terms bind that token, and Google can ask for those cells to be taken down.
 
-Clone, install the CLI and run `rutor preflight --machine` first: it needs no login and says whether this machine can build a cell. Then install the rest, log in, and run `rutor preflight`. Go on only when every line says `ok`.
+Clone, install the CLI and run `rutor preflight --machine` first: it needs no login and says whether this machine can build a cell. Then install the rest, log in, and run `rutor preflight --sheet stockholm-norr`. Go on only when every line says `ok`.
 
 ## The run
 
 ```bash
 rutor preflight --machine
 rutor login        # prints the terms and asks you to accept them
-rutor preflight
+rutor preflight --sheet stockholm-norr
 rutor claim <sheet> --next
 rutor render <sheet> <col>_<row>
 rutor redraw <sheet> <col>_<row>

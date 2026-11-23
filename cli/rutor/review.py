@@ -471,6 +471,13 @@ class _OwnPort(ThreadingHTTPServer):
     # Nobody else may listen on the port while the page is up. On Windows the default lets them.
     allow_reuse_address = False
 
+    def handle_error(self, request: object, client_address: object) -> None:
+        # A browser drops a connection whenever another cell is chosen. That is not a fault,
+        # and the standard report of it would print the address, which holds the key.
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        print(f"review: {type(sys.exc_info()[1]).__name__} while answering", file=sys.stderr)
+
 
 class ReviewServer:
     """The page on 127.0.0.1, under an address nobody can guess.

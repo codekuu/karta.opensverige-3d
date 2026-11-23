@@ -24,16 +24,16 @@ python -m rutor --version
 ```bash
 rutor preflight --machine
 rutor login
-rutor preflight
+rutor preflight --sheet stockholm-norr
 rutor claim stockholm-norr --next
 rutor render stockholm-norr 74_20
 rutor redraw stockholm-norr 74_20
 rutor upload stockholm-norr 74_20
 ```
 
-Replace `74_20` with the cell `rutor claim` prints. `stockholm-norr` needs your own Cesium ion token: see the main README. `rutor preflight --machine` checks python, the NVIDIA card and the disk, with no login. `rutor login` prints the terms in [TERMS.md](../TERMS.md). `rutor preflight` should be `ok` on every line before `rutor claim`.
+Replace `74_20` with the cell `rutor claim` prints. `stockholm-norr` needs your own Cesium ion token: see the main README. `rutor preflight --machine` checks python, the NVIDIA card and the disk, with no login. `rutor login` prints the terms in [TERMS.md](../TERMS.md). `rutor preflight --sheet stockholm-norr` should be `ok` on every line before `rutor claim`.
 
-`rutor login` prints a code and `url: https://github.com/login/device`. A person approves that code in the browser. The token is stored in `~/.config/pixelbygget/token` (override with `PIXELBYGGET_HOME`), mode `0600` on Linux and macOS. `PIXELBYGGET_URL` points the CLI at another service, such as a local one. That approval is the step that needs a person.
+`rutor login` prints a code and `url: https://github.com/login/device`. A person approves that code in the browser. The token is stored in `~/.config/pixelbygget/token` (override with `PIXELBYGGET_HOME`), mode `0600` on Linux and macOS. `PIXELBYGGET_URL` points the CLI at a service on this machine, for testing. It accepts no other address. That approval is the step that needs a person.
 
 `rutor render` builds the source render from the sheet's source: open data on `goteborg-norr`, Google's tiles through Cesium ion on `stockholm-norr` (see the main README for the token and `npm ci` in `cli/google-render`). The open-data path needs Pillow and numpy, which are in the repository `requirements.txt` and in the `render` extra (`pip install -e "cli[render]"`). The OpenStreetMap data is pinned to one date per sheet, so every contributor renders the same map.
 
