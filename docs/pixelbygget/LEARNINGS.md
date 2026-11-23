@@ -4,6 +4,16 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-23
 
+### The base map is drawn further out than the city shows
+Found while building the step that puts an approved cell into the map, tried on stockholm-norr 74_20 without publishing anything.
+- **The edge picture hides real pictures.** The city fades out at its edge picture (8 pixels per cell, alpha), and its half-way line lies up to a cell and a half inside what the tiles hold. Of 40 cells with only a faint alpha, 25 were drawn all over and none was empty. Of 40 empty-alpha cells next to them, 20 held a picture too. Drawn ground ends on a 512 px grid, half a cell.
+- **So a free cell is often half drawn already.** 74_20 was offered as missing, and its lower half is in the tiles, hidden. The rule for "missing" reads the edge picture, not the tiles.
+- **A new cell would have been an island.** Opening the edge over the cell alone leaves a see-through band between the cell and the city, because the cells between them count as on the map and are never offered. The publishing step opens hidden, drawn ground between a new cell and the city, at most two cells wide, and never opens over empty ground.
+- **The margin has two jobs.** Against drawn ground it fades in over its 256 px, as the review page shows. Over empty ground it is kept whole, so that the cell's edge has a picture to fade out over. Empty ground is told from drawn by being flat and dark; a block next to a drawn one needs 16 px of its rim left out, since the compression spills over.
+- **The city's edge is a blur of 3.1 edge pixels,** 400 px on the map, measured on Stockholm. A new cell shows whole to its own edge and is gone where its margin ends.
+- **Tiles are cached for a year,** so a changed tile cannot keep its address. A sheet gets an edition number in the address, changed tiles lie beside the base, and the base is never written. Taking every cell away gives back the map exactly.
+- **A picture comparison that compared nothing.** `ImageChops.difference(a, b).getbbox()` on RGBA pictures looks at alpha only, so the tests for "same picture" passed whatever the colours were. A deliberate fault in the paste order showed it. They compare bytes now.
+
 ### The first cell went the whole way, from a fresh clone to the review page
 A Windows PC with an RTX 5070 (12 GB) was driven over SSH, the way an agent would: a fresh clone of `main`, the light install, `rutor preflight --machine`, the model stack, `npm ci`, the login by device code, `rutor claim stockholm-norr --next`, render, redraw, upload. The cell (74_20) came up on the review page among its neighbours, with the check at `ok`. Nothing in the chain had to be worked around.
 - **A wrong Cesium token locked the cell before anyone knew.** The token had been pasted twice into the variable: 583 characters and four dots where a token has two. `rutor preflight --sheet` and `rutor claim` said `cesium token ok`, because they only look for a value. Cesium ion answered 401 at `rutor render`, with the cell already held for 48 hours. The check should ask Cesium ion before a lock is taken.
