@@ -4,6 +4,13 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-23
 
+### The first volunteer cell is on the map
+stockholm-norr 74_20 went from approved to visible on karta.opensverige.se on 2026-11-23, as edition 1 of the sheet.
+- **One cell is 51 uploads and 34 seconds.** The source picture, 46 tiles over 19 levels, the edge picture, the island picture, the sheet's list and the switch. Sixteen of the tiles are at full scale.
+- **The site needed no change.** It read the new addresses out of karta.json, which the tile service cached for its five minutes before the cell showed.
+- **Everything else answered as before.** A tile nobody changed came back byte for byte the base's, and the two other cities were not touched.
+- **The build page and the review page still show the base picture,** not the edition, so the lit cell is dark there. That is the next thing to fix.
+
 ### The base map is drawn further out than the city shows
 Found while building the step that puts an approved cell into the map, tried on stockholm-norr 74_20 without publishing anything.
 - **The edge picture hides real pictures.** The city fades out at its edge picture (8 pixels per cell, alpha), and its half-way line lies up to a cell and a half inside what the tiles hold. Of 40 cells with only a faint alpha, 25 were drawn all over and none was empty. Of 40 empty-alpha cells next to them, 20 held a picture too. Drawn ground ends on a 512 px grid, half a cell.
