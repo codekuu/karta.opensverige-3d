@@ -148,7 +148,7 @@ class CommandTests(unittest.TestCase):
         }
         code, _out, err = self.run_cmd(["claim", "goteborg-norr", "--next"])
         self.assertEqual(code, 2)
-        self.assertIn("refused: no_free_cell", err)
+        self.assertIn("refused: no_free_cell: no cell on goteborg-norr is free. rutor cities shows where there are free cells.", err)
 
     def test_release_ok(self) -> None:
         self.open_sheet({"goteborg-norr/1_0": _cell(1, 0, "last", "klang", "2026-11-19T12:00:00Z")})
