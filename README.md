@@ -4,7 +4,7 @@ Pixelbygget is the volunteer grid for the OpenSverige map. A city is a sheet of 
 
 ## Status
 
-Code contributions are open now: the renderer, the open-data sources, the quality check and the docs. GPU contributions are open too, on `goteborg-norr` for now.
+Code contributions are open now: the renderer, the open-data sources, the quality check and the docs. GPU contributions are open too. Volunteers draw what the map is missing: a free cell is built-up ground the live map has not drawn yet, and a cell that is already on the map cannot be taken. Today the free cells are on `stockholm-norr`.
 
 Start with an issue labelled `good first issue`. Open a pull request against `main`. The tests must pass. How the parts fit together is in [docs/pixelbygget/DESIGN.md](docs/pixelbygget/DESIGN.md).
 
@@ -20,7 +20,7 @@ To try `rutor render` against a real service, run one on your machine with `serv
 
 This repository is the `rutor` tool and the pinned redraw pipeline. You do not push claims or tiles with git. The PNG you upload is the only thing that leaves your machine, and it is the redraw, not the source render.
 
-Run the tool from `cli/` with `python -m rutor`, or install it into the virtualenv with `python -m pip install -e cli` and then call `rutor`. Output lines look like `claimed: goteborg-norr 64_59 expires 2026-11-19T12:00:00Z`. An agent reads [AGENTS.md](AGENTS.md) before it runs anything. The rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
+Run the tool from `cli/` with `python -m rutor`, or install it into the virtualenv with `python -m pip install -e cli` and then call `rutor`. Output lines look like `claimed: stockholm-norr 74_20 expires 2026-11-19T12:00:00Z`. An agent reads [AGENTS.md](AGENTS.md) before it runs anything. The rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## The steps
 
@@ -28,10 +28,10 @@ Run the tool from `cli/` with `python -m rutor`, or install it into the virtuale
 rutor preflight --machine     # python, the NVIDIA card and the disk: before anything else
 rutor login                   # prints the terms and asks you to accept them
 rutor preflight               # everything, once the install and the login are done
-rutor claim goteborg-norr --next
-rutor render goteborg-norr 64_59
-rutor redraw goteborg-norr 64_59
-rutor upload goteborg-norr 64_59
+rutor claim stockholm-norr --next
+rutor render stockholm-norr 74_20
+rutor redraw stockholm-norr 74_20
+rutor upload stockholm-norr 74_20
 ```
 
 `rutor preflight --machine` needs nothing but the light install (`pip install -e cli`) and no login, so run it first: it says whether this machine can build a cell at all. `rutor claim` refuses on a machine that cannot.
@@ -115,6 +115,7 @@ Without `pip install -e cli`, the same commands work as `python -m rutor` from t
 
 Each sheet has one source, so neighbouring cells match:
 
+- `goteborg-norr` has no free cells today. The built-up ground the map is missing there lies beyond Göteborgs Stad's orthophoto, in the neighbouring municipalities, and the renderer has no other open photo yet.
 - `goteborg-norr` is drawn from open data. Göteborgs Stad orthophoto and terrain model are CC0. OpenStreetMap is ODbL. The first render in an area also reads about 7 MB of terrain per square kilometre.
 - `stockholm-norr` is drawn from Google Photorealistic 3D Tiles through Cesium ion. It is open, and it asks more of you: read line 10 of [TERMS.md](TERMS.md) first.
 

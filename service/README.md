@@ -86,4 +86,4 @@ All under `/v1`. Errors are `{ "error": "<code>", "message": "..." }`.
 
 Everything answers 503 `closed` when the service is closed (GET excepted), 429 `rate_limited` over 60 requests a minute per client, and 500 `internal` when storage fails. The admin's token, once GitHub has vouched for it, passes the rate limit on admin routes.
 
-States of a cell: `ute` (outside the city), `fri`, `last` (locked), `vantar` (uploaded, waiting for review), `godkand`, `live`.
+States of a cell: `ute` (not offered: outside the built-up area, or no source to draw it from yet), `fri`, `last` (locked), `vantar` (uploaded, waiting for review), `godkand`, `live`. A live cell credited to `opensverige` is one the map showed before Pixelbygget.

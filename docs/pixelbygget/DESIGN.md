@@ -11,7 +11,8 @@ The pixel cities on karta.opensverige.se are drawn cell by cell. Anyone with an 
 - A city is one or more **sheets**. A sheet has an origin (latitude, longitude), a size in cells and a fixed camera. Today: `goteborg-norr` (130 by 118 cells) and `stockholm-norr` (144 by 70).
 - A **cell** is 1024 px at 0.25 m per pixel: 256 m east-west and 362 m north-south (the camera looks down at 45 degrees).
 - The render and the redraw work on a **1536 px window**: the cell plus 256 px on each side. Neighbouring windows overlap by 512 px.
-- Cells outside the built-up area are `ute` and are never drawn.
+- **Volunteers draw what is missing.** A cell the live map already shows is `live` from the start, credited to `opensverige`, and cannot be taken. A `fri` cell is built-up ground the map has not drawn: at least 5 percent of the cell lies inside an SCB 2023 urban area plus 500 m, and none of it is on the map.
+- Every other cell is `ute` and is not offered: ground outside the built-up area, and built-up ground the sheet has no source for yet. On `goteborg-norr` that is all of the missing ground, since it lies beyond the city's own orthophoto.
 
 ## The parts
 

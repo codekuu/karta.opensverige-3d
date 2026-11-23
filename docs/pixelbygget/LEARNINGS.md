@@ -4,6 +4,14 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-23
 
+### Volunteers draw what is missing, not what is there
+Both sheets offered exactly the cells the live map already showed: 3 071 on goteborg-norr and 5 036 on stockholm-norr, every one of them drawn. A volunteer's cell would have replaced a finished one, and a cell from open data is plainly lighter and thinner than the map around it. The maintainer saw it on the build page: the lit city was offered and the grey ground around it was not.
+- **Changed on the service the same day.** What the map shows is `live`, credited to `opensverige`: 8 156 cells on goteborg-norr, 5 036 on stockholm-norr. Built-up ground with nothing drawn is `fri`: 2 378 cells on stockholm-norr. Nobody held a lock, so no one's work was touched.
+- **Göteborg has 1 971 missing built-up cells and none of them can be drawn.** The city's orthophoto stops at the municipal border, and all of the missing ground lies beyond it. Checked cell by cell: 0 of them have photo over the whole cell. They stay `ute` until the renderer reads a photo that covers the country.
+- **Lantmäteriet's orthophoto is that photo.** It is open, it covers Sweden, and its download service asks for a free account of the user's own (basic auth or OAuth), which is why the earlier try answered 401. It becomes a step in onboarding, like the Cesium account.
+- **"Built-up" is the old rule:** an SCB 2023 urban area plus 500 m, a cell counted when at least 5 percent of it is inside. "Not drawn" is the map's own edge picture: no pixel of the cell on the island.
+- **The service had no way to change which cells a sheet offers.** The change was made in the database, with every statement guarded by the state it expects. A route for it is still to be written.
+
 ### The service takes a plain picture only
 The review page stopped PNGs with alpha, animation or a gamma, but a trusted builder's upload never passes the page. The upload now refuses them with 415 `not_plain` and keeps the lock.
 - **Before the change a trusted builder's RGBA upload went straight to approved.** That was the failing test. After it, the same builder's plain upload still does.

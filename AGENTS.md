@@ -8,7 +8,7 @@ The commands are explained in [README.md](README.md), the rules in [CONTRIBUTING
 
 There are two kinds of work here.
 
-- **Build a map cell.** Your human's own NVIDIA card redraws one cell of a city as pixel art. It needs Windows or Linux, an NVIDIA card with 12 GB of memory, 25 GB of free disk, Python 3.11 or newer and a GitHub account. One cell takes about two minutes once everything is installed.
+- **Build a map cell.** Your human's own NVIDIA card draws one cell the map does not have yet, as pixel art. It needs Windows or Linux, an NVIDIA card with 12 GB of memory, 25 GB of free disk, Python 3.11 or newer and a GitHub account. One cell takes about two minutes once everything is installed. Today it also needs your human's own Cesium ion account: see step 5.
 - **Change the code.** The CLI, the renderer, the check, the service or the docs. It needs no GPU.
 
 If your human did not say which, check the machine (step 2) and then ask. Do not log in, accept terms or claim a cell before they answer.
@@ -53,11 +53,17 @@ No yes, no login.
 
 The map of cells is at <https://karta.opensverige.se/pixelbygget>. Free cells can be clicked there.
 
+Volunteers draw what is missing. A cell that is already on the map is lit and cannot be taken. A free cell is built-up ground the map has not drawn yet. `rutor cities` lists the sheets, and `rutor grid <sheet> --free` lists the free cells.
+
+Today the free cells are on `stockholm-norr`. That sheet needs your human's own Cesium ion account and token, Node 22 and `npm ci` in `cli/google-render`. `goteborg-norr` has no free cells: what is left there lies beyond the city's own orthophoto, and the renderer has no other open photo yet.
+
+- Before you claim on `stockholm-norr`, tell your human what it needs and show them line 10 of TERMS.md again. Claim only after they say yes. Do not make the Cesium account for them. They put the token in `CESIUM_ION_TOKEN` themselves.
 - Your human named a cell: `rutor claim <sheet> <col>_<row>`.
-- Your human said "any", or left it to you: `rutor claim goteborg-norr --next`. That sheet is open data and needs no further account.
+- Your human said "any", or left it to you, and has said yes to the above: `rutor claim stockholm-norr --next`.
+- Your human does not want a Cesium account: there is no cell to build today. Say so, and offer a code change.
 - It is unclear which city, or how many cells: ask once. One cell is the default.
 - `refused: taken`: someone else has it. Use `--next`, or ask.
-- Claim `stockholm-norr` only when your human asked for it by name. It needs their own Cesium ion account and token, Node 22 and `npm ci` in `cli/google-render`. Do not make the account for them. They put the token in `CESIUM_ION_TOKEN` themselves.
+- `refused: no_free_cell`: nothing on that sheet is free. Do not look for a way to take a lit cell.
 
 `rutor claim` prints `claimed:` and `url:`. Give your human the `url:` line: their login is on that cell on the map within a minute.
 

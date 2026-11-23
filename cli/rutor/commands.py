@@ -111,7 +111,8 @@ def pick_next(sheet: dict[str, object], cells: list[object]) -> tuple[int, int]:
     by_pos = {(col, row): state for col, row, state in parsed}
     free = [(col, row) for col, row, state in parsed if state == "fri"]
     if not free:
-        raise refused("refused: no_free_cell")
+        # Every cell here is on the map already, or nobody can build what is left yet.
+        raise refused(f"refused: no_free_cell: no cell on {sheet.get('id')} is free. rutor cities shows where there are free cells.")
 
     def beside_live(col: int, row: int) -> bool:
         for d_col in (-1, 0, 1):
