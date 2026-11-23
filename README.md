@@ -127,7 +127,7 @@ The source render (`work/<sheet>/<col>_<row>.src.png`) stays on your machine. `r
 
 ## Licence and credit
 
-The PNG you upload is contributed under the MIT license, except that a cell drawn from Google's tiles is also under Google's terms. See [LICENSE](LICENSE). It may be shown on karta.opensverige.se. You are credited by your GitHub login. The model weights stay under their own licenses.
+Building a cell is voluntary and unpaid. What you accept at `rutor login` is ten lines in [TERMS.md](TERMS.md): what leaves your machine, who reviews it, that your GitHub login is shown, and which licenses the model and the sources carry. The code is MIT, see [LICENSE](LICENSE).
 
 ## Local checks
 

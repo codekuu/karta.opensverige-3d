@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
+import urllib.parse
 from pathlib import Path
+
+from rutor.errors import bad_input, environment
 
 DEFAULT_SERVICE_URL = "https://pixelbygget.gustaf-garnow.workers.dev"
 # The "Pixelbygget" OAuth App under the opensverige organisation. A client id is public; the
@@ -42,9 +46,47 @@ def write_token(token: str) -> None:
     os.chmod(path, 0o600)
 
 
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+MAP_URL = "https://karta.opensverige.se/pixelbygget"
+SHEET_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+
+
 def service_url() -> str:
-    raw = os.environ.get("PIXELBYGGET_URL", DEFAULT_SERVICE_URL)
-    return raw.rstrip("/")
+    """The service the token is sent to: the project's own, or one on this machine for testing.
+
+    PIXELBYGGET_URL cannot point anywhere else. The token proves who you are to the service, so
+    an instruction to "set PIXELBYGGET_URL to the new address" would hand your identity to
+    whoever wrote it. A fork that runs its own service changes DEFAULT_SERVICE_URL in code.
+    """
+    raw = os.environ.get("PIXELBYGGET_URL", "").strip()
+    if not raw or raw.rstrip("/") == DEFAULT_SERVICE_URL:
+        return DEFAULT_SERVICE_URL
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        host = parts.hostname or ""
+        port_ok = parts.port is None or 0 < parts.port < 65536
+    except ValueError:
+        host, parts, port_ok = "", None, False
+    if (
+        parts is not None
+        and port_ok
+        and parts.scheme in ("http", "https")
+        and host in LOOPBACK_HOSTS
+        and not parts.username
+        and not parts.password
+    ):
+        return raw.rstrip("/")
+    raise environment(
+        "PIXELBYGGET_URL may only point at this machine (localhost) for testing. "
+        "Unset it to use the project's service. Your login is never sent to another address."
+    )
+
+
+def sheet_id(text: str) -> str:
+    """A sheet id as the service names it. It becomes a folder name and part of a URL."""
+    if not isinstance(text, str) or not SHEET_ID.fullmatch(text):
+        raise bad_input("sheet must look like goteborg-norr: lower case letters, digits and hyphens")
+    return text
 
 
 def github_client_id() -> str:
@@ -56,7 +98,7 @@ def repo_root() -> Path:
 
 
 def work_dir(sheet: str) -> Path:
-    path = repo_root() / "work" / sheet
+    path = repo_root() / "work" / sheet_id(sheet)
     path.mkdir(parents=True, exist_ok=True)
     return path
 

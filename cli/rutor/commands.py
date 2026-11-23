@@ -7,6 +7,9 @@ import hashlib
 import importlib.metadata
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import sys
 import urllib.parse
 from collections.abc import Callable
@@ -54,8 +57,8 @@ def _rows(value: object, label: str) -> list[object]:
 
 
 def cmd_cities(args: argparse.Namespace) -> int:
-    token = require_token()
-    _status, body = api.get("/v1/sheets", token=token)
+    # The lists are public: an agent can look before its human has logged in.
+    _status, body = api.get("/v1/sheets", token=config.read_token())
     if args.json:
         print(json.dumps(body))
         return 0
@@ -79,8 +82,7 @@ def _cell_line(cell: object, free_only: bool) -> str | None:
 
 
 def cmd_grid(args: argparse.Namespace) -> int:
-    token = require_token()
-    _status, body = api.get(f"/v1/grid/{args.sheet}", token=token)
+    _status, body = api.get(f"/v1/grid/{args.sheet}", token=config.read_token())
     if args.json:
         print(json.dumps(body))
         return 0
@@ -129,10 +131,19 @@ def pick_next(sheet: dict[str, object], cells: list[object]) -> tuple[int, int]:
     return pool[0]
 
 
+def cell_url(sheet: str, col: int, row: int) -> str:
+    """Where a person sees the cell on the map. The service's upload answer uses the same address."""
+    return f"{config.MAP_URL}#{sheet}/{col}_{row}"
+
+
 def cmd_claim(args: argparse.Namespace) -> int:
     token = require_token()
     if bool(args.next) == bool(args.cell):
         raise bad_input("Pass a cell like 64_59, or --next, and not both.")
+    # A lock holds the cell for 48 hours, so a machine that cannot build one does not take one.
+    problem = _gpu_missing()
+    if problem is not None:
+        raise environment(f"this machine cannot build a cell: {problem}")
     if args.next:
         _status, body = api.get(f"/v1/grid/{args.sheet}", token=token)
         payload = _object(body, "object")
@@ -142,6 +153,7 @@ def cmd_claim(args: argparse.Namespace) -> int:
     _status, claimed = api.post("/v1/claim", {"sheet": args.sheet, "col": col, "row": row}, token)
     expires = _object(claimed, "object").get("expires_at")
     print(f"claimed: {args.sheet} {col}_{row} expires {expires}")
+    print(f"url: {cell_url(args.sheet, col, row)}")
     return 0
 
 
@@ -186,6 +198,77 @@ def _python_missing() -> str | None:
     if sys.version_info >= (3, 11):
         return None
     return f"{sys.version_info.major}.{sys.version_info.minor} is older than 3.11"
+
+
+GPU_MIN_MIB = 11000
+DISK_MIN_GB = 25.0
+DISK_MIN_CACHED_GB = 2.0
+
+
+def _nvidia_cards() -> list[tuple[str, int]]:
+    """Name and memory in MiB of each NVIDIA card, asked of the driver. Needs no PyTorch."""
+    tool = shutil.which("nvidia-smi")
+    if tool is None:
+        return []
+    try:
+        done = subprocess.run(
+            [tool, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    cards: list[tuple[str, int]] = []
+    for line in done.stdout.splitlines():
+        name, _, memory = line.rpartition(",")
+        try:
+            cards.append((name.strip(), int(float(memory.strip()))))
+        except ValueError:
+            continue
+    return cards
+
+
+def _gpu_missing() -> str | None:
+    if sys.platform == "darwin":
+        return "this is a Mac, and the redraw needs an NVIDIA card. Do not claim a cell here."
+    cards = _nvidia_cards()
+    if not cards:
+        return "no NVIDIA card found (nvidia-smi did not answer). Do not claim a cell here."
+    name, memory = max(cards, key=lambda card: card[1])
+    if memory < GPU_MIN_MIB:
+        return f"{name} has {round(memory / 1024)} GB, and the redraw needs 12 GB. Do not claim a cell here."
+    return None
+
+
+def _hub_cache() -> Path:
+    explicit = os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if explicit:
+        return Path(explicit)
+    base = os.environ.get("HF_HOME")
+    return (Path(base) if base else Path.home() / ".cache" / "huggingface") / "hub"
+
+
+def _model_is_cached() -> bool:
+    folder = "models--" + pipeline.MODEL_ID.replace("/", "--")
+    revision = pipeline.PINS.get("model_revision", "")
+    return bool(revision) and (_hub_cache() / folder / "snapshots" / revision).is_dir()
+
+
+def _free_gb() -> float:
+    path = _hub_cache()
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    return shutil.disk_usage(path).free / 1e9
+
+
+def _disk_missing() -> str | None:
+    needed = DISK_MIN_CACHED_GB if _model_is_cached() else DISK_MIN_GB
+    free = _free_gb()
+    if free >= needed:
+        return None
+    return f"{free:.0f} GB free where the model is kept, and it needs {needed:.0f} GB"
 
 
 def _torch_missing() -> str | None:
@@ -244,17 +327,24 @@ def _login_missing() -> str | None:
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
-    del args
-    checks = (
-        ("python", _python_missing()),
-        ("torch", _torch_missing()),
-        ("bitsandbytes", _bitsandbytes_missing()),
-        ("render", _render_missing()),
-        ("service", _service_missing()),
-        ("login", _login_missing()),
-    )
+    # The machine first: python, card and disk need nothing installed and no login, so a person
+    # learns whether this machine can build a cell before they accept terms or download anything.
+    checks: list[tuple[str, Callable[[], str | None]]] = [
+        ("python", _python_missing),
+        ("gpu", _gpu_missing),
+        ("disk", _disk_missing),
+    ]
+    if not getattr(args, "machine", False):
+        checks += [
+            ("torch", _torch_missing),
+            ("bitsandbytes", _bitsandbytes_missing),
+            ("render", _render_missing),
+            ("service", _service_missing),
+            ("login", _login_missing),
+        ]
     missing = False
-    for name, problem in checks:
+    for name, check in checks:
+        problem = check()
         if problem is None:
             print(f"check: {name} ok")
         else:
@@ -648,6 +738,7 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     whoami.set_defaults(func=cmd_whoami)
 
     preflight = sub.add_parser("preflight", help="check the machine before a redraw")
+    preflight.add_argument("--machine", action="store_true", help="only python, the NVIDIA card and the disk: needs no install and no login")
     preflight.set_defaults(func=cmd_preflight)
 
     render = sub.add_parser("render", help="render one cell to a source PNG")

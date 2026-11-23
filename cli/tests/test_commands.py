@@ -176,9 +176,9 @@ class CommandTests(unittest.TestCase):
     def test_commands_need_login(self) -> None:
         token = os.path.join(self.tmp.name, "token")
         os.remove(token)
+        # The lists are public; taking a cell is not.
         code, _out, err = self.run_cmd(["cities"])
-        self.assertEqual(code, 3)
-        self.assertIn("not logged in: run rutor login", err)
+        self.assertEqual((code, err), (0, ""))
         code, _out, err = self.run_cmd(["claim", "goteborg-norr", "0_0"])
         self.assertEqual(code, 3)
         self.assertIn("not logged in: run rutor login", err)

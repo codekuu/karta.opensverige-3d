@@ -196,14 +196,14 @@ class ServiceCase(unittest.TestCase):
 
 class NetworkErrorTests(ServiceCase):
     def test_api_read_timeout_is_exit_4(self) -> None:
-        with patch("rutor.api.urllib.request.urlopen", side_effect=TimeoutError("read timed out")):
+        with patch("rutor.api._open", side_effect=TimeoutError("read timed out")):
             with self.assertRaises(RutorError) as caught:
                 api.get("/v1/health")
         self.assertEqual(caught.exception.code, 4)
         self.assertTrue(caught.exception.message.startswith("could not reach the service ("))
 
     def test_api_broken_http_stream_is_exit_4(self) -> None:
-        with patch("rutor.api.urllib.request.urlopen", side_effect=http.client.BadStatusLine("boom")):
+        with patch("rutor.api._open", side_effect=http.client.BadStatusLine("boom")):
             with self.assertRaises(RutorError) as caught:
                 api.get("/v1/health")
         self.assertEqual(caught.exception.code, 4)
@@ -549,9 +549,25 @@ class RedrawCoreErrorTests(unittest.TestCase):
 
 
 class PinTests(unittest.TestCase):
-    def test_pins_are_revisions_and_all_unset(self) -> None:
+    def test_the_weights_are_pinned_to_exact_commits(self) -> None:
+        # A volunteer's machine loads these files. A moving branch would let whoever owns the
+        # Hugging Face repository swap them, so both are named by commit.
         self.assertEqual(set(pipeline.PINS), {"model_revision", "lora_revision", "diffusers_version"})
-        self.assertTrue(all(pin == "" for pin in pipeline.PINS.values()))
+        self.assertRegex(pipeline.PINS["model_revision"], r"^[0-9a-f]{40}$")
+        self.assertRegex(pipeline.PINS["lora_revision"], r"^[0-9a-f]{40}$")
+
+    def test_the_loader_takes_safetensors_only(self) -> None:
+        # A pickle file runs code when it is loaded; a safetensors file cannot.
+        pipe = _FakePipe()
+        with _fake_model_modules(pipe):
+            redraw_core._load_pipe()
+        model = [call for call in pipe.calls if call[0] == "model"][0]
+        lora = [call for call in pipe.calls if call[0] == "lora"][0]
+        self.assertIs(model[2]["use_safetensors"], True)
+        self.assertIs(lora[2]["use_safetensors"], True)
+        self.assertNotIn("trust_remote_code", model[2])
+        self.assertEqual(model[2]["revision"], pipeline.PINS["model_revision"])
+        self.assertEqual(lora[2]["revision"], pipeline.PINS["lora_revision"])
 
     def test_empty_pins_print_each_name_and_do_not_block(self) -> None:
         stdout = io.StringIO()

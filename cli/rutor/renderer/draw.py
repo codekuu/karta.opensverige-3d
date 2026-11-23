@@ -38,6 +38,8 @@ GROUND_STEP = 8
 # photo pixels are filled from the same neighbours in every cell that sees them.
 PAD = 32
 METRES_PER_DEGREE = 111320.0
+# Taller than any building in Sweden. A tag from the map data never draws more wall than this.
+MAX_HEIGHT_M = 400.0
 
 # Göteborg plaster, stone and brick, light to dark.
 PALETTE = np.array(
@@ -60,18 +62,24 @@ GLASS_HI = np.array((96, 118, 138), dtype=np.float32)
 SHOP = np.array((40, 46, 54), dtype=np.float32)
 
 
+def _metres(text: object) -> float | None:
+    try:
+        value = float(str(text).replace("m", "").strip())
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
 def height_of(tags: dict[str, object]) -> float:
     for key in ("height", "building:height"):
         if key in tags:
-            try:
-                return float(str(tags[key]).replace("m", "").strip())
-            except ValueError:
-                pass
+            found = _metres(tags[key])
+            if found is not None:
+                return min(max(found, 0.0), MAX_HEIGHT_M)
     if "building:levels" in tags:
-        try:
-            return STOREY * float(str(tags["building:levels"])) + 1.5
-        except ValueError:
-            pass
+        levels = _metres(tags["building:levels"])
+        if levels is not None:
+            return min(max(STOREY * levels + 1.5, 0.0), MAX_HEIGHT_M)
     kind = tags.get("building", "yes")
     if kind in ("garage", "garages", "shed", "hut", "kiosk", "roof", "carport"):
         return 3.0

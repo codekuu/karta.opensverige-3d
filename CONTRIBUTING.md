@@ -18,7 +18,7 @@ Clone, install, log in, and run `rutor preflight`. Go on only when every line sa
 ## The run
 
 ```bash
-rutor login --accept-terms
+rutor login        # prints the terms and asks you to accept them
 rutor preflight
 rutor claim <sheet> --next
 rutor render <sheet> <col>_<row>
@@ -58,10 +58,11 @@ Code contributions and GPU runs are both open. GPU runs need an NVIDIA card and 
 
 Open an issue on <https://github.com/opensverige/karta.opensverige-3d/issues>. Include the command, the exit code and the `error:` line. Do not paste your GitHub token.
 
-## Licence and credit
+## Terms, licence and credit
 
-- The PNG you upload is contributed under the MIT license. See [LICENSE](LICENSE).
-- By uploading, you agree that it may be shown on karta.opensverige.se.
-- You are credited by the GitHub login you used in `rutor login`.
-- Contribute only a cell you made with this pipeline, from the open-data source render.
-- The model weights stay under their own licenses. The Qwen Research License grants non-commercial use only.
+The ten lines in [TERMS.md](TERMS.md) are what you accept at `rutor login`. In short:
+
+- It is voluntary and unpaid, on your own machine at your own cost and risk.
+- A person reviews your cells before they go on the map, and a cell can be taken down later.
+- You are credited by the GitHub login you used in `rutor login`. It is shown publicly.
+- The model weights and the sources keep their own licenses. TERMS.md names each one.

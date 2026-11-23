@@ -57,6 +57,11 @@ def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None =
         parser.print_usage(sys.stderr)
         return 1
     try:
+        # A sheet id becomes a folder name and part of a URL, so it is checked once, here.
+        if isinstance(getattr(args, "sheet", None), str):
+            from rutor.config import sheet_id
+
+            sheet_id(args.sheet)
         return int(func(args))
     except RutorError as exc:
         print(f"error: {exc.message}", file=sys.stderr)
