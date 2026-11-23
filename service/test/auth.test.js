@@ -80,6 +80,66 @@ describe('resolveUser', () => {
     expect((await r.json()).error).toBe('github_down');
   });
 
+  it('reads a 403 from github as an outage: a login without scopes is never short of rights', async () => {
+    githubAnswers(403, { message: 'Forbidden' });
+    const r = await resolveUser(withToken('tok-403'), env, NOW);
+    expect(r.status).toBe(503);
+    expect((await r.json()).error).toBe('github_down');
+  });
+
+  it('writes the user row once per lookup, not on every request', async () => {
+    githubAnswers(200, GH);
+    await resolveUser(withToken('tok-w'), env, NOW);
+    await env.DB.prepare("UPDATE users SET login = 'changed-by-hand' WHERE github_id = 4242").run();
+    const again = await resolveUser(withToken('tok-w'), env, NOW);
+    // The cached identity did not rewrite the row.
+    expect(again.user.login).toBe('changed-by-hand');
+  });
+
+  it('makes the row for an identity that is cached but not yet in the database', async () => {
+    githubAnswers(200, GH);
+    await resolveUser(withToken('tok-x'), env, NOW);
+    await env.DB.prepare('DELETE FROM users').run();
+    const again = await resolveUser(withToken('tok-x'), env, NOW);
+    expect(again.user.github_id).toBe(4242);
+  });
+
+  describe('with the OAuth app secret set', () => {
+    const bound = { ...env, GITHUB_CLIENT_ID: 'Ov23test', GITHUB_CLIENT_SECRET: 'shh' };
+    function appAnswers(status, body) {
+      vi.stubGlobal('fetch', async (url, init) => {
+        calls.push({ url: String(url), auth: init?.headers?.Authorization, method: init?.method, body: init?.body });
+        if (String(url) !== 'https://api.github.com/applications/Ov23test/token') throw new Error('unexpected fetch ' + url);
+        return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+      });
+    }
+
+    it('accepts a token that our own app issued', async () => {
+      appAnswers(200, { user: GH, app: { client_id: 'Ov23test' } });
+      const r = await resolveUser(withToken('tok-ours'), bound, NOW);
+      expect(r.user.login).toBe('klang');
+      expect(calls).toHaveLength(1);
+      expect(calls[0].method).toBe('POST');
+      expect(calls[0].auth).toBe('Basic ' + btoa('Ov23test:shh'));
+      expect(JSON.parse(calls[0].body)).toEqual({ access_token: 'tok-ours' });
+    });
+
+    it('refuses a token that another app or a person made', async () => {
+      // Any site where someone signed in with GitHub holds a token GitHub vouches for. It is not ours.
+      appAnswers(404, { message: 'Not Found' });
+      const r = await resolveUser(withToken('tok-theirs'), bound, NOW);
+      expect(r.status).toBe(401);
+      expect((await r.json()).error).toBe('bad_token');
+      expect((await env.GH.list()).keys).toHaveLength(0);
+    });
+
+    it('reads an outage of that check as 503', async () => {
+      appAnswers(500, { message: 'oops' });
+      const r = await resolveUser(withToken('tok-out'), bound, NOW);
+      expect(r.status).toBe(503);
+    });
+  });
+
   it('is 401 no_token without a bearer header', async () => {
     const r = await resolveUser(new Request('https://x/v1/me'), env, NOW);
     expect(r.status).toBe(401);

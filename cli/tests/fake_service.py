@@ -44,6 +44,10 @@ class FakeService:
         self._fail = (status, body, content_type)
 
     def start(self) -> str:
+        from unittest.mock import patch
+
+        self._machine = patch("rutor.commands._gpu_missing", return_value=None)
+        self._machine.start()
         handler = _handler(self)
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
@@ -52,6 +56,10 @@ class FakeService:
         return f"http://{host}:{port}"
 
     def stop(self) -> None:
+        machine = getattr(self, "_machine", None)
+        if machine is not None:
+            machine.stop()
+            self._machine = None
         if self._httpd is None:
             return
         self._httpd.shutdown()

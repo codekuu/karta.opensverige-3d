@@ -109,7 +109,8 @@ def _load_pipe():
     import torch
     from diffusers import QwenImage21Pipeline
 
-    kwargs = {"low_cpu_mem_usage": True}
+    # Safetensors only: a pickle file runs code when it is loaded, a safetensors file cannot.
+    kwargs = {"low_cpu_mem_usage": True, "use_safetensors": True}
     model_revision = PINS.get("model_revision", "")
     if model_revision:
         kwargs["revision"] = model_revision
@@ -117,7 +118,7 @@ def _load_pipe():
         pipe = QwenImage21Pipeline.from_pretrained(MODEL_ID, dtype=torch.bfloat16, **kwargs)
     except TypeError:
         pipe = QwenImage21Pipeline.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, **kwargs)
-    lora_kwargs = {}
+    lora_kwargs = {"use_safetensors": True}
     lora_revision = PINS.get("lora_revision", "")
     if lora_revision:
         lora_kwargs["revision"] = lora_revision

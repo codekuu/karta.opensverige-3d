@@ -5,7 +5,6 @@ import { requireAdmin } from './auth.js';
 import { logEvent, readCellBody } from './cells.js';
 import { error, json } from './db.js';
 
-const TRUST_AT = 10;
 const COMMENT_MAX = 500;
 const PURGE_DAYS = 30;
 
@@ -32,7 +31,7 @@ function cellList(cells) {
 const IN_LIST = "(col, row) IN (SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?))";
 
 /**
- * vantar → godkand. The owner's approved_count grows and trust arrives at the tenth.
+ * vantar → godkand. The owner's approved_count grows.
  * @param {D1Database} db
  * @param {string} sheet
  * @param {number} col
@@ -49,10 +48,9 @@ export async function approveCell(db, sheet, col, row, now) {
     .run();
   // A second approval that lost the race counts nothing and gives no trust.
   if (moved.meta.changes !== 1) return { ok: false, status: 409, code: 'not_waiting' };
-  await db.batch([
-    db.prepare('UPDATE users SET approved_count = approved_count + 1 WHERE github_id = ?').bind(cell.owner_id),
-    db.prepare('UPDATE users SET trusted = 1 WHERE github_id = ? AND approved_count = ?').bind(cell.owner_id, TRUST_AT),
-  ]);
+  // Trust is never given here. A trusted builder's cells skip review, so a person decides who
+  // that is, with POST /trust.
+  await db.prepare('UPDATE users SET approved_count = approved_count + 1 WHERE github_id = ?').bind(cell.owner_id).run();
   return { ok: true };
 }
 

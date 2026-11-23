@@ -30,6 +30,8 @@ from rutor.errors import environment, network
 USER_AGENT = "pixelbygget-rutor/0.1"
 RANGE_TIMEOUT = 60.0
 RANGE_ATTEMPTS = 3
+# A 2000 x 2000 float tile is 16 MB raw. Nothing larger is unpacked.
+MAX_TILE_BYTES = 64 * 1024 * 1024
 RANGE_BACKOFF_SECONDS = (5, 15)
 GRS80_A = 6378137.0
 GRS80_F = 1 / 298.257222101
@@ -223,6 +225,8 @@ def _fetch_tile(sheet_id: str, source: TerrainSource, key: tuple[int, int], fetc
         try:
             with zipfile.ZipFile(io.BufferedReader(reader, buffer_size=1 << 16)) as opened:
                 if member in opened.namelist():
+                    if opened.getinfo(member).file_size > MAX_TILE_BYTES:
+                        raise network(f"terrain tile {key[0]}_{key[1]} is too large to be a terrain tile")
                     payload = opened.read(member)
         except zipfile.BadZipFile as exc:
             raise network(f"the terrain archive {archive} is not a zip") from exc

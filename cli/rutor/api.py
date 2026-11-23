@@ -12,6 +12,26 @@ from rutor.config import service_url
 from rutor.errors import network, refused
 
 TIMEOUT_SECONDS = 30
+MESSAGE_CHARS = 200
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would carry the login to wherever it points, so none is followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        del req, fp, msg, headers, newurl
+        raise network(f"the service answered with a redirect ({code}); nothing was sent on")
+
+
+def _open(request: urllib.request.Request, timeout: float):  # type: ignore[no-untyped-def]
+    return urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout)
+
+
+def one_line(text: str, limit: int = MESSAGE_CHARS) -> str:
+    """Text from outside as one short printable line: it is shown to people and to their agents."""
+    cleaned = "".join(ch if ch.isprintable() else " " for ch in text)
+    cleaned = " ".join(cleaned.split())
+    return cleaned if len(cleaned) <= limit else cleaned[: limit - 1] + "…"
 
 
 def _exchange(
@@ -39,7 +59,7 @@ def _exchange(
     # and only a dead connection becomes a network error.
     request = urllib.request.Request(service_url() + path, data=data, headers=hdrs, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+        with _open(request, TIMEOUT_SECONDS) as response:
             return int(response.status), response.read()
     except urllib.error.HTTPError as exc:
         try:
@@ -68,10 +88,10 @@ def _refuse(status: int, parsed: object) -> None:
     if isinstance(parsed, dict):
         error = parsed.get("error")
         if isinstance(error, str):
-            code = error
+            code = one_line(error, 40)
         found = parsed.get("message")
         if isinstance(found, str):
-            message = found
+            message = one_line(found)
     raise refused(f"refused: {code}: {message}")
 
 

@@ -36,12 +36,12 @@ describe('approveCell', () => {
     expect(u).toEqual({ approved_count: 1, trusted: 0 });
   });
 
-  it('makes the owner trusted at the tenth approval', async () => {
+  it('never gives trust by itself: a person decides who skips review', async () => {
     await env.DB.prepare('UPDATE users SET approved_count = 9 WHERE github_id = 4242').run();
     await uploaded(1, 1);
     await approveCell(env.DB, 'goteborg-norr', 1, 1, LATER);
     const u = await env.DB.prepare('SELECT approved_count, trusted FROM users WHERE github_id = 4242').first();
-    expect(u).toEqual({ approved_count: 10, trusted: 1 });
+    expect(u).toEqual({ approved_count: 10, trusted: 0 });
   });
 
   it('does not re-trust a user whose trust was revoked', async () => {

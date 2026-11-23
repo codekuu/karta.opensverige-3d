@@ -25,21 +25,24 @@ Run the tool from `cli/` with `python -m rutor`, or install it into the virtuale
 ## The steps
 
 ```bash
-rutor login --accept-terms
-rutor preflight
+rutor preflight --machine     # python, the NVIDIA card and the disk: before anything else
+rutor login                   # prints the terms and asks you to accept them
+rutor preflight               # everything, once the install and the login are done
 rutor claim goteborg-norr --next
 rutor render goteborg-norr 64_59
 rutor redraw goteborg-norr 64_59
 rutor upload goteborg-norr 64_59
 ```
 
-`rutor login` prints the terms and a device code. Read the terms first: `--accept-terms` means you accept them. Approve the code in the browser at the URL it prints. That approval is the step that needs a person.
+`rutor preflight --machine` needs nothing but the light install (`pip install -e cli`) and no login, so run it first: it says whether this machine can build a cell at all. `rutor claim` refuses on a machine that cannot.
 
-`rutor claim` prints the cell you got. Use that `col_row` in render, redraw and upload. `rutor status` shows your open locks, `rutor whoami` your login and whether you are trusted.
+`rutor login` prints the terms ([TERMS.md](TERMS.md)) and a device code. `--accept-terms` answers yes for you, so pass it only when you have read them. Approve the code in the browser at the URL it prints. That approval is the step that needs a person.
+
+`rutor claim` prints the cell you got and a `url:` line: the cell on the map, with your login on it within a minute. Use that `col_row` in render, redraw and upload. `rutor status` shows your open locks, `rutor whoami` your login and whether you are trusted.
 
 `rutor redraw --wait-for-cheap` runs the SE3 price check first. While the price is high it exits 6 and you keep your lock; run it again after the time it prints. Without the flag the price check is advice only: `python -m rutor.se3_price`.
 
-`rutor preflight` checks Python, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login, so run it after `rutor login`. Do not claim, render or redraw when any line says `missing`.
+`rutor preflight` checks Python, the NVIDIA card, the disk, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login. Do not claim, render or redraw when any line says `missing`.
 
 Exit codes: 0 done, 1 bad input, 2 refused by the service, 3 something missing on this machine, 4 network, 5 the redraw failed the quality check, 6 the SE3 price is high (try later).
 
@@ -47,7 +50,7 @@ Exit codes: 0 done, 1 bad input, 2 refused by the service, 3 something missing o
 
 Use Python 3.11 or newer. NVIDIA CUDA is required for the redraw. The 4-bit checkpoint is a bitsandbytes quant. A 12 GB card is enough: the redraw peaks at about 11 GB. One cell takes about two minutes on an RTX 5070 or an L4.
 
-Install a CUDA build of PyTorch first, then the rest, so a later install does not replace it with a CPU wheel. If the CUDA 12.8 index does not match your driver, use the current index from <https://pytorch.org>.
+Install a CUDA build of PyTorch and torchvision first, then the rest, so a later install does not replace them with CPU wheels. The redraw does not load without torchvision. If the CUDA 12.8 index does not match your driver, use the current index from <https://pytorch.org>.
 
 Model weights are not in this repo. The first redraw downloads them into the Hugging Face cache on your machine, on the order of 20 GB.
 
@@ -64,7 +67,7 @@ cd karta.opensverige-3d
 py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 python -m pip install -r requirements.txt
 python -m pip install -e cli
 rutor preflight
@@ -84,7 +87,7 @@ cd karta.opensverige-3d
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 python -m pip install -r requirements.txt
 python -m pip install -e cli
 rutor preflight
@@ -98,7 +101,7 @@ cd karta.opensverige-3d
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install torch
+python -m pip install torch torchvision
 python -m pip install -r requirements.txt
 python -m pip install -e cli
 rutor preflight
@@ -113,7 +116,7 @@ Without `pip install -e cli`, the same commands work as `python -m rutor` from t
 Each sheet has one source, so neighbouring cells match:
 
 - `goteborg-norr` is drawn from open data. Göteborgs Stad orthophoto and terrain model are CC0. OpenStreetMap is ODbL. The first render in an area also reads about 7 MB of terrain per square kilometre.
-- `stockholm-norr` is drawn from Google Photorealistic 3D Tiles through Cesium ion. It is not open yet.
+- `stockholm-norr` is drawn from Google Photorealistic 3D Tiles through Cesium ion. It is open, and it asks more of you: read line 10 of [TERMS.md](TERMS.md) first.
 
 A Google sheet needs three things on your machine:
 
@@ -121,13 +124,13 @@ A Google sheet needs three things on your machine:
 - Node 22 or newer.
 - `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome for headless rendering, about 750 MB.
 
-Google's terms bind your token, not this project's MIT license. Google can ask for cells drawn from its tiles to be taken down. `rutor render` prints this on every Google cell, and the manifest names the source.
+Google's terms bind your token, not this project's MIT license. Google's Map Tiles policy does not allow deriving new content from its tiles, so read it and decide for yourself. Google can ask for cells drawn from its tiles to be taken down. `rutor render` prints this on every Google cell, and the manifest names the source.
 
 The source render (`work/<sheet>/<col>_<row>.src.png`) stays on your machine. `rutor upload` sends only the redrawn PNG.
 
 ## Licence and credit
 
-The PNG you upload is contributed under the MIT license, except that a cell drawn from Google's tiles is also under Google's terms. See [LICENSE](LICENSE). It may be shown on karta.opensverige.se. You are credited by your GitHub login. The model weights stay under their own licenses.
+Building a cell is voluntary and unpaid. What you accept at `rutor login` is ten lines in [TERMS.md](TERMS.md): what leaves your machine, who reviews it, that your GitHub login is shown, and which licenses the model and the sources carry. The code is MIT, see [LICENSE](LICENSE).
 
 ## Local checks
 

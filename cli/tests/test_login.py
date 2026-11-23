@@ -12,6 +12,8 @@ from unittest import mock
 from rutor.__main__ import main
 from rutor.config import github_client_id
 from rutor.errors import RutorError
+from pathlib import Path
+
 from rutor.login import TERMS, poll_for_token, start_device_flow
 
 Http = Callable[[str, dict[str, str]], dict[str, object]]
@@ -107,6 +109,28 @@ class LoginTests(unittest.TestCase):
             code = main(["login"])
         self.assertEqual(code, 3)
         self.assertIn("PIXELBYGGET_GITHUB_CLIENT_ID", stderr.getvalue())
+
+    def test_the_terms_say_what_a_volunteer_must_know(self) -> None:
+        # One text in two places: TERMS.md for people, rutor login for the terminal.
+        written = (Path(__file__).resolve().parents[2] / "TERMS.md").read_text(encoding="utf-8")
+        for line in TERMS.splitlines():
+            self.assertIn(line.split(". ", 1)[1], written, line)
+        lowered = TERMS.lower()
+        for must in (
+            "voluntary",
+            "unpaid",
+            "without warranty",
+            "your own cost",
+            "a person reviews",
+            "shown publicly",
+            "qwen research license",
+            "openstreetmap",
+            "google's map tiles policy",
+            "empty scope",
+        ):
+            self.assertIn(must, lowered)
+        # Short enough to read before saying yes.
+        self.assertLessEqual(len(TERMS.splitlines()), 10)
 
     def test_login_requires_accept_terms_or_prints_terms(self) -> None:
         os.environ["PIXELBYGGET_GITHUB_CLIENT_ID"] = "Iv1.real"

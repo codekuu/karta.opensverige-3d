@@ -1,12 +1,17 @@
-# Install a CUDA build of PyTorch before this file. This list does not install
-# torch, so it does not replace that wheel with a CPU build.
+# Install a CUDA build of PyTorch and torchvision before this file (see README.md). This list
+# does not install them, so it does not replace those wheels with CPU builds.
+#
+# Every package is pinned to the exact version the redraw is known to run with (RTX 5070,
+# Windows, Python 3.11, 2026-11-23). A volunteer's machine installs these next to their login,
+# so a new release is taken in on purpose, in a pull request, not by whoever installs next.
 diffusers @ git+https://github.com/huggingface/diffusers.git@8c54b38fea3d624d23d0e43c0c96037f080a79f9
-transformers>=5.17.0
-accelerate
-bitsandbytes
+transformers==5.22.2
+accelerate==1.15.0
+bitsandbytes==0.50.2
+peft==0.21.2
+safetensors==0.8.0
+huggingface_hub==2.4.0
+tokenizers==0.23.3
 # Pinned: the source render must be pixel-identical on every machine.
 pillow==13.0.0
-sentencepiece
-peft
-protobuf
 numpy==2.4.6
