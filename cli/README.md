@@ -22,7 +22,8 @@ python -m rutor --version
 ## The steps
 
 ```bash
-rutor login --accept-terms
+rutor preflight --machine
+rutor login
 rutor preflight
 rutor claim goteborg-norr --next
 rutor render goteborg-norr 64_59
@@ -30,7 +31,7 @@ rutor redraw goteborg-norr 64_59
 rutor upload goteborg-norr 64_59
 ```
 
-Replace `64_59` with the cell `rutor claim` prints. `rutor preflight` checks the login too, so run it after `rutor login`, and it should be `ok` on every line before `rutor claim`.
+Replace `64_59` with the cell `rutor claim` prints. `rutor preflight --machine` checks python, the NVIDIA card and the disk, with no login. `rutor login` prints the terms in [TERMS.md](../TERMS.md). `rutor preflight` should be `ok` on every line before `rutor claim`.
 
 `rutor login` prints a code and `url: https://github.com/login/device`. A person approves that code in the browser. The token is stored in `~/.config/pixelbygget/token` (override with `PIXELBYGGET_HOME`), mode `0600` on Linux and macOS. `PIXELBYGGET_URL` points the CLI at another service, such as a local one. That approval is the step that needs a person.
 

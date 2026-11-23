@@ -13,11 +13,12 @@ This page holds the rules. The commands and the install are in [README.md](READM
 - Python 3.11 or newer, and a GitHub account.
 - The source render comes from the sheet's source. `goteborg-norr` is open data: Göteborgs Stad orthophoto and terrain model (both CC0) and OpenStreetMap (ODbL). `stockholm-norr` is Google's tiles through your own Cesium ion token, Node 22 and `npm ci` in `cli/google-render`. Google's terms bind that token, and Google can ask for those cells to be taken down.
 
-Clone, install, log in, and run `rutor preflight`. Go on only when every line says `ok`.
+Clone, install the CLI and run `rutor preflight --machine` first: it needs no login and says whether this machine can build a cell. Then install the rest, log in, and run `rutor preflight`. Go on only when every line says `ok`.
 
 ## The run
 
 ```bash
+rutor preflight --machine
 rutor login        # prints the terms and asks you to accept them
 rutor preflight
 rutor claim <sheet> --next
@@ -31,8 +32,9 @@ Each step is explained in [README.md](README.md).
 ## Rules
 
 - A lock lasts 48 hours. `rutor status` shows yours.
-- One cell at a time until you are trusted. Finish it or release it before you take another. Trust arrives after ten approved cells. Until then a second open lock is refused. A trusted builder may hold eight.
-- The first ten cells are reviewed. `rutor upload` leaves a new contributor's cell waiting. An admin approves or rejects it.
+- One cell at a time until you are trusted. Finish it or release it before you take another. A second open lock is refused, and so is a new one while five of your cells wait for review.
+- A person reviews your cells. `rutor upload` leaves the cell waiting, and an admin approves or rejects it. Nothing goes on the map without that.
+- Trust is given by the maintainer, by hand, to builders whose cells have held up. A trusted builder may hold eight locks, and their cells go straight through.
 - A new contributor uploads at most 20 cells a day.
 - Do not send the source render to anyone. `work/<sheet>/<col>_<row>.src.png` stays on your machine. Only the redrawn PNG is uploaded.
 - During a GPU run, do not edit `cli/rutor/pipeline.py`, the redraw or the manifest, and never touch another contributor's cell. A change to the redraw is a code change: open a pull request.
@@ -40,11 +42,11 @@ Each step is explained in [README.md](README.md).
 
 ## Code contributions
 
-Code contributions and GPU runs are both open. GPU runs need an NVIDIA card and work on `goteborg-norr` only for now.
+Code contributions and GPU runs are both open. GPU runs need an NVIDIA card.
 
 - Pick an issue, or open one before a large change.
 - Branch from `main` and open a pull request against `main`.
-- Install with `python -m pip install -e "cli[render]"`. No GPU is needed.
+- Make a virtualenv (`python3 -m venv .venv`, then activate it) and install with `python -m pip install -e "cli[render]"`. No GPU is needed.
 - Run the tests before you push, from the repository root:
   - `cd cli && python -m unittest discover -s tests` (the renderer tests are skipped without Pillow and numpy)
   - `cd service && npm ci && npm test` (Node 22 or newer)

@@ -53,6 +53,29 @@ describe('claimCell', () => {
     expect(await claimCell(env.DB, other, 'goteborg-norr', 2, 0, NOW)).toMatchObject({ ok: false, status: 403, code: 'too_many_locks' });
   });
 
+  it('stops a new user who already has five cells waiting for review', async () => {
+    // Uploading frees the lock, so without this one account could park 20 cells a day in the queue.
+    const waiting = [[0, 1], [1, 1], [2, 1], [3, 1], [0, 2]];
+    for (const [col, row] of waiting) {
+      await env.DB.prepare("UPDATE cells SET state = 'vantar', owner_id = ?, owner_login = ?, uploaded_at = ? WHERE sheet = 'goteborg-norr' AND col = ? AND row = ?")
+        .bind(user.github_id, user.login, NOW, col, row)
+        .run();
+    }
+    expect(await claimCell(env.DB, user, 'goteborg-norr', 0, 0, NOW)).toMatchObject({ ok: false, status: 403, code: 'too_many_waiting' });
+    // One of them is reviewed: room again.
+    await env.DB.prepare("UPDATE cells SET state = 'godkand' WHERE sheet = 'goteborg-norr' AND col = 0 AND row = 1").run();
+    expect((await claimCell(env.DB, user, 'goteborg-norr', 0, 0, NOW)).ok).toBe(true);
+  });
+
+  it('does not hold a trusted user to the waiting limit', async () => {
+    for (const [col, row] of [[0, 1], [1, 1], [2, 1], [3, 1], [0, 2], [1, 2]]) {
+      await env.DB.prepare("UPDATE cells SET state = 'vantar', owner_id = ?, owner_login = ?, uploaded_at = ? WHERE sheet = 'goteborg-norr' AND col = ? AND row = ?")
+        .bind(other.github_id, other.login, NOW, col, row)
+        .run();
+    }
+    expect((await claimCell(env.DB, other, 'goteborg-norr', 0, 0, NOW)).ok).toBe(true);
+  });
+
   it('holds the lock limit under parallel claims on different cells', async () => {
     const results = await Promise.all([
       claimCell(env.DB, user, 'goteborg-norr', 0, 1, NOW),

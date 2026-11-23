@@ -4,6 +4,20 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-23
 
+### Safe for anyone's agent: a security review and a newcomer's dry run
+Two fresh readers went through the repository: one looking for ways to misuse a volunteer's machine, login or the service, one playing an agent told only "help out here" on a Mac. What they found and what changed:
+- **Any GitHub token was a login.** The service asked GitHub "whose token is this", never "which app issued it", so a token from any other site's "Sign in with GitHub" worked here, the admin's too. The service now asks through the OAuth app's own check when `GITHUB_CLIENT_SECRET` is set. Until the maintainer sets that secret, the old behaviour stands.
+- **The weights could be swapped.** The model and the LoRA followed a branch. Both are now pinned to a commit and loaded as safetensors only. Both repositories hold safetensors files only, and the cache on the test PC already had exactly these commits.
+- **The Python packages floated.** `requirements.txt` now pins every package to the version the redraw runs with. sentencepiece and protobuf were listed but not installed on the working machine, so they are gone.
+- **The redraw does not load without torchvision**, and the README installed only torch. Blocking the import on the test PC reproduces the ImportError a volunteer met.
+- **`PIXELBYGGET_URL` sent the login anywhere.** It may now only point at this machine, and no redirect is followed with the login.
+- **Uploads could park cells.** An upload frees the lock, so one new account could move 20 cells a day into the review queue. At most five uploads of a builder who is not trusted wait at once.
+- **Trust came by itself after ten approvals** and then skipped review. It is now given by hand only.
+- **The machine was checked after the consent.** `rutor preflight --machine` asks the driver (`nvidia-smi`) for the card and its memory and checks the disk, with nothing installed and no login. A Mac is told in the first two lines. `rutor claim` refuses on a machine that cannot build.
+- **`rutor login --accept-terms` never showed the terms.** They are always printed, and they are ten lines in `TERMS.md`: unpaid, own cost, public login, the model's research license, and what Google's policy says about the Google sheet.
+- Smaller: sheet ids are checked before they become folders, a terrain tile over 64 MB is not unpacked, a building height from the map data stops at 400 m, text from the service reaches the terminal as one printable line, and `rutor cities` and `rutor grid` work before login.
+- Not changed: the service still sees the GitHub login token on each request (it has no scopes and is not stored), headless Chrome still runs with `--disable-gpu-sandbox` on Linux for Google sheets, and a per-isolate grid cache can be made to rescan a sheet once a minute.
+
 ### A new city without a terrain model
 - After PR 17 an open sheet needed a city terrain model, so a new city like Eslöv stopped with "no open terrain model". A sheet without one is now drawn on flat ground at its `ground_height`, and its manifest says `terrain flat`. A new city has no older map to line up with, so flat ground only costs hills their height.
 

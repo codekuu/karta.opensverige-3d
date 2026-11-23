@@ -29,7 +29,8 @@ Contributors never get write access to a repo, a bucket or a key. The only thing
 `fri` → `last` (locked, 48 hours) → `vantar` (uploaded, waiting for review) → `godkand` (approved) → `live` (on the map).
 
 - A new contributor holds one lock at a time and uploads at most 20 cells a day. Their first ten cells are reviewed.
-- After ten approved cells a contributor is trusted: up to eight locks, and uploads go straight to `godkand`.
+- A person reviews every upload of a contributor who is not trusted, and at most five of theirs wait at once.
+- Trust is given by the maintainer by hand (`POST /trust`), never by a count: up to eight locks, and uploads go straight to `godkand`.
 - A rejected cell goes back to `fri` with a comment. Its upload is kept for 30 days, then purged.
 - A live cell the admin takes down is `removed` until the intake has blanked its tiles. Nobody can claim it before that.
 

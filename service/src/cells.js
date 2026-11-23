@@ -5,6 +5,8 @@ import { requireUser } from './auth.js';
 import { error, json } from './db.js';
 
 export const LOCK_HOURS = 48;
+/** How many uploads of a builder who is not trusted may wait for review at once. */
+export const WAITING_LIMIT = 5;
 
 /**
  * How many cells a user may hold locked at once.
@@ -60,14 +62,19 @@ export async function claimCell(db, user, sheet, col, row, now) {
   // A lock past its expiry no longer counts and may be taken over, even before the cron frees it.
   const held = await db.prepare("SELECT COUNT(*) AS n FROM cells WHERE owner_id = ? AND state = 'last' AND expires_at > ?").bind(user.github_id, now).first();
   if (held.n >= limit) return { ok: false, status: 403, code: 'too_many_locks' };
+  // Uploading frees the lock. Without a limit on what waits, one new account could move 20 cells
+  // a day out of everyone's reach and into the reviewer's queue.
+  const waitingLimit = user.trusted ? 1e9 : WAITING_LIMIT;
+  const waiting = await db.prepare("SELECT COUNT(*) AS n FROM cells WHERE owner_id = ? AND state = 'vantar'").bind(user.github_id).first();
+  if (waiting.n >= waitingLimit) return { ok: false, status: 403, code: 'too_many_waiting' };
   const expires_at = plusHours(now, LOCK_HOURS);
   // The lock and the limit are decided by this one statement, so parallel claims cannot
   // slip past the count read above.
   const result = await db
     .prepare(
-      "UPDATE cells SET state = 'last', owner_id = ?, owner_login = ?, locked_at = ?, expires_at = ?, rejected_at = NULL, comment = NULL, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND removed_at IS NULL AND (state = 'fri' OR (state = 'last' AND expires_at <= ? AND uploaded_at IS NULL)) AND (SELECT COUNT(*) FROM cells WHERE owner_id = ? AND state = 'last' AND expires_at > ?) < ?",
+      "UPDATE cells SET state = 'last', owner_id = ?, owner_login = ?, locked_at = ?, expires_at = ?, rejected_at = NULL, comment = NULL, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND removed_at IS NULL AND (state = 'fri' OR (state = 'last' AND expires_at <= ? AND uploaded_at IS NULL)) AND (SELECT COUNT(*) FROM cells WHERE owner_id = ? AND state = 'last' AND expires_at > ?) < ? AND (SELECT COUNT(*) FROM cells WHERE owner_id = ? AND state = 'vantar') < ?",
     )
-    .bind(user.github_id, user.login, now, expires_at, now, sheet, col, row, now, user.github_id, now, limit)
+    .bind(user.github_id, user.login, now, expires_at, now, sheet, col, row, now, user.github_id, now, limit, user.github_id, waitingLimit)
     .run();
   if (result.meta.changes !== 1) {
     const after = await db.prepare('SELECT state, removed_at FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
@@ -111,6 +118,7 @@ const MESSAGES = {
   sheet_closed: 'That sheet is not open for claims.',
   outside: 'That cell lies outside the city and is not drawn.',
   too_many_locks: 'You already hold as many cells as you may. Finish or release one first.',
+  too_many_waiting: 'Five of your cells are waiting for review. Take another when one has been reviewed.',
   taken: 'Someone else holds that cell. Pick another.',
   being_removed: 'That cell is being taken off the map. Try again in an hour.',
   not_yours: 'That cell is not yours.',
