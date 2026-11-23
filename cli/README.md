@@ -53,7 +53,7 @@ The page runs on your machine only and uses the login from `rutor login`. The se
 - `--no-open` prints the address without opening a browser. Use it on a Linux machine you share: there the browser is started with the address as an argument, which other users of the machine can read.
 - An upload is shown only when it is a plain picture: 8-bit RGB with no alpha, animation, gamma or colour profile. A browser and the program that lays the cell into the map would not agree on anything else. Such an upload can only be rejected.
 - What the page lists under the builder's own details comes from the builder's machine. Nobody has checked it.
-- Today's map comes from the project's tile service. `PIXELBYGGET_TILES_URL` points at a local one for testing, and like `PIXELBYGGET_URL` it accepts this machine only.
+- Today's map comes from the project's tile service, in the edition that is live: cells that have already been put into the map show among the neighbours. `PIXELBYGGET_TILES_URL` points at a local one for testing, and like `PIXELBYGGET_URL` it accepts this machine only.
 - A city that has no map yet shows the cell alone.
 
 ## Tests

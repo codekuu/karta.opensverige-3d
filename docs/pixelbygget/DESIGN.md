@@ -83,6 +83,8 @@ Redraws are not pixel-identical across GPUs and library versions. That is fine: 
 
 What it shows: a view three cells wide. The nine cells of today's map are nine tiles: a cell is 1024 px of the full picture and a tile is 512 px, so on the level below full size one tile is exactly one cell and has the cell's own column and row. The upload is laid over the middle. A 1536 px upload covers the middle half of the view, and it fades into its neighbours over the 256 px that lie outside its own cell. That fade is a preview of the blending the intake does, not the intake's own result.
 
+The map's tiles never change under their address, so a sheet that has had cells put into it gets an edition, and its tiles are asked for as `<sheet>@<edition>_files/...`. The page reads the live edition from the tile service's `karta-utgava.json`, at most once a minute, and shows the map in it. A sheet without an edition is shown as the base.
+
 The page can approve and reject, so it answers one browser tab and nothing else:
 
 - The server listens on 127.0.0.1, on a free port that is new at every start. Every address starts with a random key made at start; without it every request gets 404.

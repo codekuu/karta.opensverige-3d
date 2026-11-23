@@ -9,7 +9,7 @@ stockholm-norr 74_20 went from approved to visible on karta.opensverige.se on 20
 - **One cell is 51 uploads and 34 seconds.** The source picture, 46 tiles over 19 levels, the edge picture, the island picture, the sheet's list and the switch. Sixteen of the tiles are at full scale.
 - **The site needed no change.** It read the new addresses out of karta.json, which the tile service cached for its five minutes before the cell showed.
 - **Everything else answered as before.** A tile nobody changed came back byte for byte the base's, and the two other cities were not touched.
-- **The build page and the review page still show the base picture,** not the edition, so the lit cell is dark there. That is the next thing to fix.
+- **The build page and the review page showed the base picture,** not the edition, so the lit cell was dark there. Both now read the live edition from the tile service's own `karta-utgava.json`, not from the service's revision: the tile service is what knows which addresses exist.
 
 ### The base map is drawn further out than the city shows
 Found while building the step that puts an approved cell into the map, tried on stockholm-norr 74_20 without publishing anything.
