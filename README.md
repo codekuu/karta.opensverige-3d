@@ -16,6 +16,53 @@ python -m pip install -e "cli[render]"
 
 To try `rutor render` against a real service, run one on your machine with `service/scripts/local.sh`. It needs no GitHub app and no real token.
 
+## What you need
+
+Read this before you start. It is what building a cell asks of you and your machine.
+
+**The machine**
+
+- An NVIDIA card with 12 GB of memory. AMD and Intel cards do not work, and neither does a Mac.
+- Windows or Linux.
+- 25 GB of free disk, and about 1 GB more for `stockholm-norr`.
+- A connection that can download about 20 GB once.
+
+**Programs**
+
+- Python 3.11 or newer.
+- Git.
+- Node 22 or newer, for `stockholm-norr`. That is the only sheet with free cells today.
+
+**Accounts, all free**
+
+- GitHub. You log in with it, and your login is shown on your cells.
+- Cesium ion, for `stockholm-norr`. A free account covers about 1 000 cells a month.
+- Lantmäteriet. Not needed yet. It comes when new towns open, for the national orthophoto.
+
+**What it costs you**
+
+- The first time: the install and about 20 GB of model weights.
+- For each cell: the redraw takes about two minutes on an RTX 5070, and the source render a few minutes more.
+- The electricity is yours. `rutor redraw --wait-for-cheap` waits for a cheap hour.
+
+**The limits**
+
+- One cell at a time. A lock is yours for 48 hours, then the cell is free again.
+- At most five of your cells wait for review at once.
+- At most 20 uploads a day as a new builder.
+- A person reviews every cell. It can be rejected, or taken down later.
+
+**What you agree to**, in ten lines in [TERMS.md](TERMS.md):
+
+- It is voluntary and unpaid, at your own risk.
+- Only the finished picture leaves your machine.
+- The redraw model has a research license that does not allow commercial use.
+- `stockholm-norr` is drawn from Google's 3D tiles through your Cesium account. Google's policy does not allow that. You decide for yourself.
+
+**Not measured:** how much ordinary memory the machine needs. The test machine has 32 GB.
+
+The quickest way to know whether a machine will do is `rutor preflight --machine`. It needs no login and answers in seconds.
+
 ## What this is
 
 This repository is the `rutor` tool and the pinned redraw pipeline. You do not push claims or tiles with git. The PNG you upload is the only thing that leaves your machine, and it is the redraw, not the source render.
