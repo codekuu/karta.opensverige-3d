@@ -458,11 +458,11 @@ class ReviewServerTests(unittest.TestCase):
         status, _headers, _body = self.call("GET", f"{self.base}/img/cell/goteborg-norr/0_1.png")
         self.assertEqual(status, 502)
 
-    def test_the_map_is_asked_about_in_the_sites_name_and_without_the_login(self) -> None:
+    def test_the_map_is_asked_about_as_this_machine_and_without_the_login(self) -> None:
         self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")
         asked = [r for r in self.tiles.requests if r["path"].endswith(".dzi")]
         self.assertEqual(len(asked), 1)
-        self.assertEqual(asked[0].get("referer"), "https://karta.opensverige.se/pixelbygget")
+        self.assertEqual(asked[0].get("referer"), "http://127.0.0.1/")
         self.assertNotIn("authorization", asked[0])
 
     def test_a_cell_can_be_judged_while_the_tile_service_is_down(self) -> None:
@@ -474,14 +474,16 @@ class ReviewServerTests(unittest.TestCase):
         status, _headers, _body = self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")
         self.assertEqual(status, 502)
 
-    def test_a_map_tile_is_fetched_in_the_sites_name_and_without_the_login(self) -> None:
+    def test_a_map_tile_is_fetched_as_this_machine_and_without_the_login(self) -> None:
         self.tiles.files["/v1/goteborg-norr_files/17/64_58.webp"] = WEBP
         status, headers, body = self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")
         self.assertEqual((status, headers["content-type"]), (200, "image/webp"))
         self.assertEqual(body, WEBP)
         tile_calls = [r for r in self.tiles.requests if r["path"].endswith("64_58.webp")]
         self.assertEqual(len(tile_calls), 1)
-        self.assertEqual(tile_calls[0].get("referer"), "https://karta.opensverige.se/pixelbygget")
+        # The sender says what it is, a page on this machine, and nothing more: no port, no key.
+        self.assertEqual(tile_calls[0].get("referer"), "http://127.0.0.1/")
+        self.assertNotIn(self.server.key, json.dumps(tile_calls[0]))
         self.assertNotIn("authorization", tile_calls[0])
         # The tiles never change, so a second look does not ask again.
         self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")

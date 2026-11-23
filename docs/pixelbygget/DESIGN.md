@@ -97,7 +97,7 @@ Two rules are about the reviewer seeing the right thing:
 
 The manifest is written by the builder's machine. The page shows it under that heading and not as something checked.
 
-The tile service answers only pages of the map's own site, which it tells by the Referer header. The review server asks in the site's name. It fetches nine tiles a cell and keeps them while it runs, since a tile never changes under its address. When the intake starts publishing revisions of a map, this page has to read which revision is live.
+The tile service answers only pages it knows, which it tells by the Referer header. Since 2026-11-23 it knows pages on `localhost` and `127.0.0.1`, so the review server says what it is: `http://127.0.0.1/`, with no port and no path, so the key never travels. It fetches nine tiles a cell and keeps them while it runs, since a tile never changes under its address. When the intake starts publishing revisions of a map, this page has to read which revision is live.
 
 ## What is open and what is not
 

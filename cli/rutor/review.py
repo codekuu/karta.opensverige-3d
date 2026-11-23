@@ -230,10 +230,10 @@ class _Answer(Exception):
         super().__init__(message)
 
 
-# The tile service answers the pages of the map's own site and nobody else. This page is that
-# site's maintainer reviewing that map, so it asks in the site's name. It asks for nine tiles
-# a cell, never for the map.
-_AS_THE_SITE = {"Referer": config.MAP_URL}
+# The tile service answers only pages it knows, told by the Referer header, and it knows pages
+# on this machine. So the sender says what it is: a page on 127.0.0.1. No port and no path, so
+# the key in this page's address never travels.
+_FROM_THIS_MACHINE = {"Referer": "http://127.0.0.1/"}
 
 
 # RutorError codes: 1 bad input, 2 the service refused, 3 this machine, 4 the network.
@@ -307,7 +307,7 @@ class _Review:
             known = self._maps.get(sheet)
         if known is not None and (known[0] is not None or time.monotonic() - known[1] < NO_MAP_SECONDS):
             return known[0]
-        status, raw = api.fetch_public(f"{config.tiles_url()}/{sheet}.dzi", _AS_THE_SITE, DZI_MAX)
+        status, raw = api.fetch_public(f"{config.tiles_url()}/{sheet}.dzi", _FROM_THIS_MACHINE, DZI_MAX)
         dzi = parse_dzi(raw) if status == 200 else None
         with self._lock:
             self._maps[sheet] = (dzi, time.monotonic())
@@ -325,7 +325,7 @@ class _Review:
         if kept is not None:
             return kept
         level, x, y = place
-        status, data = api.fetch_public(f"{config.tiles_url()}/{sheet}_files/{level}/{x}_{y}.webp", _AS_THE_SITE, TILE_MAX)
+        status, data = api.fetch_public(f"{config.tiles_url()}/{sheet}_files/{level}/{x}_{y}.webp", _FROM_THIS_MACHINE, TILE_MAX)
         if status == 404:
             raise _Answer(404, "the map has no picture there")
         if status != 200 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
