@@ -1,5 +1,6 @@
 /* A minimal PNG for tests: signature, IHDR, one IDAT, IEND, all with real CRCs. The image
-   data is not a decodable picture, but every chunk is well formed, as the service checks. */
+   data is not a decodable picture, but every chunk is well formed, as the service checks.
+   It is 8-bit RGB, as the redraw writes, and any padding is a text chunk. */
 
 const SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -41,11 +42,24 @@ export function pngChunk(type, data) {
  * @returns {Uint8Array}
  */
 export function minimalPng(width, height, padding = 0) {
-  const ihdr = pngChunk('IHDR', [...u32(width), ...u32(height), 8, 6, 0, 0, 0]);
-  const pad = padding > 0 ? pngChunk('ruTa', new Array(padding).fill(0)) : [];
+  const ihdr = pngChunk('IHDR', [...u32(width), ...u32(height), 8, 2, 0, 0, 0]);
+  const pad = padding > 0 ? pngChunk('tEXt', new Array(padding).fill(0)) : [];
   const idat = pngChunk('IDAT', [0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
   const iend = pngChunk('IEND', []);
   return new Uint8Array([...SIGNATURE, ...ihdr, ...pad, ...idat, ...iend]);
+}
+
+/**
+ * A well-formed 1024 px PNG of any kind: a colour type, a bit depth, interlacing, and extra
+ * chunks between the header and the image data.
+ * @param {{ colour?: number, depth?: number, interlace?: number, extra?: Array<[string, number[]]> }} [kind]
+ * @returns {Uint8Array}
+ */
+export function pngOfKind({ colour = 2, depth = 8, interlace = 0, extra = [] } = {}) {
+  const ihdr = pngChunk('IHDR', [...u32(1024), ...u32(1024), depth, colour, 0, 0, interlace]);
+  const between = extra.flatMap(([type, data]) => pngChunk(type, data));
+  const idat = pngChunk('IDAT', [0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+  return new Uint8Array([...SIGNATURE, ...ihdr, ...between, ...idat, ...pngChunk('IEND', [])]);
 }
 
 /**

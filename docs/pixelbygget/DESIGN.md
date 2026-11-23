@@ -73,6 +73,7 @@ Redraws are not pixel-identical across GPUs and library versions. That is fine: 
 
 - An upload is one PUT with the PNG as the body and the manifest in a header.
 - The service checks the lock, its expiry, the size, the manifest, every PNG chunk and the sha256 before it writes anything.
+- It takes a plain picture only: 8-bit RGB, not interlaced, with no part in the file but the picture, text, a time, the print size and the sRGB mark. A browser plays an animation, lets what is behind show through alpha and applies a gamma or a colour profile; a program that reads only the pixels does none of that. The reviewer looks in a browser and the intake reads pixels, so any other file could be approved as one picture and published as another. `rutor redraw` writes a plain one. The answer is 415 `not_plain`, and the lock stays.
 - Each upload is stored under its own key (the cell, the start of its sha256 and a random part). A request that loses its lock can only delete its own objects, never someone else's.
 
 ## The review page
@@ -92,7 +93,7 @@ The page can approve and reject, so it answers one browser tab and nothing else:
 
 Two rules are about the reviewer seeing the right thing:
 
-- An upload is passed to the page only when it is a plain picture: 8-bit RGB, not interlaced, and no part in the file but the picture, text, a time, the print size and the sRGB mark. A browser plays an animation, lets the map show through alpha and applies a gamma or a colour profile; a program that reads only the pixels does none of that. The service accepts such files today, so without this rule a cell could be approved as one picture and published as another.
+- An upload is passed to the page only when it is a plain picture: 8-bit RGB, not interlaced, and no part in the file but the picture, text, a time, the print size and the sRGB mark. A browser plays an animation, lets the map show through alpha and applies a gamma or a colour profile; a program that reads only the pixels does none of that. The service refuses such files at upload since 2026-11-23. The page keeps its own check, for uploads from before that day and in case the two rules ever drift apart.
 - Approve is off until the upload of the cell on screen has loaded, and while the queue is read after a decision. A late click cannot approve the next cell unseen.
 
 The manifest is written by the builder's machine. The page shows it under that heading and not as something checked.
