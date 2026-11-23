@@ -131,6 +131,32 @@ export function inspectPng(bytes) {
   return null;
 }
 
+/* Parts of a PNG that change no pixel: text, a time, the size in print, and "this is sRGB",
+   which is what a file that says nothing is taken to be. */
+const PLAIN_CHUNKS = new Set(['IHDR', 'IDAT', 'IEND', 'pHYs', 'tEXt', 'zTXt', 'iTXt', 'tIME', 'sRGB']);
+
+/**
+ * Why two programs may show this PNG differently, or null for a plain picture. Call it on bytes
+ * inspectPng has passed.
+ *
+ * A browser plays an animation, lets what is behind show through alpha, and applies a gamma or
+ * a colour profile. A program that reads only the pixels may do none of it. The reviewer looks
+ * in a browser and the intake reads pixels, so a file with any of that could be approved as one
+ * picture and laid into the map as another. The redraw writes 8-bit RGB and nothing else.
+ * @param {Uint8Array} bytes
+ * @returns {string|null}
+ */
+export function notPlain(bytes) {
+  if (bytes[24] !== 8 || bytes[25] !== 2) return 'is not 8-bit RGB without alpha';
+  if (bytes[28] !== 0) return 'is interlaced';
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let pos = 8; pos + 12 <= bytes.length; pos += 12 + view.getUint32(pos)) {
+    const type = String.fromCharCode(bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]);
+    if (!PLAIN_CHUNKS.has(type)) return `holds a part named ${/^[A-Za-z]{4}$/.test(type) ? type : 'something unreadable'}`;
+  }
+  return null;
+}
+
 /**
  * The inbox key of one upload: the cell, the first 16 hex of its sha256 and 8 random hex, so
  * every request has a key of its own. The objects are `${key}.png` and `${key}.json`.
@@ -195,6 +221,10 @@ export const uploadRoute = requireUser(async (request, env, ctx, params, now, us
   if (bytes.length !== declared) return error(400, 'short_body', `Content-Length said ${declared} bytes, ${bytes.length} arrived.`);
   const png = inspectPng(bytes);
   if (!png) return error(415, 'not_png', 'The body is not a well-formed PNG.');
+  const odd = notPlain(bytes);
+  if (odd) {
+    return error(415, 'not_plain', `A cell is a plain picture: 8-bit RGB with no alpha, animation, gamma or colour profile. This file ${odd}. rutor redraw writes a plain one; do not save the PNG again in another program.`);
+  }
   if (png.width !== png.height || !ALLOWED_SIDES.includes(png.width) || png.width !== manifest.width || png.height !== manifest.height) {
     return error(422, 'bad_size', `A cell is a square of ${ALLOWED_SIDES.join(' or ')} px and the manifest must say so.`);
   }

@@ -2,9 +2,9 @@ import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { claimCell } from '../src/cells.js';
 import { nowIso } from '../src/db.js';
-import { ALLOWED_SIDES, MAX_UPLOAD, inspectPng, parseManifest } from '../src/upload.js';
+import { ALLOWED_SIDES, MAX_UPLOAD, inspectPng, notPlain, parseManifest } from '../src/upload.js';
 import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser, setCell } from './fixtures.js';
-import { manifestHeader, minimalPng, sha256Hex } from './png.js';
+import { manifestHeader, minimalPng, pngOfKind, sha256Hex } from './png.js';
 
 const user = { github_id: 4242, login: 'klang', first_seen: NOW, approved_count: 0, trusted: 0, blocked: 0 };
 const trusted = { github_id: 7, login: 'ebba', first_seen: NOW, approved_count: 12, trusted: 1, blocked: 0 };
@@ -203,5 +203,63 @@ describe('GET /v1/inkorg', () => {
     const missing = await call(new Request('https://x/v1/inkorg/goteborg-norr/2_2.png', { headers: { Authorization: 'Bearer t' } }), { ADMIN_GITHUB_ID: '4242' });
     expect(missing.status).toBe(404);
     vi.unstubAllGlobals();
+  });
+});
+
+/* A browser plays an animation, lets what is behind show through alpha and applies a gamma or a
+   colour profile. A program that reads only the pixels does none of it. So a file with any of
+   that could be approved as one picture and laid into the map as another. The redraw writes
+   8-bit RGB and nothing else, and that is all the service takes. */
+describe('only a plain picture is taken', () => {
+  const odd = {
+    'see-through': { colour: 6 },
+    'grey with alpha': { colour: 4 },
+    grey: { colour: 0 },
+    palette: { colour: 3, extra: [['PLTE', [0, 0, 0]]] },
+    'sixteen bit': { depth: 16 },
+    interlaced: { interlace: 1 },
+    animated: { extra: [['acTL', [0, 0, 0, 2, 0, 0, 0, 0]]] },
+    'transparent colour': { extra: [['tRNS', [0, 0, 0, 0, 0, 0]]] },
+    gamma: { extra: [['gAMA', [0, 0, 0, 1]]] },
+    'colour profile': { extra: [['iCCP', [120, 0, 0, 120]]] },
+    'primaries': { extra: [['cHRM', new Array(32).fill(0)]] },
+    'a part nobody knows': { extra: [['ruTa', [1]]] },
+  };
+
+  it('says why a file is not plain, and nothing for one that is', () => {
+    for (const [name, kind] of Object.entries(odd)) {
+      expect(inspectPng(pngOfKind(kind)), name).toEqual({ width: 1024, height: 1024 });
+      expect(notPlain(pngOfKind(kind)), name).toEqual(expect.any(String));
+    }
+    expect(notPlain(pngOfKind())).toBeNull();
+    // Parts that change no pixel: text, a time, the size in print, and "this is sRGB".
+    const harmless = [['tEXt', [83, 0, 114]], ['tIME', [7, 234, 11, 23, 2, 8, 11]], ['pHYs', [0, 0, 11, 19, 0, 0, 11, 19, 1]], ['sRGB', [0]]];
+    expect(notPlain(pngOfKind({ extra: harmless }))).toBeNull();
+    expect(notPlain(pngOfKind({ extra: [['acTL', [0, 0, 0, 2, 0, 0, 0, 0]]] }))).toContain('acTL');
+  });
+
+  it('refuses such an upload and keeps the lock', async () => {
+    for (const [name, kind] of Object.entries(odd)) {
+      await clearDb();
+      await insertSheet();
+      await insertCells('goteborg-norr', 4, 3);
+      await insertUser(user);
+      await claimCell(env.DB, user, 'goteborg-norr', 1, 1, nowIso());
+      const r = await put(user, pngOfKind(kind));
+      expect(r.status, name).toBe(415);
+      const body = await r.json();
+      expect(body.error, name).toBe('not_plain');
+      expect(body.message, name).toContain('8-bit RGB');
+      expect((await getCell('goteborg-norr', 1, 1)).state, name).toBe('last');
+    }
+    expect((await env.INKORG.list()).objects).toEqual([]);
+  });
+
+  it('takes a plain one from a trusted builder and an untrusted one alike', async () => {
+    await claimCell(env.DB, trusted, 'goteborg-norr', 1, 1, nowIso());
+    expect((await put(trusted, pngOfKind({ colour: 6 }))).status).toBe(415);
+    const r = await put(trusted, pngOfKind());
+    expect(r.status).toBe(201);
+    expect((await r.json()).state).toBe('godkand');
   });
 });
