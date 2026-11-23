@@ -4,6 +4,13 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-23
 
+### The first cell went the whole way, from a fresh clone to the review page
+A Windows PC with an RTX 5070 (12 GB) was driven over SSH, the way an agent would: a fresh clone of `main`, the light install, `rutor preflight --machine`, the model stack, `npm ci`, the login by device code, `rutor claim stockholm-norr --next`, render, redraw, upload. The cell (74_20) came up on the review page among its neighbours, with the check at `ok`. Nothing in the chain had to be worked around.
+- **A wrong Cesium token locked the cell before anyone knew.** The token had been pasted twice into the variable: 583 characters and four dots where a token has two. `rutor preflight --sheet` and `rutor claim` said `cesium token ok`, because they only look for a value. Cesium ion answered 401 at `rutor render`, with the cell already held for 48 hours. The check should ask Cesium ion before a lock is taken.
+- **A variable set with `setx` reaches a new SSH session at once.** No restart of the SSH service was needed. A program that was already open still has to be reopened, as the instructions say.
+- **The times were short.** The redraw was done within three minutes of the render, with the model weights already on the disk. The render was not timed; it ended well inside the 15 minutes the instructions allow.
+- **The water came out darker than the map's.** The new cell's sea is navy where the three drawn neighbours have a lighter blue, so the cell's edge shows in open water. The land joins without a visible seam. The reviewer decides; nothing was changed.
+
 ### Two fresh agents followed the instructions, and the login never reached them
 After the change to "draw what is missing", two agents that knew nothing of the project were sent in: one ran the instructions for real on a Mac, one traced a Windows PC with a 12 GB card on paper against the code.
 - **`rutor login` printed its code into a buffer.** Through a pipe, which is how an agent runs a command, Python holds output back until the program ends. The login prints a code and then waits for a person to approve it, so the code was never shown and the wait never ended. `rutor` now writes every line when it is printed, as UTF-8, and the login says that it is waiting.
