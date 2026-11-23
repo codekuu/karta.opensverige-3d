@@ -39,6 +39,23 @@ Replace `64_59` with the cell `rutor claim` prints. `rutor preflight --machine` 
 
 `rutor redraw` checks its own result before it finishes. A blank, too dark, posterised, shifted or unchanged redraw exits with code 5 and one `check:` line per problem. `rutor upload` refuses a cell until the check has passed. `rutor check <sheet> <col>_<row>` runs the check again on the files in `work/`.
 
+## Reviewing (the maintainer)
+
+```bash
+rutor review
+```
+
+It opens a page in your browser that shows each waiting cell laid into today's map among its eight neighbours, beside the map as it is today, with two buttons: approve and reject. Approve works only while the cell's own picture is on screen. A rejection needs a reason, which goes into the service's log. A cell you approved can be taken back on the same page until it is on the map. `rutor granska` is the same command. `rutor queue`, `rutor approve` and `rutor reject` do the same from the terminal.
+
+The page runs on your machine only and uses the login from `rutor login`. The service decides who may review: for anyone but the admin it answers `refused` and no page opens.
+
+- It listens on `127.0.0.1`, on a free port, and prints its address as `url:`. The address ends in a long random key. Port and key are new at every start. Whoever has the address can approve and reject while the command runs, so do not paste it anywhere. Ctrl-C closes the page.
+- `--no-open` prints the address without opening a browser. Use it on a Linux machine you share: there the browser is started with the address as an argument, which other users of the machine can read.
+- An upload is shown only when it is a plain picture: 8-bit RGB with no alpha, animation, gamma or colour profile. A browser and the program that lays the cell into the map would not agree on anything else. Such an upload can only be rejected.
+- What the page lists under the builder's own details comes from the builder's machine. Nobody has checked it.
+- Today's map comes from the project's tile service. `PIXELBYGGET_TILES_URL` points at a local one for testing, and like `PIXELBYGGET_URL` it accepts this machine only.
+- A city that has no map yet shows the cell alone.
+
 ## Tests
 
 ```bash

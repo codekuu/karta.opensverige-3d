@@ -31,7 +31,10 @@ def _builtin_registrars() -> list[Registrar]:
     def register_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
         _load(sub, "rutor.commands")
 
-    return [register_login, register_commands]
+    def register_review(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+        _load(sub, "rutor.review")
+
+    return [register_login, register_commands, register_review]
 
 
 def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None = None) -> int:

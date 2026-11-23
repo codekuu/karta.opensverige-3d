@@ -75,6 +75,30 @@ Redraws are not pixel-identical across GPUs and library versions. That is fine: 
 - The service checks the lock, its expiry, the size, the manifest, every PNG chunk and the sha256 before it writes anything.
 - Each upload is stored under its own key (the cell, the start of its sha256 and a random part). A request that loses its lock can only delete its own objects, never someone else's.
 
+## The review page
+
+`rutor review` is how the maintainer looks at a cell before it goes on the map. It is a small server in the CLI (`cli/rutor/review.py`, standard library only) and a page of plain HTML, CSS and JavaScript (`cli/rutor/review_page/`).
+
+What it shows: a view three cells wide. The nine cells of today's map are nine tiles: a cell is 1024 px of the full picture and a tile is 512 px, so on the level below full size one tile is exactly one cell and has the cell's own column and row. The upload is laid over the middle. A 1536 px upload covers the middle half of the view, and it fades into its neighbours over the 256 px that lie outside its own cell. That fade is a preview of the blending the intake does, not the intake's own result.
+
+The page can approve and reject, so it answers one browser tab and nothing else:
+
+- The server listens on 127.0.0.1, on a free port that is new at every start. Every address starts with a random key made at start; without it every request gets 404.
+- The Host header must be the printed address, `127.0.0.1` and the port. A page on another site that points its own name at 127.0.0.1 is refused, and so is the name `localhost`, which can also mean `::1` where this server does not listen.
+- A POST must be JSON and must not carry another page's Origin.
+- The page is served with a policy that lets it load only its own files. It has no inline script or style, and it shows what the service says as text.
+- The login stays in the server process. It is sent to the service and nowhere else: not to the page, and not to the tile service.
+- Requests are not logged, because the address holds the key. A fault inside the server prints its kind and place, never its message.
+
+Two rules are about the reviewer seeing the right thing:
+
+- An upload is passed to the page only when it is a plain picture: 8-bit RGB, not interlaced, and no part in the file but the picture, text, a time, the print size and the sRGB mark. A browser plays an animation, lets the map show through alpha and applies a gamma or a colour profile; a program that reads only the pixels does none of that. The service accepts such files today, so without this rule a cell could be approved as one picture and published as another.
+- Approve is off until the upload of the cell on screen has loaded, and while the queue is read after a decision. A late click cannot approve the next cell unseen.
+
+The manifest is written by the builder's machine. The page shows it under that heading and not as something checked.
+
+The tile service answers only pages it knows, which it tells by the Referer header. Since 2026-11-23 it knows pages on `localhost` and `127.0.0.1`, so the review server says what it is: `http://127.0.0.1/`, with no port and no path, so the key never travels. It fetches nine tiles a cell and keeps them while it runs, since a tile never changes under its address. When the intake starts publishing revisions of a map, this page has to read which revision is live.
+
 ## What is open and what is not
 
 Open, in this repo: the CLI, the renderer, the redraw call, the quality check and the service. Not open: the intake (blending, tile cutting, publishing to the live bucket) and the maintainer's machines.

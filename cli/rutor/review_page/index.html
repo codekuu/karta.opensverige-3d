@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Granskning | Pixelbygget</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-title">
+    <h1>Granskning</h1>
+    <span id="count" class="muted" aria-live="polite"></span>
+  </div>
+  <span class="muted small">Bara du ser den här sidan</span>
+</header>
+
+<p id="message" class="message" role="alert" hidden></p>
+
+<div class="layout">
+  <nav class="queue" aria-label="Kö">
+    <h2 class="queue-head">Väntar</h2>
+    <div id="waiting" class="queue-list"></div>
+    <p id="none-waiting" class="muted small" hidden>Inget väntar på granskning.</p>
+    <h2 id="approved-head" class="queue-head" hidden>Godkända, inte tända än</h2>
+    <div id="approved" class="queue-list"></div>
+    <p class="muted small">Kön töms inte av sig själv. Inget tänds utan ditt ja.</p>
+    <button type="button" id="refresh" class="plain">Läs om kön</button>
+  </nav>
+
+  <main id="cell" class="cell" hidden>
+    <div id="views" class="views">
+      <figure class="view">
+        <figcaption>Ny ruta, insatt i kartan</figcaption>
+        <div class="frame"><div id="view-new" class="stage"></div></div>
+      </figure>
+      <figure class="view">
+        <figcaption>Kartan i dag</figcaption>
+        <div class="frame"><div id="view-now" class="stage"></div></div>
+      </figure>
+    </div>
+    <div class="under">
+      <p id="view-note" class="note"></p>
+      <label class="check"><input type="checkbox" id="show-frame" checked> Visa ramen</label>
+      <button type="button" id="zoom" class="plain" aria-pressed="false">Zooma in på rutan</button>
+      <a id="full" class="plain" target="_blank" rel="noreferrer noopener">Öppna rutan i full storlek →</a>
+    </div>
+
+    <div class="actions">
+      <button type="button" id="approve" class="yes">Godkänn →</button>
+      <button type="button" id="reject" class="no">Avvisa</button>
+      <div class="reason">
+        <label for="comment" class="muted small">Skäl, om du avvisar</label>
+        <input id="comment" type="text" maxlength="500" autocomplete="off" placeholder="Till exempel: taken flyter ihop, kör om">
+      </div>
+    </div>
+  </main>
+
+  <aside id="facts" class="facts" aria-label="Fakta om rutan" hidden>
+    <div class="card">
+      <h2>Om rutan</h2>
+      <dl id="fact-list"></dl>
+      <h3>Byggarens egna uppgifter</h3>
+      <dl id="told-list"></dl>
+      <p class="muted small">Ingen har kontrollerat dem. Titta på bilden.</p>
+    </div>
+    <div class="card paper">
+      <h2>Vad som händer sen</h2>
+      <p>Godkänd ruta tänds när kartan uppdateras.</p>
+      <p>Avvisad ruta blir ledig igen. Skälet sparas i loggen.</p>
+      <p>En godkänd ruta kan tas tillbaka här tills den tänds.</p>
+    </div>
+  </aside>
+</div>
+
+<script src="app.js" defer></script>
+</body>
+</html>

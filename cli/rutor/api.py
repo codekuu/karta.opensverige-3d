@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from rutor import __version__
@@ -42,6 +43,7 @@ def _exchange(
     body: bytes | None,
     json_body: object | None,
     headers: dict[str, str] | None,
+    limit: int | None = None,
 ) -> tuple[int, bytes]:
     hdrs = {
         "User-Agent": f"rutor/{__version__}",
@@ -60,7 +62,12 @@ def _exchange(
     request = urllib.request.Request(service_url() + path, data=data, headers=hdrs, method=method)
     try:
         with _open(request, TIMEOUT_SECONDS) as response:
-            return int(response.status), response.read()
+            if limit is None:
+                return int(response.status), response.read()
+            data = response.read(limit + 1)
+            if len(data) > limit:
+                raise network("the service sent more than expected; nothing was kept")
+            return int(response.status), data
     except urllib.error.HTTPError as exc:
         try:
             payload = exc.read()
@@ -123,8 +130,31 @@ def put_bytes(path: str, data: bytes, headers: dict[str, str], token: str | None
     return request("PUT", path, token=token, body=data, headers=headers)
 
 
-def download(path: str, token: str | None) -> bytes:
-    status, raw = _exchange(method="GET", path=path, token=token, body=None, json_body=None, headers={"Accept": "*/*"})
+def download(path: str, token: str | None, limit: int | None = None) -> bytes:
+    """The bytes at a path of the service. With `limit`, a longer answer is an error and is not kept."""
+    status, raw = _exchange(method="GET", path=path, token=token, body=None, json_body=None, headers={"Accept": "*/*"}, limit=limit)
     if status >= 400:
         _refuse(status, _parse(status, raw))
     return raw
+
+
+def fetch_public(url: str, headers: dict[str, str], limit: int) -> tuple[int, bytes]:
+    """GET an address that is not the service. The login is never sent, and nothing over `limit` is read."""
+    hdrs = {"User-Agent": f"rutor/{__version__}", **headers}
+    request = urllib.request.Request(url, headers=hdrs, method="GET")
+    try:
+        with _open(request, TIMEOUT_SECONDS) as response:
+            data = response.read(limit + 1)
+            if len(data) > limit:
+                raise network("the answer was larger than expected; nothing was kept")
+            return int(response.status), data
+    except urllib.error.HTTPError as exc:
+        try:
+            return int(exc.code), b""
+        finally:
+            exc.close()
+    except urllib.error.URLError as exc:
+        raise network(f"could not reach {urllib.parse.urlsplit(url).hostname} ({exc.reason})") from exc
+    # OSError takes in a timeout, a dropped connection and a TLS fault in the middle of a read.
+    except (OSError, http.client.HTTPException) as exc:
+        raise network(f"could not reach {urllib.parse.urlsplit(url).hostname} ({exc.__class__.__name__}: {exc})") from exc
