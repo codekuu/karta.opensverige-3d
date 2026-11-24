@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import webbrowser
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
@@ -278,6 +279,120 @@ def version(sheet: dict[str, object]) -> dict[str, object]:
     mine = pipeline.PIPELINE
     # Nothing said means this copy is current: the service did not ask for another.
     return {"mine": mine, "wanted": wanted, "current": wanted == "" or wanted == mine}
+
+
+# ---- the app's own version: is a newer installer out?
+
+
+# What GitHub answered about the releases, already parsed. It raises on any failure.
+ReleaseFetch = Callable[[], object]
+
+# The releases page of the app's own repo. Only a list is asked for: it is public, so no
+# login token goes with it. Nothing is downloaded from here.
+RELEASES_URL = "https://api.github.com/repos/opensverige/karta.opensverige-3d/releases?per_page=30"
+RELEASES_SECONDS = 10
+# An answer is a list of thirty releases, a few hundred bytes each. This is far more than
+# that, and it keeps a page that is not a list of releases from filling the page's memory.
+RELEASES_BYTES = 512_000
+# The installer tags a release app-v0.1.0. Any other tag on the repo is not the app's.
+_APP_TAG = re.compile(r"app-v(\d{1,4}(?:\.\d{1,4}){0,3})")
+# One version as the service and the installer write it: 0.1.0, or 1.2.
+_VERSION = re.compile(r"\d{1,4}(?:\.\d{1,4}){0,3}")
+# A release page under the app's own repo. Nothing else is ever a link on the page.
+_RELEASE_URL = re.compile(r"https://github\.com/opensverige/karta\.opensverige-3d/releases/[A-Za-z0-9._/-]{1,100}")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would send the request wherever it points, so none is followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        del req, fp, msg, headers, newurl
+        raise network(f"GitHub answered with a redirect ({code}); nothing was read from it")
+
+
+def _fetch_releases() -> object:
+    """What GitHub says about the releases. Every failure is raised, for app_version to drop."""
+    request = urllib.request.Request(
+        RELEASES_URL,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "rutor"},
+    )
+    with urllib.request.build_opener(_NoRedirect).open(request, timeout=RELEASES_SECONDS) as response:
+        raw = response.read(RELEASES_BYTES)
+    return json.loads(raw.decode("utf-8"))
+
+
+def _numbers(text: str) -> tuple[int, ...]:
+    """A version as four numbers, so that 0.2 and 0.2.0 are the same version."""
+    parts = [int(part) for part in text.split(".")]
+    return tuple(parts + [0] * (4 - len(parts)))
+
+
+def _latest_app(releases: object) -> tuple[str, str]:
+    """The highest app version GitHub named and that release's address, or ("", "").
+
+    Everything here comes from outside, so only the tag shape is read and only the address
+    shape of the release that won is passed on.
+    """
+    if not isinstance(releases, list):
+        return "", ""
+    highest: tuple[int, ...] = ()
+    latest = ""
+    url = ""
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        tag = release.get("tag_name")
+        if not isinstance(tag, str):
+            continue
+        matched = _APP_TAG.fullmatch(tag)
+        if matched is None:
+            continue
+        numbers = _numbers(matched.group(1))
+        # Compared as numbers, so 0.10.0 is newer than 0.9.0.
+        if numbers <= highest:
+            continue
+        highest = numbers
+        latest = matched.group(1)
+        address = release.get("html_url")
+        # A release with an address elsewhere still says a newer app is out. It is just no link.
+        url = address if isinstance(address, str) and _is_release_page(address) else ""
+    return latest, url
+
+
+def _is_release_page(address: str) -> bool:
+    """A page under the project's own releases, with no step that climbs out of them."""
+    if _RELEASE_URL.fullmatch(address) is None:
+        return False
+    return ".." not in address and "//" not in address.removeprefix("https://")
+
+
+def app_version(fetch: ReleaseFetch | None = None) -> dict[str, object]:
+    """{"mine": str, "latest": str, "current": bool, "url": str} for the app itself.
+
+    Only an app install asks GitHub. A clone was not downloaded from anywhere, so it has no
+    newer installer to be told about. Every failure is the same answer: no news.
+    """
+    install = config.app_install()
+    if install is None:
+        return {"mine": __version__, "latest": "", "current": True, "url": ""}
+    mine = install["version"]
+    try:
+        raw = (fetch if fetch is not None else _fetch_releases)()
+    except Exception:
+        # A page that cannot be reached, is slow or answers with another shape is no news.
+        # Nothing of what it said is kept: this process holds a login.
+        return {"mine": mine, "latest": "", "current": True, "url": ""}
+    latest, url = _latest_app(raw)
+    return {"mine": mine, "latest": latest, "current": _is_current(mine, latest), "url": url}
+
+
+def _is_current(mine: str, latest: str) -> bool:
+    """Whether the app here is at least as new as the one GitHub named."""
+    if _VERSION.fullmatch(mine) is None or _VERSION.fullmatch(latest) is None:
+        # A version of another shape cannot be compared, and an app that cannot be said to
+        # be old is not called old.
+        return True
+    return _numbers(latest) <= _numbers(mine)
 
 
 # ---- the eight steps
@@ -794,6 +909,8 @@ _BLANK_MACHINE: dict[str, object] = {
 _BLANK_TOOLS: dict[str, object] = {"ready": False, "model_cached": False, "missing": []}
 _BLANK_PRICE: dict[str, object] = {"decision": "unknown", "after": ""}
 _BLANK_CESIUM: dict[str, object] = {"set": False, "ok": False, "problem": ""}
+# Until GitHub has answered there is no news, and that is also the answer when it cannot.
+_BLANK_APP: dict[str, object] = {"mine": "", "latest": "", "current": True, "url": ""}
 # A sheet that is not Google's needs no Cesium account. That is not a cached answer.
 _NO_CESIUM: dict[str, object] = {"set": False, "ok": True, "problem": ""}
 
@@ -1178,7 +1295,7 @@ def _report(machine_info: dict[str, object], builder: Builder) -> str:
 class AppServer:
     """The build page behind the shell every page on this machine has: see `localpage`."""
 
-    def __init__(self, builder: Builder | None = None) -> None:
+    def __init__(self, builder: Builder | None = None, releases: ReleaseFetch | None = None) -> None:
         self._builder = builder if builder is not None else Builder()
         self._known = _Known(self._builder)
         self._page = LocalPage("app", self._get, self._post)
@@ -1188,6 +1305,31 @@ class AppServer:
         self._timer_stop = threading.Event()
         self._timer: threading.Thread | None = None
         self._timer_lock = threading.Lock()
+        # GitHub is asked once, on a thread of its own, so the page is up before it answers.
+        self._releases = releases
+        self._app: dict[str, object] = dict(_BLANK_APP)
+        self._app_lock = threading.Lock()
+        self._app_thread: threading.Thread | None = None
+
+    def _ensure_version(self) -> None:
+        """Start the one thread that asks GitHub. Repeated calls start nothing."""
+        with self._app_lock:
+            if self._app_thread is not None:
+                return
+            thread = threading.Thread(target=self._read_version, daemon=True)
+            self._app_thread = thread
+        thread.start()
+
+    def _read_version(self) -> None:
+        try:
+            found = app_version(self._releases)
+        except Exception as exc:  # noqa: BLE001 - the last stop on this thread
+            # Whatever broke, the page has no news. The kind of fault goes to the terminal,
+            # never its message: an answer from outside is data.
+            print(f"app: {type(exc).__name__} while reading the app version", file=sys.stderr)
+            found = dict(_BLANK_APP)
+        with self._app_lock:
+            self._app = found
 
     def _ensure_timer(self) -> None:
         with self._timer_lock:
@@ -1207,10 +1349,12 @@ class AppServer:
 
     def start(self) -> None:
         self._ensure_timer()
+        self._ensure_version()
         self._page.start()
 
     def serve_forever(self) -> None:
         self._ensure_timer()
+        self._ensure_version()
         self._page.serve_forever()
 
     def stop(self) -> None:
@@ -1265,6 +1409,8 @@ class AppServer:
         sheet = parts["sheet"]
         if not isinstance(sheet, dict):
             sheet = _no_sheet("network")
+        with self._app_lock:
+            app = dict(self._app)
         return {
             "machine": parts["machine"],
             "tools": parts["tools"],
@@ -1275,7 +1421,7 @@ class AppServer:
             "sheet": sheet,
             "cell": self._builder.chosen(),
             "job": self._builder.job_state(),
-            "version": version(sheet),
+            "version": {**version(sheet), "app": app},
         }
 
     def _grid(self) -> dict[str, object]:

@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import rutor
 from rutor import app, app_jobs, commands, config, login, pipeline, se3_price
 from rutor.__main__ import main
 from rutor.errors import RutorError, network
@@ -1477,6 +1478,104 @@ class JobTests(_OwnHome):
         self.assertEqual(self._state(builder)["phase"], "done")
 
 
+# An address of a release page under the project's own name. It opens nothing.
+RELEASE_URL = "https://github.com/opensverige/karta.opensverige-3d/releases/tag/app-v0.2.0"
+
+
+class VersionTests(_OwnHome):
+    """Whether a newer app is out: the one question the page asks GitHub, and only when installed."""
+
+    def _installed(self, version: str | None) -> None:
+        """What config.app_install answers: a version on an app install, None on a clone."""
+        answer = None if version is None else {"version": version, "lock_sha256": "ab" * 32}
+        patcher = patch("rutor.config.app_install", return_value=answer)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_newer_release_is_named_with_its_address(self) -> None:
+        self._installed("0.1.0")
+        releases = [
+            {"tag_name": "v9", "html_url": "https://evil.test/x"},
+            {"tag_name": "app-v0.2.0", "html_url": RELEASE_URL},
+        ]
+        found = app.app_version(lambda: releases)
+        self.assertEqual(found, {"mine": "0.1.0", "latest": "0.2.0", "current": False, "url": RELEASE_URL})
+
+    def test_no_answer_from_github_is_not_an_old_app(self) -> None:
+        self._installed("0.1.0")
+        faults: list[BaseException] = [OSError("down"), ValueError("not json"), network("down")]
+        for fault in faults:
+            with self.subTest(fault=type(fault).__name__):
+
+                def fetch(raising: BaseException = fault) -> object:
+                    raise raising
+
+                self.assertEqual(
+                    app.app_version(fetch),
+                    {"mine": "0.1.0", "latest": "", "current": True, "url": ""},
+                )
+
+    def test_an_address_elsewhere_is_not_passed_on(self) -> None:
+        self._installed("0.1.0")
+        releases = [{"tag_name": "app-v0.2.0", "html_url": "https://evil.test/x"}]
+        found = app.app_version(lambda: releases)
+        self.assertEqual(found, {"mine": "0.1.0", "latest": "0.2.0", "current": False, "url": ""})
+
+    def test_ten_is_newer_than_nine(self) -> None:
+        self._installed("0.9.0")
+        newer = [{"tag_name": "app-v0.10.0", "html_url": ""}]
+        self.assertFalse(app.app_version(lambda: newer)["current"])
+        self._installed("0.10.0")
+        older = [{"tag_name": "app-v0.9.0", "html_url": ""}]
+        found = app.app_version(lambda: older)
+        self.assertTrue(found["current"])
+        self.assertEqual(found["latest"], "0.9.0")
+
+    def test_an_address_that_climbs_out_of_the_releases_is_not_passed_on(self) -> None:
+        self._installed("0.1.0")
+        for address in (
+            "https://github.com/opensverige/karta.opensverige-3d/releases/../../../someone/else",
+            "https://github.com/opensverige/karta.opensverige-3d/releases/tag/..",
+            "https://github.com/opensverige/karta.opensverige-3d/releases//evil.test",
+        ):
+            with self.subTest(address=address):
+                found = app.app_version(lambda: [{"tag_name": "app-v0.2.0", "html_url": address}])
+                self.assertEqual((found["current"], found["url"]), (False, ""))
+
+    def test_a_version_written_shorter_is_the_same_version(self) -> None:
+        # 0.2 and 0.2.0 are one version, whichever of the two a tag or an install wrote.
+        for mine, tag in (("0.2.0", "app-v0.2"), ("0.2", "app-v0.2.0"), ("0.2.0", "app-v0.2.0.0")):
+            with self.subTest(mine=mine, tag=tag):
+                self._installed(mine)
+                self.assertTrue(app.app_version(lambda: [{"tag_name": tag, "html_url": ""}])["current"])
+
+    def test_an_answer_of_another_shape_is_no_news(self) -> None:
+        self._installed("0.1.0")
+        for answer in ({}, "x", [1, None, {"tag_name": 5}]):
+            with self.subTest(answer=answer):
+                self.assertEqual(
+                    app.app_version(lambda: answer),
+                    {"mine": "0.1.0", "latest": "", "current": True, "url": ""},
+                )
+
+    def test_a_clone_does_not_ask_github(self) -> None:
+        self._installed(None)
+
+        def fetch() -> object:
+            raise AssertionError("GitHub was asked on a clone")
+
+        self.assertEqual(
+            app.app_version(fetch),
+            {"mine": rutor.__version__, "latest": "", "current": True, "url": ""},
+        )
+
+    def test_the_same_version_is_current(self) -> None:
+        self._installed("0.2.0")
+        releases = [{"tag_name": "app-v0.2.0", "html_url": ""}]
+        found = app.app_version(lambda: releases)
+        self.assertEqual(found, {"mine": "0.2.0", "latest": "0.2.0", "current": True, "url": ""})
+
+
 # What the page's checks answer in these tests. The real ones read the machine.
 _MACHINE = {
     "ok": True,
@@ -1843,6 +1942,34 @@ class AppServerTests(_OwnHome):
         self.assertEqual(json.loads(body).get("code"), "none_free")
         self.assertIsNone(self.builder.chosen())
 
+    def test_the_state_carries_the_app_version(self) -> None:
+        patcher = patch("rutor.config.app_install", return_value={"version": "0.1.0", "lock_sha256": "ab" * 32})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        builder = app.Builder(FakeStart())
+        self.addCleanup(builder.shutdown)
+        server = app.AppServer(builder, releases=lambda: [{"tag_name": "app-v0.2.0", "html_url": RELEASE_URL}])
+        self.addCleanup(server.stop)
+        server.start()
+
+        def app_answer() -> dict[str, object]:
+            version = server._state()["version"]
+            assert isinstance(version, dict)
+            found = version["app"]
+            assert isinstance(found, dict)
+            return found
+
+        # GitHub is asked on the server's own thread, so the page comes up before it answers.
+        wait_until(lambda: app_answer().get("latest") == "0.2.0")
+        self.assertEqual(
+            app_answer(),
+            {"mine": "0.1.0", "latest": "0.2.0", "current": False, "url": RELEASE_URL},
+        )
+        # The pipeline's own three keys are not touched by the app's answer.
+        version = server._state()["version"]
+        self.assertIsInstance(version, dict)
+        self.assertEqual((version["mine"], version["current"]), (pipeline.PIPELINE, True))
+
     def test_a_page_that_stops_asking_ends_the_job_without_anyone_pressing(self) -> None:
         # The whole chain: nobody asks for the state, the server's own timer notices, the
         # child is stopped and the lock is given back.
@@ -1902,8 +2029,13 @@ class PageFilesTests(unittest.TestCase):
             self.assertNotIn("@import", text, name)
             self.assertNotIn("url(", text, name)
         script = self.read("app.js")
-        # The two places a person is sent to: GitHub's device page and Cesium ion. Links, not loads.
-        allowed = {"https://github.com/login/device", "https://ion.cesium.com"}
+        # The three places a person is sent to: GitHub's device page, Cesium ion and the
+        # release page of a newer app. Links, not loads.
+        allowed = {
+            "https://github.com/login/device",
+            "https://ion.cesium.com",
+            "https://github.com/opensverige/karta.opensverige-3d/releases/",
+        }
         found = set(re.findall(r"https?://[^\s\"'`)]*", script))
         self.assertEqual(found - allowed, set())
         self.assertEqual(found, allowed)
@@ -1949,6 +2081,12 @@ class PageFilesTests(unittest.TestCase):
         for word in words:
             self.assertRegex(script, rf"\b{word}: \"", word)
         self.assertIn("Något gick fel. Försök igen.", script)
+
+    def test_the_page_can_say_a_newer_app_is_out(self) -> None:
+        page = self.read("index.html")
+        self.assertIn('id="nyversion"', page)
+        self.assertIn('id="nyversion-lank"', page)
+        self.assertIn('rel="noopener noreferrer"', page)
 
     def test_a_sentence_in_the_page_is_at_most_twelve_words(self) -> None:
         page = re.sub(r"<[^>]+>", "\n", self.read("index.html"))

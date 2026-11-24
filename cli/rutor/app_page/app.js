@@ -68,11 +68,12 @@ const VERKTYG = {
 const NAMN = ["Klarar datorn det?", "Villkoren", "Logga in", "Cesium-konto", "Ritverktyget", "Välj ruta", "Rita", "Klart"];
 const FASER = ["claim", "render", "redraw", "upload"];
 
-// The two places the page sends a person to. They are links the person presses. The page
+// The three places the page sends a person to. They are links the person presses. The page
 // itself loads nothing from them.
 const GITHUB_KOD = "https://github.com/login/device";
 const CESIUM_ION = "https://ion.cesium.com";
 const KARTANS_VARD = "karta.opensverige.se";
+const NY_VERSION = "https://github.com/opensverige/karta.opensverige-3d/releases/";
 
 const FRAGA_SEKUNDER = 2;
 const FRAGA_SEKUNDER_UNDER_JOBB = 1;
@@ -230,6 +231,18 @@ function rita() {
   forraFas = fas;
 
   visa("gammal", s.version.current === false);
+
+  // Only a release page under the app's own name is ever a link here, whatever GitHub said.
+  const nyApp = s.version.app;
+  const nyLank =
+    nyApp !== null &&
+    typeof nyApp === "object" &&
+    nyApp.current === false &&
+    typeof nyApp.url === "string" &&
+    nyApp.url.startsWith(NY_VERSION) &&
+    !nyApp.url.includes("..");
+  visa("nyversion", nyLank);
+  el("nyversion-lank").setAttribute("href", nyLank ? nyApp.url : "");
 
   const gjort = klara(s);
   for (const knapp of el("rad").querySelectorAll("button")) {
