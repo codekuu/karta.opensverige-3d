@@ -124,7 +124,7 @@ def main() -> int:
         print("ended:", kind.__name__, flush=True)
         if isinstance(exc, OSError) and exc.errno == 28:
             return 6
-        outside = ("httpx", "httpcore", "requests", "urllib3", "huggingface_hub", "socket", "ssl")
+        outside = ("httpx", "httpx2", "httpcore", "httpcore2", "requests", "urllib3", "huggingface_hub", "socket", "ssl")
         if isinstance(exc, OSError) or kind.__module__.split(".")[0] in outside:
             return 4
         return 1
@@ -789,7 +789,8 @@ class Installer:
             except OSError:
                 return 0
         if name == "renderer":
-            return min(size, _tree_bytes(google.default_render_dir() / "node_modules"))
+            # The packages, and the Chrome that puppeteer fetches into the app's folder.
+            return min(size, _tree_bytes(google.default_render_dir() / "node_modules") + _tree_bytes(app / "chrome"))
         cache = commands._hub_cache()
         held = 0
         for repo in (pipeline.MODEL_ID, pipeline.LORA_ID):

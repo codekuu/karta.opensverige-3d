@@ -4,7 +4,8 @@ The app page installs the stack with `pip install --require-hashes --only-binary
 against that file. Run this on a Windows machine with Python 3.11, where pip resolves the
 stack exactly as it will on a volunteer's machine:
 
-    py -3.11 tools/make_app_lock.py --folder <an empty folder> --out requirements-app.lock
+    py -3.11 tools/make_app_lock.py --folder <an empty folder> --out requirements-app.lock \\
+        --constraints <pip freeze of the install that works, without its diffusers line>
 
 It runs `pip download`, which fetches about 4 GB into the folder and installs nothing.
 Remove the folder afterwards.
@@ -75,14 +76,18 @@ def lock_lines(folder: Path) -> tuple[list[str], int, list[str]]:
     return [lines[name] for name in sorted(lines)], size, left_out
 
 
-def download_command(folder: Path, requirements: Path) -> list[str]:
-    return [
+def download_command(folder: Path, requirements: Path, constraints: Path | None = None) -> list[str]:
+    argv = [
         sys.executable, "-m", "pip", "download",
         "--dest", str(folder),
         "-r", str(requirements),
         TORCH, TORCHVISION,
         "--extra-index-url", TORCH_INDEX,
     ]  # fmt: skip
+    if constraints is not None:
+        # What the pinned packages need in turn, held to the versions of an install that works.
+        argv += ["--constraint", str(constraints)]
+    return argv
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -91,6 +96,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--folder", type=Path, required=True, help="an empty folder for the downloaded files")
     parser.add_argument("--out", type=Path, default=root / "requirements-app.lock")
     parser.add_argument("--requirements", type=Path, default=root / "requirements.txt")
+    parser.add_argument(
+        "--constraints",
+        type=Path,
+        help="`pip freeze` of an install that draws today, without its diffusers line; holds every other version to it",
+    )
     parser.add_argument("--no-download", action="store_true", help="the folder is filled already; only write the lock")
     args = parser.parse_args(argv)
     if sys.platform != "win32" or sys.version_info[:2] != (3, 11):
@@ -101,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         if any(args.folder.iterdir()):
             print(f"error: {args.folder} is not empty", file=sys.stderr)
             return 1
-        done = subprocess.run(download_command(args.folder, args.requirements), check=False)
+        done = subprocess.run(download_command(args.folder, args.requirements, args.constraints), check=False)
         if done.returncode != 0:
             return done.returncode
     try:

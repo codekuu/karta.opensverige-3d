@@ -720,6 +720,14 @@ class InstallJobTests(_Install):
         (snapshot / "model.safetensors").write_bytes(b"\0" * 700)
         self.assertEqual(self.state()["done_gb"], 700 / 1e9)
 
+    def test_progress_counts_the_renderers_chrome_too(self) -> None:
+        # Chrome is most of what the renderer fetches, and it lands beside node_modules.
+        (self.render / "node_modules" / "cesium").mkdir(parents=True)
+        (self.render / "node_modules" / "cesium" / "a.js").write_bytes(b"\0" * 300)
+        (self.app / "chrome" / "chrome" / "win64").mkdir(parents=True)
+        (self.app / "chrome" / "chrome" / "win64" / "chrome.exe").write_bytes(b"\0" * 900)
+        self.assertEqual(self.state()["done_gb"], 1200 / 1e9)
+
     def test_progress_counts_what_pip_has_fetched(self) -> None:
         seen: list[object] = []
 
@@ -904,6 +912,14 @@ class LockToolTests(unittest.TestCase):
         self.assertIn("torchvision==0.26.0+cu128", argv)
         self.assertEqual(argv[argv.index("--dest") + 1], str(self.folder))
         self.assertEqual(argv[argv.index("--extra-index-url") + 1], app_install.TORCH_INDEX)
+        self.assertNotIn("--constraint", argv)
+
+    def test_the_versions_of_a_working_install_can_be_held(self) -> None:
+        # requirements.txt pins what the redraw names. What those packages need in turn is
+        # held to what a machine that draws today has, from its own `pip freeze`.
+        held = self.folder.parent / "constraints.txt"
+        argv = self.tool.download_command(self.folder, Path("requirements.txt"), held)  # type: ignore[attr-defined]
+        self.assertEqual(argv[argv.index("--constraint") + 1], str(held))
 
 
 class InstallerFilesTests(unittest.TestCase):
@@ -968,6 +984,66 @@ class InstallerFilesTests(unittest.TestCase):
 
     def test_the_workflow_installs_under_a_profile_with_a_space_and_swedish_letters(self) -> None:
         self.assertIn("'Åsa Öberg'", self.read(".github", "workflows", "installer.yml"))
+
+
+class LockTests(unittest.TestCase):
+    """requirements-app.lock, as tools/make_app_lock.py wrote it on a Windows machine."""
+
+    ROOT = Path(__file__).resolve().parents[2]
+
+    def lines(self) -> list[str]:
+        text = (self.ROOT / "requirements-app.lock").read_text(encoding="utf-8")
+        return [line for line in text.splitlines() if line.strip() and not line.startswith("#")]
+
+    def pins(self) -> dict[str, str]:
+        import re
+
+        found: dict[str, str] = {}
+        for line in self.lines():
+            matched = re.fullmatch(r"([a-z0-9-]+)==(\S+) --hash=sha256:[0-9a-f]{64}", line)
+            self.assertIsNotNone(matched, line)
+            assert matched is not None
+            self.assertNotIn(matched.group(1), found)
+            found[matched.group(1)] = matched.group(2)
+        return found
+
+    def test_every_line_of_the_lock_has_a_hash(self) -> None:
+        self.assertGreater(len(self.pins()), 20)
+
+    def test_the_lock_needs_no_git(self) -> None:
+        text = "\n".join(self.lines())
+        for forbidden in ("git+", " @ ", "http://", "https://", "--index-url", "-e "):
+            self.assertNotIn(forbidden, text)
+        # diffusers is on no index. The installer's build adds the line for the wheel it makes.
+        self.assertNotIn("diffusers", self.pins())
+
+    def test_the_lock_matches_the_pins(self) -> None:
+        import re
+
+        pins = self.pins()
+        self.assertEqual(pins["torch"], "2.11.0+cu128")
+        self.assertEqual(pins["torchvision"], "0.26.0+cu128")
+        wanted = re.findall(r"^([A-Za-z0-9_.-]+)==(\S+)$", (self.ROOT / "requirements.txt").read_text(encoding="utf-8"), re.MULTILINE)
+        self.assertGreaterEqual(len(wanted), 9)
+        for name, version in wanted:
+            self.assertEqual(pins.get(re.sub(r"[-_.]+", "-", name).lower()), version, name)
+
+    def test_every_download_in_the_manifest_is_pinned(self) -> None:
+        import re
+
+        manifest = json.loads(Path(app_install.__file__).with_name("app_install.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(manifest["downloads"]), ["node"])
+        for name, entry in manifest["downloads"].items():
+            self.assertTrue(entry["url"].startswith("https://"), name)
+            self.assertRegex(entry["sha256"], r"^[0-9a-f]{64}$")
+            self.assertGreater(entry["size"], 0)
+        for name, size in manifest["sizes"].items():
+            self.assertIsInstance(size, int, name)
+            self.assertGreater(size, 0, name)
+        # Measured, not guessed: the lock's wheels as the tool weighed them, the renderer's
+        # packages and Chrome on the test PC, the model's files at the pinned commits.
+        self.assertEqual(manifest["sizes"], {"stack": 2860862987, "renderer": 919628986, "model": 11470921791})
+        del re
 
 
 if __name__ == "__main__":
