@@ -110,6 +110,10 @@ let vald = null;
 
 let nyckelFel = "";
 let bytNyckel = false;
+
+// Closing the app: asked twice while something runs, and final once the app has said yes.
+let stangFraga = false;
+let stangd = false;
 let stegFel = "";
 let vantaVisad = false;
 let rapportVisad = false;
@@ -225,9 +229,22 @@ function ga(till) {
 // ---- drawing the page from what the app says
 
 function rita() {
+  if (stangd) {
+    // The app has ended. Nothing on the page can be pressed any more, and nothing is asked.
+    for (const id of ["tappad", "gammal", "nyversion", "kropp", "fot"]) visa(id, false);
+    el("mobilrad").parentElement.hidden = true;
+    visa("stangd", true);
+    return;
+  }
   visa("tappad", missar >= TAPPAD_EFTER);
   if (!lage) return;
   const s = lage;
+  const arbetar = gar(s) || Object.prototype.hasOwnProperty.call(HAMTAR, s.install.phase);
+  if (!arbetar) stangFraga = false;
+  for (const knapp of document.querySelectorAll("[data-stang]")) {
+    knapp.textContent = stangFraga ? "Stäng ändå. Arbetet avbryts." : "Stäng Pixelbygget";
+    knapp.disabled = upptagen;
+  }
   const fas = s.job.phase;
   const langst = framme(s);
 
@@ -729,7 +746,32 @@ async function farskFraga() {
   await fraga();
 }
 
+async function stang() {
+  if (!lage || upptagen || stangd) return;
+  const arbetar = gar(lage) || Object.prototype.hasOwnProperty.call(HAMTAR, lage.install.phase);
+  if (arbetar && !stangFraga) {
+    // A press by mistake must not end a drawing. The second press does.
+    stangFraga = true;
+    rita();
+    return;
+  }
+  upptagen = true;
+  rita();
+  const svar = await skicka("api/quit", {});
+  upptagen = false;
+  if (svar.ok) {
+    stangd = true;
+    window.clearTimeout(nastaFraga);
+    rita();
+    el("rubrik-stangd").focus();
+    return;
+  }
+  stangFraga = false;
+  await farskFraga();
+}
+
 async function hamtaLage() {
+  if (stangd) return;
   window.clearTimeout(nastaFraga);
   try {
     const svar = await fetch("api/state", { cache: "no-store" });
@@ -741,6 +783,7 @@ async function hamtaLage() {
     missar += 1;
   }
   rita();
+  if (stangd) return;
   const paus = lage && gar(lage) ? FRAGA_SEKUNDER_UNDER_JOBB : FRAGA_SEKUNDER;
   nastaFraga = window.setTimeout(fraga, paus * 1000);
 }
@@ -865,6 +908,7 @@ function koppla() {
     });
   }
 
+  for (const knapp of document.querySelectorAll("[data-stang]")) knapp.addEventListener("click", stang);
   el("hamta").addEventListener("click", () => gor("api/install", {}, "svar"));
   el("hamta-avbryt").addEventListener("click", () => gor("api/install/stop", {}, "svar"));
 }

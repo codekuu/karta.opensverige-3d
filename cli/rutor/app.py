@@ -13,6 +13,7 @@ claim, drawing, check and upload of one cell.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import importlib
 import json
@@ -23,9 +24,10 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -682,6 +684,11 @@ class Builder:
         with self._lock:
             return self._clock() - self._seen > GONE_SECONDS
 
+    def quiet_for(self) -> float:
+        """Seconds since the page last asked for its state."""
+        with self._lock:
+            return self._clock() - self._seen
+
     def busy(self) -> bool:
         """Whether a cell is being built, or its lock is still being given back."""
         with self._lock:
@@ -891,6 +898,9 @@ PAGE_FILES = {
     "app.css": ("app.css", "text/css; charset=utf-8"),
 }
 TICK_SECONDS = 5.0
+# How long the shortcut's app stays up with no page, no job and no fetch.
+IDLE_EXIT_SECONDS = 600.0
+QUIT_PAUSE_SECONDS = 0.3
 
 # How long an answer that cost something is allowed to stand.
 _MACHINE_SECONDS = 30.0
@@ -1354,8 +1364,15 @@ class AppServer:
         builder: Builder | None = None,
         releases: ReleaseFetch | None = None,
         installer: app_install.Installer | None = None,
+        idle_exit: float | None = None,
     ) -> None:
         self._builder = builder if builder is not None else Builder()
+        # Seconds without a page, a job or a fetch after which the app ends by itself. None
+        # for a start from a terminal, which Ctrl-C ends.
+        self._idle_exit = idle_exit
+        self._idle_seconds = 0.0
+        self._ending = threading.Lock()
+        self._ended = False
         self._installer = (
             installer
             if installer is not None
@@ -1411,13 +1428,51 @@ class AppServer:
         # A fault in one tick must not end the timer: the page is still open.
         while not self._timer_stop.wait(TICK_SECONDS):
             try:
+                # Looked at before the tick, which may be what stops the job.
+                working = self._installing() or self._builder.busy()
+                quiet = self._builder.quiet_for()
                 self._builder.tick()
                 if self._installing() and self._builder.away():
                     # A closed tab stops a fetch as it stops a job. What has arrived stays,
                     # and the next press goes on from there.
                     self._installer.stop()
+                if self._idle_exit is not None and self._idle(working, quiet):
+                    self._end_soon()
             except Exception as exc:
                 print(f"app: {type(exc).__name__} in tick", file=sys.stderr)
+
+    def _idle(self, working: bool, quiet: float) -> bool:
+        """Whether the app has been without a page and without work for long enough to end.
+
+        The time is counted from the later of the page's last request and the last moment
+        something ran, so the app never ends under a job, and a page that comes back after
+        its job was stopped still finds the app.
+        """
+        if working:
+            self._idle_seconds = quiet
+            return False
+        limit = self._idle_exit if self._idle_exit is not None else 0.0
+        if quiet < self._idle_seconds:
+            # The page asked again since the work ended.
+            self._idle_seconds = 0.0
+        return quiet - self._idle_seconds > limit
+
+    def end_serving(self) -> None:
+        """Make serve_forever return, from another thread."""
+        self._page.end_serving()
+
+    def _end_soon(self) -> None:
+        """End the serving once, a moment from now, so that an answer on its way gets out."""
+        with self._ending:
+            if self._ended:
+                return
+            self._ended = True
+
+        def end() -> None:
+            time.sleep(QUIT_PAUSE_SECONDS)
+            self._page.end_serving()
+
+        threading.Thread(target=end, daemon=True).start()
 
     def start(self) -> None:
         self._ensure_timer()
@@ -1451,6 +1506,10 @@ class AppServer:
             return Reply(200, page[1], (PAGE_DIR / page[0]).read_bytes())
         if rest == "api/state":
             return json_reply(200, self._state())
+        if rest == "api/alive":
+            # For a second start that wants to know whether this one is up. It costs
+            # nothing and does not count as the page being there.
+            return json_reply(200, {"app": "pixelbygget"})
         if rest == "api/grid":
             return json_reply(200, self._grid())
         if rest == "api/report":
@@ -1479,6 +1538,13 @@ class AppServer:
         if rest == "api/install":
             _body(raw)
             self._install()
+            return json_reply(200, {"ok": True})
+        if rest == "api/quit":
+            _body(raw)
+            # Whatever runs is stopped first, lock and all. Then the answer, then the end.
+            self._installer.stop()
+            self._builder.stop()
+            self._end_soon()
             return json_reply(200, {"ok": True})
         if rest == "api/install/stop":
             _body(raw)
@@ -1634,26 +1700,262 @@ class AppServer:
         return {"sheet": sheet_id, "col": col, "row": row}
 
 
-def cmd_app(args: argparse.Namespace) -> int:
+# ---- one app at a time, with or without a terminal
+
+
+# The address of a page this program serves: this machine, a port and the page's long key.
+_PAGE_URL = re.compile(r"http://127\.0\.0\.1:\d{1,5}/[A-Za-z0-9_-]{20,100}/")
+ALIVE_SECONDS = 3.0
+RACE_SECONDS = 5.0
+LOG_MAX_BYTES = 256_000
+
+
+def running_path() -> Path:
+    return config.home() / "app-running.json"
+
+
+def log_path() -> Path:
+    return config.home() / "app.log"
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process with this number exists. It may be another program than the app."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # os.kill is no question on Windows: with any signal number it ends the process.
+        import ctypes
+
+        kernel = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+        kernel.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+        kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+        # PROCESS_QUERY_LIMITED_INFORMATION. 259 is STILL_ACTIVE.
+        handle = kernel.OpenProcess(0x1000, 0, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            kernel.CloseHandle(handle)
     try:
-        server = AppServer()
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # It exists and is somebody else's.
+        return True
+    return True
+
+
+def _answers(url: str) -> bool:
+    """Whether the app page at this address says that it is one. No proxy sees the address."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    try:
+        with opener.open(f"{url}api/alive", timeout=ALIVE_SECONDS) as response:
+            found = json.loads(response.read(1000).decode("utf-8"))
+    except Exception:
+        # Refused, slow, not JSON: in every case there is no app page there.
+        return False
+    return isinstance(found, dict) and found.get("app") == "pixelbygget"
+
+
+def running_page() -> str | None:
+    """The address of an app page that is already up on this machine, or None.
+
+    The file is only a note. It counts when its process is alive and the page answers at
+    its address. A note that is stale, or that is not such a note, is removed.
+    """
+    path = running_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    try:
+        found = json.loads(text)
+    except ValueError:
+        found = None
+    if isinstance(found, dict):
+        pid, url = found.get("pid"), found.get("url")
+        if (
+            isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and isinstance(url, str)
+            # Only an address of the page's own shape is ever asked: the file is data.
+            and _PAGE_URL.fullmatch(url)
+            and _alive(pid)
+            and _answers(url)
+        ):
+            return url
+    with contextlib.suppress(OSError):
+        path.unlink()
+    return None
+
+
+def _write_running(url: str) -> bool:
+    """Note that this process serves the page. False when another start got there first."""
+    path = running_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps({"pid": os.getpid(), "url": url}).encode("utf-8")
+    for _attempt in range(2):
+        try:
+            # The address holds the page's key, so the note is the owner's alone.
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            if running_page() is not None:
+                return False
+            # The note was stale and is gone now.
+            continue
+        try:
+            os.write(descriptor, body)
+        finally:
+            os.close(descriptor)
+        os.chmod(path, 0o600)
+        return True
+    return False
+
+
+def _remove_running() -> None:
+    """Take the note away, if it is this process's own."""
+    path = running_path()
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(found, dict) and found.get("pid") == os.getpid():
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+class _Log:
+    """The fault log of an app without a terminal: each line with its time, nothing else."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        try:
+            if path.stat().st_size > LOG_MAX_BYTES:
+                flags |= os.O_TRUNC
+        except OSError:
+            pass
+        self._file = os.fdopen(os.open(path, flags, 0o600), "a", encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
+        self._lock = threading.Lock()
+        self._rest = ""
+
+    def write(self, text: str) -> int:
+        with self._lock:
+            *lines, self._rest = (self._rest + text).split("\n")
+            for line in lines:
+                if line.strip():
+                    self._file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {api.one_line(line, 300)}\n")
+            self._file.flush()
+        return len(text)
+
+    def flush(self) -> None:
+        with self._lock:
+            self._file.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            self._file.close()
+
+
+def _fault_line(kind: type[BaseException] | None, trace: object) -> str:
+    """The kind of a fault and where, never its message: this process holds a login."""
+    frames = traceback.extract_tb(trace) if trace is not None else []  # type: ignore[arg-type]
+    where = f" at {Path(frames[-1].filename).name}:{frames[-1].lineno}" if frames else ""
+    return f"app: {kind.__name__ if kind is not None else 'fault'}{where}"
+
+
+@contextlib.contextmanager
+def _quietly() -> Iterator[None]:
+    """Print nothing. Fault lines go to the log, and a fault nobody caught goes there by its kind."""
+    log = _Log(log_path())
+    nowhere = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 - closed below
+    saved = (sys.stdout, sys.stderr, sys.excepthook, threading.excepthook)
+
+    def on_thread(args: threading.ExceptHookArgs) -> None:
+        log.write(_fault_line(args.exc_type, args.exc_traceback) + "\n")
+
+    sys.stdout, sys.stderr = nowhere, log  # type: ignore[assignment]
+    sys.excepthook = lambda kind, _value, trace: log.write(_fault_line(kind, trace) + "\n")
+    threading.excepthook = on_thread
+    try:
+        yield
+    except RutorError as exc:
+        # The command's own sentence, which a terminal would have shown.
+        log.write(f"error: {exc.message}\n")
+        raise
+    except Exception as exc:
+        log.write(_fault_line(type(exc), exc.__traceback__) + "\n")
+        raise
+    finally:
+        sys.stdout, sys.stderr, sys.excepthook, threading.excepthook = saved
+        nowhere.close()
+        log.close()
+
+
+def _show(url: str, args: argparse.Namespace) -> None:
+    print(f"url: {url}", flush=True)
+    if not args.no_open:
+        webbrowser.open(url)
+
+
+def _serve(args: argparse.Namespace, quiet: bool) -> int:
+    found = running_page()
+    if found is not None:
+        # The app is up already. Its page is shown, and no second one is started.
+        _show(found, args)
+        return 0
+    try:
+        server = AppServer(idle_exit=IDLE_EXIT_SECONDS if quiet else None)
     except OSError as exc:
         raise environment(f"could not open a port on this machine ({exc.strerror})") from exc
-    print(f"url: {server.url}", flush=True)
-    print("Ctrl-C closes the page.", flush=True)
-    if not args.no_open:
-        webbrowser.open(server.url)
+    if not _write_running(server.url):
+        # Another start wrote its note between the look above and here. That one wins.
+        server.stop()
+        deadline = time.monotonic() + RACE_SECONDS
+        while True:
+            found = running_page()
+            if found is not None:
+                _show(found, args)
+                return 0
+            if time.monotonic() >= deadline:
+                raise environment("another Pixelbygget was starting and did not come up; start it again")
+            time.sleep(0.2)
     try:
+        _show(server.url, args)
+        print("Ctrl-C closes the page.", flush=True)
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.stop()
+        _remove_running()
     print("closed")
     return 0
+
+
+def cmd_app(args: argparse.Namespace) -> int:
+    quiet = bool(getattr(args, "quiet", False))
+    if not quiet:
+        return _serve(args, quiet)
+    with _quietly():
+        return _serve(args, quiet)
 
 
 def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     app_parser = sub.add_parser("app", aliases=["bygg"], help="open the page for building a cell")
     app_parser.add_argument("--no-open", action="store_true", help="print the address and do not open a browser")
+    app_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="print nothing, write faults to app.log, and end after ten minutes without a page",
+    )
     app_parser.set_defaults(func=cmd_app)

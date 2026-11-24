@@ -2204,6 +2204,365 @@ class AppServerTests(_OwnHome):
         self.assertIn("app_page/*", shipped)
 
 
+def _load_start_script() -> object:
+    """installer/start.pyw as a module. It is a file the shortcut runs, not part of the package."""
+    import importlib.machinery
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[2] / "installer" / "start.pyw"
+    loader = importlib.machinery.SourceFileLoader("pixelbygget_start", str(path))
+    spec = importlib.util.spec_from_loader("pixelbygget_start", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+class WindowlessTests(_OwnHome):
+    """The app as the shortcut starts it: no terminal, one instance, and a way to close it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        for target, value in (
+            ("rutor.app.machine", dict(_MACHINE)),
+            ("rutor.app.tools", dict(_TOOLS)),
+            ("rutor.app.price", dict(_PRICE)),
+            ("rutor.app.cesium", {"set": True, "ok": True, "problem": ""}),
+            ("rutor.app._search_open_sheet", app._no_sheet("none_free")),
+        ):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.now = 1000.0
+        self.fake = FakeStart()
+        self.builder = app.Builder(self.fake, clock=lambda: self.now)
+        self.builder._terms = True
+        self.builder._login = "klang"
+        self.builder._looked = True
+        self.opened: list[str] = []
+        browser = patch("webbrowser.open", side_effect=self.opened.append)
+        browser.start()
+        self.addCleanup(browser.stop)
+
+    def _serving(self, **options: object) -> tuple[app.AppServer, threading.Thread]:
+        """A server whose serve_forever runs on a thread, as cmd_app runs it on the main one."""
+        server = app.AppServer(self.builder, releases=list, installer=FakeInstaller(), **options)  # type: ignore[arg-type]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def end() -> None:
+            if thread.is_alive():
+                server.end_serving()
+                thread.join(timeout=10)
+            server.stop()
+
+        self.addCleanup(end)
+        wait_until(lambda: self._get(server, "api/alive")[0] == 200)
+        return server, thread
+
+    @staticmethod
+    def _get(server: app.AppServer, rest: str) -> tuple[int, bytes]:
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=10)
+        try:
+            connection.request("GET", f"/{server.key}/{rest}")
+            response = connection.getresponse()
+            return response.status, response.read()
+        except OSError:
+            return 0, b""
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _post(server: app.AppServer, rest: str) -> tuple[int, bytes]:
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=30)
+        try:
+            connection.request("POST", f"/{server.key}/{rest}", body=b"{}", headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            return response.status, response.read()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _args(*, quiet: bool = False, no_open: bool = False) -> object:
+        import argparse
+
+        return argparse.Namespace(quiet=quiet, no_open=no_open)
+
+    def test_a_second_start_opens_the_first_ones_page(self) -> None:
+        server, _thread = self._serving()
+        self.assertTrue(app._write_running(server.url))
+        self.assertEqual(app.running_page(), server.url)
+        with patch("rutor.app.AppServer", side_effect=AssertionError("a second server was made")):
+            self.assertEqual(app.cmd_app(self._args(quiet=True)), 0)
+        self.assertEqual(self.opened, [server.url])
+        # The first one's file is not the second one's to remove.
+        self.assertTrue(app.running_path().is_file())
+
+    def test_a_second_start_that_may_not_open_a_browser_prints_the_address(self) -> None:
+        server, _thread = self._serving()
+        app._write_running(server.url)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch("rutor.app.AppServer", side_effect=AssertionError("second")):
+            self.assertEqual(app.cmd_app(self._args(no_open=True)), 0)
+        self.assertEqual(self.opened, [])
+        self.assertIn(f"url: {server.url}", out.getvalue())
+
+    def test_a_file_left_by_a_dead_process_is_ignored(self) -> None:
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        path = app.running_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": gone.pid, "url": "http://127.0.0.1:9/" + "k" * 43 + "/"}), encoding="utf-8")
+        self.assertIsNone(app.running_page())
+        self.assertFalse(path.exists())
+        # And a new server starts, writes its own file and takes it away again.
+        seen: list[dict[str, object]] = []
+
+        def serve(server: app.AppServer) -> None:
+            seen.append(json.loads(path.read_text(encoding="utf-8")))
+
+        with patch.object(app.AppServer, "serve_forever", serve):
+            self.assertEqual(app.cmd_app(self._args(quiet=True)), 0)
+        self.assertEqual(seen[0]["pid"], os.getpid())
+        self.assertEqual(self.opened, [seen[0]["url"]])
+        self.assertFalse(path.exists())
+
+    def test_a_live_process_that_is_not_the_app_is_not_the_app(self) -> None:
+        # The pid was given to another program after the app died, and nothing answers.
+        path = app.running_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": os.getpid(), "url": "http://127.0.0.1:9/" + "k" * 43 + "/"}), encoding="utf-8")
+        self.assertIsNone(app.running_page())
+        self.assertFalse(path.exists())
+
+    def test_an_address_of_another_shape_is_never_asked(self) -> None:
+        path = app.running_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for content in (
+            json.dumps({"pid": os.getpid(), "url": "http://evil.test/" + "k" * 43 + "/"}),
+            json.dumps({"pid": os.getpid(), "url": "https://127.0.0.1:9/" + "k" * 43 + "/"}),
+            json.dumps({"pid": os.getpid(), "url": "http://127.0.0.1:9/short/"}),
+            json.dumps({"pid": "x", "url": "http://127.0.0.1:9/" + "k" * 43 + "/"}),
+            json.dumps([1, 2]),
+            "not json",
+        ):
+            with self.subTest(content=content[:40]):
+                path.write_text(content, encoding="utf-8")
+                with patch("rutor.app._answers", side_effect=AssertionError("it was asked")):
+                    self.assertIsNone(app.running_page())
+                self.assertFalse(path.exists())
+
+    def test_a_start_that_loses_the_race_opens_the_winners_page(self) -> None:
+        server, _thread = self._serving()
+        made: list[app.AppServer] = []
+        real = app.AppServer
+
+        def second(*args: object, **options: object) -> app.AppServer:
+            # The first start writes its file just as the second has looked and found none.
+            other = real(self.builder, releases=list, installer=FakeInstaller())  # type: ignore[arg-type]
+            made.append(other)
+            app._write_running(server.url)
+            return other
+
+        with patch("rutor.app.AppServer", side_effect=second):
+            self.assertEqual(app.cmd_app(self._args(quiet=True)), 0)
+        self.assertEqual(self.opened, [server.url])
+        self.assertEqual(json.loads(app.running_path().read_text(encoding="utf-8"))["url"], server.url)
+        # The loser's port is closed again.
+        with self.assertRaises(OSError):
+            http.client.HTTPConnection("127.0.0.1", made[0].port, timeout=2).request("GET", "/")
+
+    def test_quit_stops_the_job_and_ends(self) -> None:
+        self.fake.script("claim", ["claimed: stockholm-norr 0_0 expires 2026-11-25T12:00"])
+        self.fake.script("render", ["note: this takes a while"], hold=True)
+        server, thread = self._serving()
+        with patch("rutor.app.SHEET_KINDS", {"stockholm-norr": "google"}):
+            self.builder.choose("stockholm-norr", 0, 0)
+            self.builder.build()
+            wait_until(lambda: self.builder.job_state()["phase"] == "render")
+            status, body = self._post(server, "api/quit")
+        self.assertEqual((status, json.loads(body)), (200, {"ok": True}))
+        self.assertTrue(self.fake.runs[1].stopped)
+        self.assertEqual(self.fake.calls[-1][0], ["release", "stockholm-norr", "0_0"])
+        self.assertEqual(self.builder.job_state()["held"], False)
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+
+    def test_quit_stops_a_fetch(self) -> None:
+        installer = FakeInstaller()
+        installer.go.clear()
+        self.addCleanup(installer.go.set)
+        server = app.AppServer(self.builder, releases=list, installer=installer)  # type: ignore[arg-type]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.stop)
+        wait_until(lambda: self._get(server, "api/alive")[0] == 200)
+        with patch("rutor.app_install.is_app", return_value=True):
+            self.assertEqual(self._post(server, "api/install")[0], 200)
+            wait_until(installer.running)
+            self.assertEqual(self._post(server, "api/quit")[0], 200)
+        self.assertEqual(installer.stops, 1)
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+
+    def test_a_page_nobody_looks_at_ends_by_itself(self) -> None:
+        with patch("rutor.app.TICK_SECONDS", 0.02):
+            _server, thread = self._serving(idle_exit=600.0)
+            self.now += 599.0
+            time.sleep(0.15)
+            self.assertTrue(thread.is_alive())
+            self.now += 2.0
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+
+    def test_a_page_somebody_looks_at_stays(self) -> None:
+        with patch("rutor.app.TICK_SECONDS", 0.02):
+            server, thread = self._serving(idle_exit=600.0)
+            for _ in range(3):
+                self.now += 400.0
+                self.assertEqual(self._get(server, "api/state")[0], 200)
+                time.sleep(0.1)
+            self.assertTrue(thread.is_alive())
+
+    def test_it_never_ends_under_a_running_job(self) -> None:
+        self.fake.script("claim", ["claimed: stockholm-norr 0_0 expires 2026-11-25T12:00"])
+        self.fake.script("render", ["note: this takes a while"], hold=True)
+        with patch("rutor.app.TICK_SECONDS", 0.02), patch("rutor.app.SHEET_KINDS", {"stockholm-norr": "google"}):
+            _server, thread = self._serving(idle_exit=600.0)
+            self.builder.choose("stockholm-norr", 0, 0)
+            self.builder.build()
+            wait_until(lambda: self.builder.job_state()["phase"] == "render")
+            self.now += 601.0
+            # The page has been gone for more than 150 s, so the job is stopped and its lock
+            # given back. The app is still up: the ten minutes count from when it went idle.
+            wait_until(lambda: self.builder.job_state()["phase"] == "stopped" and not self.builder.busy())
+            time.sleep(0.15)
+            self.assertTrue(thread.is_alive())
+            self.assertEqual(self.fake.calls[-1][0], ["release", "stockholm-norr", "0_0"])
+            self.now += 601.0
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+
+    def test_a_terminal_start_never_ends_by_itself(self) -> None:
+        with patch("rutor.app.TICK_SECONDS", 0.02):
+            _server, thread = self._serving()
+            self.now += 100000.0
+            time.sleep(0.15)
+            self.assertTrue(thread.is_alive())
+
+    def test_being_alive_is_not_being_looked_at(self) -> None:
+        server, _thread = self._serving()
+        self.now += 50.0
+        status, body = self._get(server, "api/alive")
+        self.assertEqual((status, json.loads(body)), (200, {"app": "pixelbygget"}))
+        self.assertEqual(self.builder.quiet_for(), 50.0)
+
+    def test_the_running_file_names_no_secret(self) -> None:
+        config.write_token("github-login-token")
+        config.write_cesium_token("ces.ium.token")
+        server, _thread = self._serving()
+        self.assertTrue(app._write_running(server.url))
+        text = app.running_path().read_text(encoding="utf-8")
+        self.assertEqual(json.loads(text), {"pid": os.getpid(), "url": server.url})
+        self.assertNotIn("github-login-token", text)
+        self.assertNotIn("ces.ium.token", text)
+        self.assertEqual(app.running_path(), Path(self.tmp.name) / "app-running.json")
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(app.running_path().stat().st_mode), 0o600)
+
+    def test_quiet_prints_nothing_and_logs_the_kind_of_a_fault(self) -> None:
+        config.write_token("github-login-token")
+
+        def serve(server: app.AppServer) -> None:
+            print("app: OSError in tick", file=sys.stderr)
+            print("something for a terminal")
+            raise ValueError("github-login-token leaked in a message")
+
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+            patch.object(app.AppServer, "serve_forever", serve),
+            self.assertRaises(ValueError),
+        ):
+            app.cmd_app(self._args(quiet=True))
+        self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+        log = Path(self.tmp.name) / "app.log"
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("app: OSError in tick", text)
+        self.assertIn("app: ValueError at test_app.py", text)
+        self.assertNotIn("github-login-token", text)
+        self.assertNotIn("something for a terminal", text)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+        self.assertFalse(app.running_path().exists())
+
+    def test_a_fault_on_another_thread_is_logged_by_its_kind(self) -> None:
+        def serve(server: app.AppServer) -> None:
+            def broken() -> None:
+                raise RuntimeError("a line from outside")
+
+            thread = threading.Thread(target=broken)
+            thread.start()
+            thread.join()
+
+        with patch.object(app.AppServer, "serve_forever", serve):
+            self.assertEqual(app.cmd_app(self._args(quiet=True)), 0)
+        text = (Path(self.tmp.name) / "app.log").read_text(encoding="utf-8")
+        self.assertIn("app: RuntimeError at test_app.py", text)
+        self.assertNotIn("a line from outside", text)
+
+    def test_the_log_does_not_grow_for_ever(self) -> None:
+        log = Path(self.tmp.name) / "app.log"
+        log.write_text("x" * (app.LOG_MAX_BYTES + 1), encoding="utf-8")
+        with patch.object(app.AppServer, "serve_forever", lambda server: None):
+            app.cmd_app(self._args(quiet=True))
+        self.assertLess(log.stat().st_size, 1000)
+
+    def test_without_quiet_the_terminal_is_told(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch.object(app.AppServer, "serve_forever", lambda server: None):
+            self.assertEqual(app.cmd_app(self._args()), 0)
+        self.assertIn("url: http://127.0.0.1:", out.getvalue())
+        self.assertIn("closed", out.getvalue())
+        self.assertFalse((Path(self.tmp.name) / "app.log").exists())
+        self.assertEqual(len(self.opened), 1)
+
+    def test_quiet_is_an_option_of_the_command(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(main(["app", "--help"]), 0)
+        self.assertIn("--quiet", stdout.getvalue())
+
+    def test_the_shortcut_starts_the_apps_own_python_without_a_window(self) -> None:
+        start = _load_start_script()
+        folder = Path(self.tmp.name) / "Åsa Öberg" / "Pixelbygget"
+        command = start.command(folder)  # type: ignore[attr-defined]
+        self.assertEqual(command, [str(folder / "python" / "python.exe"), "-m", "rutor", "app", "--quiet"])
+        environ = {"PATH": "/x", "PYTHONHOME": "/their/python", "PYTHONPATH": "/their/packages", "USERPROFILE": "p"}
+        made = start.environment(folder, environ)  # type: ignore[attr-defined]
+        # The person's own Python setup does not reach the app's Python.
+        self.assertNotIn("PYTHONHOME", made)
+        self.assertEqual(made["PYTHONPATH"], str(folder / "cli"))
+        self.assertEqual(made["PYTHONNOUSERSITE"], "1")
+        self.assertEqual((made["PATH"], made["USERPROFILE"]), ("/x", "p"))
+        self.assertEqual(environ["PYTHONHOME"], "/their/python")
+
+    def test_the_shortcut_starts_one_hidden_process_and_ends(self) -> None:
+        start = _load_start_script()
+        with patch("subprocess.Popen") as popen:
+            self.assertEqual(start.main(), 0)  # type: ignore[attr-defined]
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[1:], ["-m", "rutor", "app", "--quiet"])
+        options = popen.call_args.kwargs
+        self.assertEqual(options["stdin"], subprocess.DEVNULL)
+        self.assertEqual(options["stdout"], subprocess.DEVNULL)
+        self.assertEqual(options["stderr"], subprocess.DEVNULL)
+        # 0x08000000 is CREATE_NO_WINDOW: a console nobody sees, which every child inherits.
+        self.assertEqual(start.NO_WINDOW, 0x08000000)  # type: ignore[attr-defined]
+        popen.return_value.wait.assert_not_called()
+
+
 class PageFilesTests(unittest.TestCase):
     """The page's three files, read as text: what they may not hold and what they must."""
 
@@ -2297,6 +2656,13 @@ class PageFilesTests(unittest.TestCase):
             self.assertRegex(script, rf"\b{word}: \"", word)
         # The size is the manifest's, not a number written into the page.
         self.assertNotIn("25 GB", script)
+
+    def test_the_page_has_a_way_to_close_the_app(self) -> None:
+        page = self.read("index.html")
+        self.assertGreaterEqual(page.count(">Stäng Pixelbygget<"), 1)
+        self.assertIn('id="stangd"', page)
+        self.assertIn("Appen stängs. Du kan stänga fliken.", page)
+        self.assertIn('"api/quit"', self.read("app.js"))
 
     def test_the_page_can_say_a_newer_app_is_out(self) -> None:
         page = self.read("index.html")

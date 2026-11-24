@@ -193,13 +193,26 @@ class LocalPage:
         self._httpd.RequestHandlerClass = _handler(name, get, post, self.key, f"127.0.0.1:{self.port}", body_max)
         self.url = f"http://127.0.0.1:{self.port}/{self.key}/"
         self._thread: threading.Thread | None = None
+        # Set while serve_forever runs on the caller's own thread.
+        self._serving = threading.Event()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         self._thread.start()
 
     def serve_forever(self) -> None:
-        self._httpd.serve_forever()
+        self._serving.set()
+        try:
+            self._httpd.serve_forever()
+        finally:
+            self._serving.clear()
+
+    def end_serving(self) -> None:
+        """Make serve_forever return. For another thread than the one that is inside it."""
+        if self._serving.is_set():
+            # shutdown() waits for the loop to leave, and would wait for ever on a loop
+            # that never started.
+            self._httpd.shutdown()
 
     def stop(self) -> None:
         if self._thread is not None:

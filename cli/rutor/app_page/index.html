@@ -25,7 +25,7 @@
       <div class="matare"><i id="mobilmatare"></i></div>
     </div>
 
-    <div class="kropp">
+    <div class="kropp" id="kropp">
       <nav class="rad" aria-label="Stegen">
         <ol id="rad">
           <li><button type="button" data-steg="1"><span class="prick">1</span><span>Klarar datorn det?</span></button></li>
@@ -37,6 +37,7 @@
           <li><button type="button" data-steg="7"><span class="prick">7</span><span>Rita</span></button></li>
           <li><button type="button" data-steg="8"><span class="prick">8</span><span>Klart</span></button></li>
         </ol>
+        <button class="stang" type="button" data-stang>Stäng Pixelbygget</button>
       </nav>
 
       <div id="stegen">
@@ -208,6 +209,14 @@
 
       </div>
     </div>
+    <footer class="fot" id="fot">
+      <button class="lank" type="button" data-stang>Stäng Pixelbygget</button>
+    </footer>
+    <section class="steg" id="stangd" aria-labelledby="rubrik-stangd" hidden>
+      <h2 id="rubrik-stangd" tabindex="-1">Pixelbygget är stängt</h2>
+      <p>Appen stängs. Du kan stänga fliken.</p>
+      <p class="liten">Starta appen igen när du vill rita mer.</p>
+    </section>
   </main>
 </div>
 </body>
