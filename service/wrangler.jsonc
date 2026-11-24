@@ -29,6 +29,9 @@
   "vars": {
     // GitHub user id of the one admin.
     "ADMIN_GITHUB_ID": "10773507",
+    // Client id of the "Pixelbygget" OAuth app, the one in cli/rutor/config.py (public, not a secret).
+    // With the secret GITHUB_CLIENT_SECRET set as well, only tokens from `rutor login` are accepted.
+    "GITHUB_CLIENT_ID": "Ov23liulid4VoLnmJCVH",
     // "1" closes the service: every request but GET gets 503.
     "PIXELBYGGET_STANGD": "0",
     // Seconds a public read (sheets, cities, grid) is kept in memory per isolate. "0" turns it off.

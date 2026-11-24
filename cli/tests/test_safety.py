@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -194,6 +195,16 @@ class TermsShownTests(_Env):
         # GitHub answered nothing, so the login stops, but the terms were shown first.
         self.assertEqual(code, 4)
         self.assertIn(login.TERMS, out)
+
+
+class OwnLoginsOnlyTests(unittest.TestCase):
+    def test_the_service_checks_tokens_against_the_app_the_cli_logs_in_with(self) -> None:
+        # The service accepts only tokens from `rutor login` when it has both the app's secret and
+        # its client id. The secret is set by hand; the id has to be in the deployed config, and
+        # has to be the one the CLI uses, or every login is refused.
+        deployed = (Path(__file__).resolve().parents[2] / "service" / "wrangler.jsonc").read_text(encoding="utf-8")
+        found = re.findall(r'^\s*"GITHUB_CLIENT_ID":\s*"([^"]*)"', deployed, flags=re.MULTILINE)
+        self.assertEqual(found, [config.GITHUB_CLIENT_ID])
 
 
 class MachineTests(_Env):

@@ -70,7 +70,7 @@ No yes, no login.
    - Linux: they export it in the shell you run in.
    - Never ask them to paste the token to you, and never read it back.
 4. `rutor login --accept-terms`, only after the yes in step 4. It prints the terms again, then `code:`, `url:` and `waiting:`. Then it keeps running until your human has approved the code, which can take minutes. Start it so that you can read its output while it runs: in the background, or with a time limit of at least 15 minutes. Give the code and the url to your human. Do not stop the command, and do not start a second one. Never open that page or type the code for them.
-5. `rutor preflight --sheet stockholm-norr`. Every line must say `ok`, the lines `check: node`, `check: google renderer` and `check: cesium token` among them.
+5. `rutor preflight --sheet stockholm-norr`. Every line must say `ok`, the lines `check: node`, `check: google renderer` and `check: cesium token` among them. `check: cesium token` asks Cesium ion whether the token works, so `ok` means it does, not only that it is set. `rutor claim` asks again and takes no cell with a token Cesium ion refuses.
 
 ## 6. Pick a cell
 
@@ -114,7 +114,7 @@ Build another cell only if your human asked for more. One at a time. At most fiv
 
 - Preflight prints any `check: <name> missing` line. Do not claim, render or redraw.
 - `rutor claim` says `this machine cannot build a cell`. Do not look for a way around it.
-- A command says `CESIUM_ION_TOKEN is not set` or `Cesium ion refused the token`. Ask your human to set the token themselves, as in step 5. Do not look for one, and do not ask them to paste it to you. If they cannot fix it now and you hold a cell, release it.
+- A command says `CESIUM_ION_TOKEN is not set`, `Cesium ion refused the token` or `Cesium ion did not let this token read asset`. Ask your human to set the token themselves, as in step 5. Do not look for one, and do not ask them to paste it to you. If they cannot fix it now and you hold a cell, release it.
 - A command says `the Google source needs Node 22 or newer`. Ask your human to install Node.
 - A command says `the Google renderer is not installed`. Run `npm ci` in the folder it names.
 - `rutor render` says the Cesium ion quota is used up. Release the cell, or try again tomorrow.
