@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import os
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
+import zipfile
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from unittest.mock import patch
 
-from rutor import app_jobs, config
+from rutor import app_install, app_jobs, config, pipeline
 from rutor.errors import RutorError
+from rutor.localpage import Refusal
 from rutor.renderer import google
+from tests.test_app import FakeRun, wait_until
 
 # A user name with a space and with letters outside ASCII, as a Windows profile may have.
 PROFILE = "Åsa Öberg"
@@ -157,6 +167,539 @@ class ToolEnvIsUsedTests(_AppFolder):
         with patch("rutor.app_jobs.start_process", return_value="run") as start:
             app_jobs.start_rutor(["status"], {})
         self.assertEqual(start.call_args.args[1], {})
+
+
+# ---- the install job
+
+
+def node_zip(members: Mapping[str, bytes] | None = None) -> bytes:
+    """A zip shaped like Node's: one folder at the top, node.exe and npm inside it."""
+    if members is None:
+        members = {
+            "node-v24.14.0-win-x64/node.exe": b"node",
+            "node-v24.14.0-win-x64/node_modules/npm/bin/npm-cli.js": b"npm",
+        }
+    held = io.BytesIO()
+    with zipfile.ZipFile(held, "w") as archive:
+        for name, body in members.items():
+            archive.writestr(name, body)
+    return held.getvalue()
+
+
+class Children:
+    """Stands in for app_jobs.start_process: records each start and plays what the test scripted.
+
+    A child is named by what it is: "pip", "npm" or "model".
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[str], dict[str, str]]] = []
+        self.runs: dict[str, list[FakeRun]] = {}
+        self._scripts: dict[str, list[tuple[list[str], int, bool]]] = {}
+        # Called as a child starts, with its name and argv: a test makes the files a real
+        # child would have made, or looks at the disk at exactly that moment.
+        self.on_start: Callable[[str, list[str], dict[str, str]], None] | None = None
+
+    @staticmethod
+    def name(argv: list[str]) -> str:
+        if argv[1:4] == ["-m", "pip", "install"]:
+            return "pip"
+        if "ci" in argv and argv[1].endswith("npm-cli.js"):
+            return "npm"
+        if argv[1] == "-c" and pipeline.MODEL_ID in argv:
+            return "model"
+        raise AssertionError(f"a child nobody expected: {argv}")
+
+    def script(self, name: str, lines: list[str], code: int = 0, hold: bool = False) -> None:
+        self._scripts.setdefault(name, []).append((list(lines), code, hold))
+
+    def __call__(self, argv: list[str], extra_env: Mapping[str, str]) -> FakeRun:
+        name = self.name(argv)
+        self.calls.append((name, list(argv), dict(extra_env)))
+        queued = self._scripts.get(name)
+        lines, code, hold = queued.pop(0) if queued else ([], 0, False)
+        run = FakeRun(lines, code=code, hold=hold)
+        self.runs.setdefault(name, []).append(run)
+        if self.on_start is not None:
+            self.on_start(name, list(argv), dict(extra_env))
+        return run
+
+    def names(self) -> list[str]:
+        return [name for name, _argv, _env in self.calls]
+
+
+class Fetches:
+    """Stands in for the download: writes what the test says a server would send."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.calls: list[tuple[str, Path, int]] = []
+        # Bytes after which the connection drops, once.
+        self.drop_after: int | None = None
+
+    def __call__(self, url: str, target: Path, progress: Callable[[int], None]) -> None:
+        have = target.stat().st_size if target.exists() else 0
+        self.calls.append((url, target, have))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("ab") as out:
+            rest = self.body[have:]
+            if self.drop_after is not None:
+                cut, self.drop_after = self.drop_after, None
+                out.write(rest[:cut])
+                out.flush()
+                progress(have + len(rest[:cut]))
+                raise urllib.error.URLError("the connection dropped")
+            out.write(rest)
+        progress(len(self.body))
+
+
+class _Install(_AppFolder):
+    """An app install on a disk with room, with a lock, a renderer folder and an empty model cache."""
+
+    LOCK = "torch==2.11.0+cu128 --hash=sha256:" + "cd" * 32 + "\n"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.zip = node_zip()
+        (self.app / "requirements-app.lock").write_text(self.LOCK, encoding="utf-8")
+        self.install(json.dumps({"version": "0.1.0", "lock_sha256": hashlib.sha256(self.LOCK.encode()).hexdigest()}))
+        python = self.app / "python"
+        python.mkdir()
+        (python / "python.exe").write_bytes(b"")
+        self.render = self.app / "cli" / "google-render"
+        self.render.mkdir()
+        (self.render / "package-lock.json").write_text('{"lockfileVersion": 3}', encoding="utf-8")
+        (self.render / "render.mjs").write_text("", encoding="utf-8")
+        self.hub = Path(self.tmp.name).resolve() / PROFILE / ".cache" / "huggingface" / "hub"
+        self.manifest_path = Path(self.tmp.name) / "app_install.json"
+        self.manifest()
+        for target, value in (
+            ("rutor.app_install.MANIFEST", self.manifest_path),
+            ("rutor.app_install._python", lambda: python / "python.exe"),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        environ = patch.dict(os.environ, {"HF_HUB_CACHE": str(self.hub)})
+        environ.start()
+        self.addCleanup(environ.stop)
+        self.children = Children()
+        self.children.on_start = self.as_a_real_child
+        self.fetches = Fetches(self.zip)
+        self.free = 300.0
+        self.installer = app_install.Installer(self.children, self.fetches, lambda: self.free)
+
+    def manifest(self, *, stack: int = 4000, renderer: int = 3000, model: int = 2000, sha256: str | None = None) -> None:
+        self.manifest_path.write_text(
+            json.dumps(
+                {
+                    "downloads": {
+                        "node": {
+                            "version": "24.14.0",
+                            "url": "https://nodejs.org/dist/v24.14.0/node-v24.14.0-win-x64.zip",
+                            "sha256": sha256 or hashlib.sha256(self.zip).hexdigest(),
+                            "size": len(self.zip),
+                        }
+                    },
+                    "sizes": {"stack": stack, "renderer": renderer, "model": model},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def as_a_real_child(self, name: str, argv: list[str], env: dict[str, str]) -> None:
+        if name == "npm":
+            for part in (("cesium", "Build", "Cesium", "Cesium.js"), ("puppeteer", "package.json")):
+                made = self.render.joinpath("node_modules", *part)
+                made.parent.mkdir(parents=True, exist_ok=True)
+                made.write_text("", encoding="utf-8")
+
+    def model_blobs(self, size: int) -> None:
+        blobs = self.hub / ("models--" + pipeline.MODEL_ID.replace("/", "--")) / "blobs"
+        blobs.mkdir(parents=True, exist_ok=True)
+        (blobs / "abc.incomplete").write_bytes(b"\0" * size)
+
+    def state(self) -> dict[str, object]:
+        return self.installer.state()
+
+
+class InstallJobTests(_Install):
+    def test_the_phases_run_in_order(self) -> None:
+        self.assertEqual(self.state()["phase"], "idle")
+        self.installer.run()
+        self.assertEqual(self.children.names(), ["pip", "npm", "model"])
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("done", ""))
+        python = str(self.app / "python" / "python.exe")
+        _name, pip, pip_env = self.children.calls[0]
+        self.assertEqual(
+            pip,
+            [
+                python, "-m", "pip", "install", "--require-hashes", "--no-input",
+                "-r", str(self.app / "requirements-app.lock"),
+                "--extra-index-url", "https://download.pytorch.org/whl/cu128",
+            ],
+        )  # fmt: skip
+        # What pip keeps while it works lies in the app's own folder, under the odd name too.
+        self.assertEqual(pip_env["PIP_CACHE_DIR"], str(self.app / "pip-cache"))
+        self.assertIn(PROFILE, pip_env["TEMP"])
+        _name, npm, npm_env = self.children.calls[1]
+        node = self.app / "node"
+        self.assertEqual(npm[:3], [str(node / "node.exe"), str(node / "node_modules" / "npm" / "bin" / "npm-cli.js"), "ci"])
+        self.assertEqual(npm[npm.index("--prefix") + 1], str(self.render))
+        self.assertEqual(npm_env["PATH"].split(os.pathsep)[0], str(node))
+        _name, model, _env = self.children.calls[2]
+        self.assertEqual(model[0], python)
+        self.assertEqual(
+            model[-4:],
+            [pipeline.MODEL_ID, pipeline.PINS["model_revision"], pipeline.LORA_ID, pipeline.PINS["lora_revision"]],
+        )
+        # Node was fetched once, from the pinned address, and unpacked without its top folder.
+        self.assertEqual([url for url, _target, _have in self.fetches.calls], ["https://nodejs.org/dist/v24.14.0/node-v24.14.0-win-x64.zip"])
+        self.assertEqual((node / "node.exe").read_bytes(), b"node")
+        self.assertEqual((node / "node_modules" / "npm" / "bin" / "npm-cli.js").read_bytes(), b"npm")
+        self.assertEqual(self.state()["done_gb"], self.state()["total_gb"])
+
+    def test_nothing_is_left_behind_after_the_fetch(self) -> None:
+        self.installer.run()
+        for left in ("pip-cache", "tmp", "downloads", "node.partial"):
+            self.assertFalse((self.app / left).exists(), left)
+
+    def test_a_phase_that_is_already_there_is_skipped(self) -> None:
+        self.installer.run()
+        self.assertEqual(len(self.fetches.calls), 1)
+        again = app_install.Installer(self.children, self.fetches, lambda: self.free)
+        again.run()
+        # Node, the stack and the renderer are there. The model child is the one that knows
+        # whether the model is whole, so it is always asked.
+        self.assertEqual(self.children.names(), ["pip", "npm", "model", "model"])
+        self.assertEqual(len(self.fetches.calls), 1)
+        self.assertEqual(again.state()["phase"], "done")
+
+    def test_a_node_folder_of_another_version_is_fetched_again(self) -> None:
+        self.installer.run()
+        (self.app / "node" / app_install.NODE_MARKER).write_text("22.1.0", encoding="utf-8")
+        self.installer.run()
+        self.assertEqual(len(self.fetches.calls), 2)
+
+    def test_a_new_lock_installs_the_stack_again(self) -> None:
+        self.installer.run()
+        lock = self.LOCK + "numpy==2.4.6 --hash=sha256:" + "ef" * 32 + "\n"
+        (self.app / "requirements-app.lock").write_text(lock, encoding="utf-8")
+        self.install(json.dumps({"version": "0.2.0", "lock_sha256": hashlib.sha256(lock.encode()).hexdigest()}))
+        self.installer.run()
+        self.assertEqual(self.children.names().count("pip"), 2)
+
+    def test_a_phase_can_be_asked_for_again(self) -> None:
+        # The page asks tools() after a run. When a tool is still missing, the phase that
+        # brings it is done again, whatever the job itself believes.
+        self.installer.run()
+        self.installer.run(redo=("stack", "renderer"))
+        self.assertEqual(self.children.names(), ["pip", "npm", "model", "pip", "npm", "model"])
+
+    def test_a_failed_download_goes_on_where_it_stopped(self) -> None:
+        self.fetches.drop_after = 50
+        self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("failed", "network"))
+        self.assertEqual(self.children.names(), ["pip"])
+        target = self.fetches.calls[0][1]
+        self.assertEqual(target.stat().st_size, 50)
+        self.assertFalse((self.app / "node").exists())
+        self.installer.run()
+        # The same file, which still held what had arrived.
+        self.assertEqual([(call[1], call[2]) for call in self.fetches.calls], [(target, 0), (target, 50)])
+        self.assertEqual(self.state()["phase"], "done")
+        # The stack was not installed twice.
+        self.assertEqual(self.children.names(), ["pip", "npm", "model"])
+
+    def test_a_file_that_changed_upstream_is_refused(self) -> None:
+        self.manifest(sha256="12" * 32)
+        self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("failed", "changed"))
+        self.assertFalse(self.fetches.calls[0][1].exists())
+        self.assertFalse((self.app / "node").exists())
+        self.assertFalse((self.app / "node.partial").exists())
+        self.assertEqual(self.children.names(), ["pip"])
+
+    def test_a_file_larger_than_pinned_is_refused_while_it_arrives(self) -> None:
+        targets: list[Path] = []
+
+        def fetch(url: str, target: Path, progress: Callable[[int], None]) -> None:
+            targets.append(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(self.zip + b"more")
+            progress(len(self.zip) + 4)
+            # A server that never stops sending would fill the disk before any hash is checked.
+            raise AssertionError("the download went on past the pinned size")
+
+        self.installer = app_install.Installer(self.children, fetch, lambda: self.free)
+        self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("failed", "changed"))
+        self.assertFalse(targets[0].exists())
+        self.assertFalse((self.app / "node").exists())
+
+    def test_a_file_of_the_right_size_and_the_wrong_bytes_is_refused(self) -> None:
+        self.fetches.body = bytes(len(self.zip))
+        self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("failed", "changed"))
+        self.assertFalse(self.fetches.calls[0][1].exists())
+        self.assertFalse((self.app / "node").exists())
+
+    def test_a_lock_that_is_not_the_installers_is_refused(self) -> None:
+        (self.app / "requirements-app.lock").write_text("evil==1.0\n", encoding="utf-8")
+        self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("failed", "changed"))
+        self.assertEqual(self.children.names(), [])
+
+    def test_a_member_that_leaves_the_folder_is_refused(self) -> None:
+        for members in (
+            {"node/node.exe": b"node", "node/../../evil.txt": b"x"},
+            {"node/node.exe": b"node", "/evil.txt": b"x"},
+            {"node/node.exe": b"node", "other/evil.txt": b"x"},
+            {"node/node.exe": b"node", "node/C:/evil.txt": b"x"},
+            {"node/node.exe": b"node", "node\\..\\..\\evil.txt": b"x"},
+        ):
+            with self.subTest(members=sorted(members)):
+                self.zip = node_zip(members)
+                self.fetches = Fetches(self.zip)
+                self.manifest()
+                installer = app_install.Installer(Children(), self.fetches, lambda: self.free)
+                installer.run()
+                self.assertEqual((installer.state()["phase"], installer.state()["problem"]), ("failed", "failed"))
+                self.assertFalse((self.app / "node").exists())
+                self.assertFalse((self.app / "node.partial").exists())
+                self.assertEqual(sorted(path.name for path in self.app.rglob("evil.txt")), [])
+                self.assertFalse((self.app.parent / "evil.txt").exists())
+
+    def test_a_full_disk_is_said_before_it_starts(self) -> None:
+        self.manifest(model=20_000_000_000)
+        self.free = 5.0
+        self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("failed", "disk"))
+        self.assertEqual(self.children.names(), [])
+        self.assertEqual(self.fetches.calls, [])
+
+    def test_a_full_disk_during_pip_is_said_as_disk(self) -> None:
+        self.children.script(
+            "pip",
+            ["ERROR: Could not install packages due to an OSError: [Errno 28] No space left on device"],
+            code=1,
+        )
+        self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("failed", "disk"))
+        self.assertEqual(self.children.names(), ["pip"])
+        # A half-installed stack is not marked as there.
+        self.installer.run()
+        self.assertEqual(self.children.names()[:2], ["pip", "pip"])
+
+    def test_what_a_child_says_names_the_problem(self) -> None:
+        cases = (
+            ("pip", "ERROR: THESE PACKAGES DO NOT MATCH THE HASHES FROM THE REQUIREMENTS FILE.", 1, "changed"),
+            ("pip", "NewConnectionError: Failed to establish a new connection: getaddrinfo failed", 1, "network"),
+            ("pip", "ERROR: something nobody has seen", 2, "failed"),
+            ("npm", "npm error code EINTEGRITY", 1, "changed"),
+            ("npm", "npm error code ENOSPC", 1, "disk"),
+            ("npm", "npm error code ETIMEDOUT", 1, "network"),
+            ("model", "ended: ConnectError", 4, "network"),
+            ("model", "ended: OSError", 6, "disk"),
+            ("model", "ended: ValueError", 1, "failed"),
+        )
+        for name, line, code, problem in cases:
+            with self.subTest(child=name, line=line):
+                children = Children()
+                children.on_start = self.as_a_real_child
+                children.script(name, [line], code=code)
+                installer = app_install.Installer(children, self.fetches, lambda: self.free)
+                installer.run()
+                self.assertEqual((installer.state()["phase"], installer.state()["problem"]), ("failed", problem))
+                self.assertEqual(children.names()[-1], name)
+
+    def test_a_disk_that_filled_is_said_as_disk_whatever_the_child_said(self) -> None:
+        self.children.script("pip", ["Traceback (most recent call last):"], code=1)
+        self.children.on_start = lambda name, argv, env: setattr(self, "free", 0.2)
+        self.installer.run()
+        self.assertEqual(self.state()["problem"], "disk")
+
+    def test_stop_ends_the_running_child(self) -> None:
+        self.children.script("pip", ["Collecting torch"], hold=True)
+        thread = threading.Thread(target=self.installer.run, daemon=True)
+        thread.start()
+        wait_until(lambda: bool(self.children.runs.get("pip")) and self.state()["phase"] == "stack")
+        self.installer.stop()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(self.children.runs["pip"][0].stopped)
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("stopped", ""))
+        self.assertEqual(self.children.names(), ["pip"])
+
+    def test_stop_ends_a_download(self) -> None:
+        def fetch(url: str, target: Path, progress: Callable[[int], None]) -> None:
+            self.installer.stop()
+            progress(10)
+            raise AssertionError("the download went on after a stop")
+
+        self.installer = app_install.Installer(self.children, fetch, lambda: self.free)
+        self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("stopped", ""))
+        self.assertEqual(self.children.names(), ["pip"])
+
+    def test_a_second_run_at_the_same_time_is_refused(self) -> None:
+        self.children.script("pip", [], hold=True)
+        thread = threading.Thread(target=self.installer.run, daemon=True)
+        thread.start()
+        wait_until(lambda: bool(self.children.runs.get("pip")))
+        with self.assertRaises(Refusal) as caught:
+            self.installer.run()
+        self.assertEqual(caught.exception.code, "busy")
+        self.installer.stop()
+        thread.join(timeout=10)
+        self.assertEqual(self.children.names(), ["pip"])
+
+    def test_pip_is_never_run_without_hashes(self) -> None:
+        self.installer.run()
+        self.assertIn("--require-hashes", self.children.calls[0][1])
+        real_lock = Path(__file__).resolve().parents[2] / "requirements-app.lock"
+        if not real_lock.is_file():
+            self.skipTest("requirements-app.lock is written by Task 7")
+        self.assertNotIn("git+", real_lock.read_text(encoding="utf-8"))
+
+    def test_nothing_is_installed_into_a_hand_made_install(self) -> None:
+        (self.app / "install.json").unlink()
+        with self.assertRaises(Refusal) as caught:
+            self.installer.run()
+        self.assertEqual(caught.exception.code, "not_an_app")
+        self.assertEqual(self.children.names(), [])
+        self.assertEqual(self.fetches.calls, [])
+        self.assertEqual(self.state(), {"phase": "idle", "done_gb": 0.0, "total_gb": 0.0, "problem": ""})
+
+    def test_nothing_is_installed_into_another_python(self) -> None:
+        # install.json copied into a clone does not make it an app install: pip would
+        # install into whatever Python the person runs.
+        with patch("rutor.app_install._python", lambda: Path(self.tmp.name) / "venv" / "bin" / "python"):
+            with self.assertRaises(Refusal) as caught:
+                self.installer.run()
+        self.assertEqual(caught.exception.code, "not_an_app")
+        self.assertEqual(self.children.names(), [])
+
+    def test_progress_is_what_is_on_the_disk(self) -> None:
+        self.assertEqual(self.state()["total_gb"], (4000 + len(self.zip) + 3000 + 2000) / 1e9)
+        self.assertEqual(self.state()["done_gb"], 0.0)
+        self.model_blobs(600)
+        fresh = app_install.Installer(self.children, self.fetches, lambda: self.free)
+        self.assertEqual(fresh.state()["done_gb"], 600 / 1e9)
+        self.assertEqual(self.children.names(), [])
+        # More on the disk than the pinned size is never shown as more than all of it.
+        self.model_blobs(5000)
+        fresh = app_install.Installer(self.children, self.fetches, lambda: self.free)
+        self.assertEqual(fresh.state()["done_gb"], 2000 / 1e9)
+
+    def test_progress_counts_what_pip_has_fetched(self) -> None:
+        seen: list[object] = []
+
+        def look(name: str, argv: list[str], env: dict[str, str]) -> None:
+            self.as_a_real_child(name, argv, env)
+            if name == "pip":
+                Path(env["TEMP"], "pip-unpack-1").mkdir(parents=True)
+                Path(env["TEMP"], "pip-unpack-1", "torch.whl").write_bytes(b"\0" * 1000)
+                seen.append(self.installer.state()["done_gb"])
+
+        self.children.on_start = look
+        self.installer.run()
+        self.assertEqual(seen, [1000 / 1e9])
+
+    def test_the_last_lines_are_kept_for_a_report(self) -> None:
+        self.children.script("pip", [f"Collecting package-{number}" for number in range(40)], code=1)
+        self.installer.run()
+        lines = self.installer.lines()
+        self.assertEqual(len(lines), 20)
+        self.assertEqual(lines[-1], "Collecting package-39")
+
+    def test_a_pin_that_is_empty_fetches_no_model(self) -> None:
+        with patch.dict(pipeline.PINS, {"model_revision": ""}):
+            self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("failed", "failed"))
+        self.assertNotIn("model", self.children.names())
+
+
+class _Response:
+    def __init__(self, status: int, body: bytes, headers: dict[str, str] | None = None) -> None:
+        self.status = status
+        self.headers = headers or {}
+        self._body = io.BytesIO(body)
+
+    def read(self, size: int = -1) -> bytes:
+        return self._body.read(size)
+
+    def __enter__(self) -> _Response:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class FetchTests(unittest.TestCase):
+    URL = "https://nodejs.org/dist/v24.14.0/node-v24.14.0-win-x64.zip"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.target = Path(self.tmp.name) / PROFILE / "downloads" / "node.zip"
+        self.requests: list[dict[str, str]] = []
+
+    def opener(self, response: _Response) -> Callable[..., _Response]:
+        def open_url(request: object, timeout: float = 0) -> _Response:
+            self.requests.append({key.lower(): value for key, value in request.header_items()})  # type: ignore[attr-defined]
+            return response
+
+        return open_url
+
+    def test_a_fresh_download_is_written_and_counted(self) -> None:
+        seen: list[int] = []
+        app_install.fetch_url(self.URL, self.target, seen.append, opener=self.opener(_Response(200, b"abcdef")))
+        self.assertEqual(self.target.read_bytes(), b"abcdef")
+        self.assertEqual(seen[-1], 6)
+        self.assertNotIn("range", self.requests[0])
+
+    def test_a_download_goes_on_from_what_is_there(self) -> None:
+        self.target.parent.mkdir(parents=True)
+        self.target.write_bytes(b"abc")
+        seen: list[int] = []
+        response = _Response(206, b"def", {"Content-Range": "bytes 3-5/6"})
+        app_install.fetch_url(self.URL, self.target, seen.append, opener=self.opener(response))
+        self.assertEqual(self.requests[0]["range"], "bytes=3-")
+        self.assertEqual(self.target.read_bytes(), b"abcdef")
+        self.assertEqual(seen[-1], 6)
+
+    def test_a_server_that_starts_over_is_written_from_the_start(self) -> None:
+        self.target.parent.mkdir(parents=True)
+        self.target.write_bytes(b"abc")
+        app_install.fetch_url(self.URL, self.target, lambda n: None, opener=self.opener(_Response(200, b"abcdef")))
+        self.assertEqual(self.target.read_bytes(), b"abcdef")
+
+    def test_a_part_from_another_place_in_the_file_is_not_joined_on(self) -> None:
+        self.target.parent.mkdir(parents=True)
+        self.target.write_bytes(b"abc")
+        response = _Response(206, b"xyz", {"Content-Range": "bytes 0-2/6"})
+        with self.assertRaises(OSError):
+            app_install.fetch_url(self.URL, self.target, lambda n: None, opener=self.opener(response))
+        self.assertEqual(self.target.read_bytes(), b"abc")
+
+    def test_only_https_is_fetched(self) -> None:
+        for url in ("http://nodejs.org/x.zip", "file:///etc/passwd", "ftp://nodejs.org/x.zip"):
+            with self.assertRaises(OSError):
+                app_install.fetch_url(url, self.target, lambda n: None, opener=self.opener(_Response(200, b"x")))
+        self.assertEqual(self.requests, [])
+        self.assertFalse(self.target.exists())
+
+    def test_a_redirect_to_another_host_is_not_followed(self) -> None:
+        follow = app_install._KnownHosts("nodejs.org")
+        request = urllib.request.Request(self.URL)
+        for elsewhere in ("https://evil.test/node.zip", "http://nodejs.org/node.zip", "https://nodejs.org.evil.test/x"):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                follow.redirect_request(request, io.BytesIO(), 302, "Found", {}, elsewhere)  # type: ignore[arg-type]
+            caught.exception.close()
+        for allowed in ("https://nodejs.org/other.zip", "https://objects.githubusercontent.com/x"):
+            followed = follow.redirect_request(request, io.BytesIO(), 302, "Found", {}, allowed)  # type: ignore[arg-type]
+            self.assertEqual(followed.full_url, allowed)  # type: ignore[union-attr]
 
 
 if __name__ == "__main__":
