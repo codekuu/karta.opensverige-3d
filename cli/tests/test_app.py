@@ -17,8 +17,9 @@ import threading
 import time
 import tomllib
 import unittest
+import zoneinfo
 from collections.abc import Callable, Iterator, Mapping
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -367,6 +368,67 @@ class ChecksTests(_OwnHome):
         blank = app.version({})
         self.assertTrue(blank["current"])
         self.assertEqual(blank["wanted"], "")
+
+
+# A child Python in which the time zone database is missing, as on a Windows without tzdata.
+_NO_TZ_DATABASE = (
+    "import zoneinfo\n"
+    "def _missing(key):\n"
+    "    raise zoneinfo.ZoneInfoNotFoundError('No time zone found with key ' + key)\n"
+    "zoneinfo.ZoneInfo = _missing\n"
+)
+
+
+def _child(script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60, check=False)
+
+
+class WindowsWithoutTimeZonesTests(unittest.TestCase):
+    """Windows has no time zone database of its own. Found on the first real machine."""
+
+    def test_every_command_starts_without_the_time_zone_database(self) -> None:
+        done = _child(_NO_TZ_DATABASE + "from rutor.__main__ import main\nraise SystemExit(main(['--version']))\n")
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertTrue(done.stdout.startswith("rutor "), done.stdout)
+
+    def test_loading_the_page_does_not_load_the_price_check(self) -> None:
+        # The price is advice. Nothing about it may decide whether rutor starts.
+        done = _child("import sys\nimport rutor.app\nprint('rutor.se3_price' in sys.modules)\n")
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, "False"), done.stderr)
+
+    def test_the_price_check_knows_swedish_time_by_its_rule(self) -> None:
+        done = _child(
+            _NO_TZ_DATABASE
+            + "from datetime import datetime, timezone\n"
+            + "from rutor import se3_price\n"
+            + "for month in (1, 7):\n"
+            + "    print(datetime(2026, month, 15, 12, tzinfo=timezone.utc).astimezone(se3_price.STOCKHOLM).isoformat())\n"
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.split(), ["2026-01-15T13:00:00+01:00", "2026-07-15T14:00:00+02:00"])
+
+    def test_the_rule_agrees_with_the_database_hour_by_hour(self) -> None:
+        try:
+            real = zoneinfo.ZoneInfo("Europe/Stockholm")
+        except zoneinfo.ZoneInfoNotFoundError:
+            self.skipTest("this machine has no time zone database to compare with")
+        rule = se3_price.SwedishTime()
+        instant = datetime(2025, 12, 31, 22, 30, tzinfo=timezone.utc)
+        end = datetime(2028, 1, 2, tzinfo=timezone.utc)
+        while instant < end:
+            by_rule = instant.astimezone(rule)
+            by_database = instant.astimezone(real)
+            self.assertEqual(by_rule.isoformat(), by_database.isoformat())
+            self.assertEqual(by_rule.tzname(), by_database.tzname())
+            # And the other way: a clock time on the wall, read back as an instant.
+            wall = by_database.replace(tzinfo=None)
+            again = wall.replace(tzinfo=rule, fold=by_database.fold)
+            self.assertEqual(again.utcoffset(), by_database.utcoffset(), wall)
+            instant += timedelta(minutes=30)
+
+    def test_a_price_check_that_cannot_load_is_unknown(self) -> None:
+        with patch.dict(sys.modules, {"rutor.se3_price": None}):
+            self.assertEqual(app.price(), {"decision": "unknown", "after": ""})
 
 
 class FakeRun:

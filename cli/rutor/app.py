@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import importlib
 import json
 import os
 import platform
@@ -26,12 +27,17 @@ import webbrowser
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from rutor import __version__, api, app_jobs, commands, config, login, pipeline, se3_price
+from rutor import __version__, api, app_jobs, commands, config, login, pipeline
 from rutor.errors import RutorError, bad_input, environment, network
 from rutor.localpage import LocalPage, Refusal, Reply, json_reply
 from rutor.renderer import google
 from rutor.renderer.sources import SHEET_KINDS
+
+if TYPE_CHECKING:
+    # For the type of one argument only. See price() for why it is not loaded here.
+    from rutor import se3_price
 
 
 # ---- what the page knows before a job
@@ -218,17 +224,21 @@ def terms() -> list[str]:
 
 
 def price(
-    fetch: Callable[[date], list[se3_price.Slot] | None] = se3_price.fetch_prices,
+    fetch: Callable[[date], list[se3_price.Slot] | None] | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> dict[str, str]:
     """What se3_price.main decides, up to evaluate. A price that cannot be read never stops the page."""
     try:
-        now = clock() if clock is not None else datetime.now(se3_price.STOCKHOLM)
-        now = now.astimezone(se3_price.STOCKHOLM)
-        today = fetch(now.date())
+        # Loaded here and not with this module: the price is advice, and a machine where the
+        # price check cannot even load must still be able to start every rutor command.
+        prices = importlib.import_module("rutor.se3_price")
+        now = clock() if clock is not None else datetime.now(prices.STOCKHOLM)
+        now = now.astimezone(prices.STOCKHOLM)
+        read = fetch if fetch is not None else prices.fetch_prices
+        today = read(now.date())
         next_date = now.date() + timedelta(days=1)
-        tomorrow = fetch(next_date)
-        report = se3_price.evaluate(now, today, tomorrow, next_date)
+        tomorrow = read(next_date)
+        report = prices.evaluate(now, today, tomorrow, next_date)
         decision = report.get("decision")
         if decision == "RUN":
             return {"decision": "RUN", "after": ""}
