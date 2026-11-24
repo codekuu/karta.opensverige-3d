@@ -19,12 +19,15 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from rutor import config
+from rutor import __version__, config
 from rutor.errors import RutorError, environment, network
 from rutor.frame import ecef as _ecef
 from rutor.frame import mix as _mix
@@ -46,9 +49,16 @@ LIGHT_INTENSITY = 2.2
 # A render with less spread than this is the black background: no tiles arrived.
 MIN_SPREAD = 4.0
 NODE_TIMEOUT = 900
+# Where Cesium ion says whether a token may read the asset. The render asks the same address.
+ION_ENDPOINT = f"https://api.cesium.com/v1/assets/{ION_ASSET}/endpoint"
+ION_TIMEOUT = 30
+ION_ANSWER_BYTES = 4096
+# Cesium's own word for a refusal, such as INVALID_TOKEN. Anything else from outside is dropped.
+_ION_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,39}")
 
 Runner = Callable[[list[str], dict[str, str]], tuple[int, str, str]]
 Which = Callable[[str], str | None]
+Asker = Callable[[str], tuple[int, str]]
 
 
 def default_render_dir() -> Path:
@@ -140,6 +150,88 @@ def token_missing(env: Mapping[str, str] | None = None) -> str | None:
     )
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would carry the token to wherever it points, so none is followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        del req, fp, msg, headers, newurl
+        raise network(f"Cesium ion answered with a redirect ({code}); the token was not sent on")
+
+
+def _ask_ion(token: str, url: str = ION_ENDPOINT) -> tuple[int, str]:
+    """Ask Cesium ion whether the token may read the asset. Returns the status and Cesium's code.
+
+    The token goes in a header, never in the address, where a proxy or a log would keep it.
+    """
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": f"rutor/{__version__}",
+        },
+    )
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(request, timeout=ION_TIMEOUT) as response:
+            return int(response.status), ""
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read(ION_ANSWER_BYTES)
+        except OSError:
+            raw = b""
+        finally:
+            exc.close()
+        try:
+            answer = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            answer = None
+        code = answer.get("code") if isinstance(answer, dict) else None
+        return int(exc.code), code if isinstance(code, str) and _ION_CODE.fullmatch(code) else ""
+    except urllib.error.URLError as exc:
+        raise network(f"could not reach Cesium ion to check the token ({exc.reason})") from exc
+    except OSError as exc:
+        raise network(f"could not reach Cesium ion to check the token ({exc.__class__.__name__})") from exc
+
+
+def token_refused(env: Mapping[str, str] | None = None, ask: Asker | None = None) -> str | None:
+    """What Cesium ion says is wrong with the token, or None when it may read the asset.
+
+    Asked before a cell is locked: a token that is only set, and wrong, fails at the render with
+    the cell already held for 48 hours. Raises a network error when Cesium ion cannot be asked,
+    since that says nothing about the token. The token itself is never part of a message.
+    """
+    environ = os.environ if env is None else env
+    token = environ.get(TOKEN_ENV, "").strip()
+    if not token:
+        return token_missing(environ)
+    again = f"The person at this machine sets {TOKEN_ENV} again, with the whole token, once"
+    if any(ch.isspace() or not ch.isprintable() for ch in token):
+        return f"the token in {TOKEN_ENV} has a space or a line break inside it. {again}"
+    status, code = (ask or _ask_ion)(token)
+    said = f"{status} {code}".strip()
+    if status == 200:
+        return None
+    if status == 401:
+        dots = token.count(".")
+        shape = "" if dots == 2 else f" It has {dots} dots where a token has two, so it was pasted twice or cut short."
+        return f"Cesium ion refused the token in {TOKEN_ENV} ({said}).{shape} {again}"
+    if status in (403, 404):
+        return (
+            f"Cesium ion did not let this token read asset {ION_ASSET} ({said}). The person at this machine "
+            "checks at https://ion.cesium.com that the token has the scope assets:read and that "
+            "Google Photorealistic 3D Tiles is among the account's assets"
+        )
+    raise network(f"Cesium ion answered {said} when asked about the token; nothing was locked, try again later")
+
+
+def token_unusable(env: Mapping[str, str] | None = None, ask: Asker | None = None) -> str | None:
+    """Why the token cannot be used right now, as one line for preflight, or None."""
+    try:
+        return token_refused(env, ask)
+    except RutorError as exc:
+        return exc.message
+
+
 def node_missing(which: Which | None = None, run: Runner | None = None, env: Mapping[str, str] | None = None) -> str | None:
     try:
         _node(which or shutil.which, run or _run, dict(os.environ if env is None else env))
@@ -161,9 +253,14 @@ def not_ready(
     which: Which | None = None,
     run: Runner | None = None,
     render_dir: Path | None = None,
+    ask: Asker | None = None,
 ) -> str | None:
-    """The first thing this machine lacks for a Google sheet, or None. Asked before a cell is locked."""
-    return token_missing(env) or node_missing(which, run, env) or renderer_missing(render_dir)
+    """The first thing this machine lacks for a Google sheet, or None. Asked before a cell is locked.
+
+    What the machine itself lacks comes first and needs no network. Cesium ion is asked about the
+    token last, and a network error is raised when it cannot be asked.
+    """
+    return token_missing(env) or node_missing(which, run, env) or renderer_missing(render_dir) or token_refused(env, ask)
 
 
 def _save_rgb(raw: bytes, out: Path) -> None:

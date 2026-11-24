@@ -150,8 +150,8 @@ def cmd_claim(args: argparse.Namespace) -> int:
     problem = _gpu_missing()
     if problem is not None:
         raise environment(f"this machine cannot build a cell: {problem}")
-    # The same for a Google sheet: without Node, the renderer and the human's own token the
-    # render fails with the cell already taken from everyone else.
+    # The same for a Google sheet: without Node, the renderer and a token Cesium ion accepts,
+    # the render fails with the cell already taken from everyone else.
     if SHEET_KINDS.get(args.sheet) == "google":
         problem = google.not_ready()
         if problem is not None:
@@ -352,7 +352,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         checks += [
             ("node", google.node_missing),
             ("google renderer", google.renderer_missing),
-            ("cesium token", google.token_missing),
+            ("cesium token", google.token_unusable),
         ]
     if not getattr(args, "machine", False):
         checks += [

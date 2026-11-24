@@ -2,6 +2,18 @@
 
 What we tried, what we measured and what we changed. Newest first. One entry per finding, with the number that decided it. Images, renders and raw logs stay outside the repository; this file keeps the conclusions.
 
+## 2026-11-24
+
+### The token is asked about before a cell is locked
+The first real cell was locked for 48 hours with a token Cesium ion refused, because the check only looked for a value. `rutor preflight --sheet` and `rutor claim` now ask Cesium ion.
+- **One request tells a good token from a bad one.** `GET https://api.cesium.com/v1/assets/2275207/endpoint` with the token as a Bearer header answers 200 for a working token and 401 `INVALID_TOKEN` for a made-up one. Both were tried against Cesium ion itself, the working one on the builder's own machine with only the status printed.
+- **The token goes in a header, never in the address,** and a redirect is not followed. Cesium's own code is passed on only when it is one plain word; any other text from outside is dropped.
+- **A token pasted twice is told apart by its dots.** A token has two. On a 401 with any other number the message says so. The token itself is never part of a message.
+- **Cesium ion being down is not a bad token.** It ends as a network failure (exit 4) with nothing locked, where a refused token is exit 3. Preflight prints either as one line.
+- **What the machine lacks is still named first,** without the network: a missing token, Node or renderer is reported before Cesium ion is asked.
+- **A patch stopped out of order stays.** The fake service patches the card check while it runs. A test that patched the same check on top and stopped later left a mock behind, and four machine tests in another file failed. Do not patch what the fake service already patches.
+- **Not tried:** what Cesium ion answers for a real token that lacks the asset or the scope. 403 and 404 are treated as that, with a message that says what to look at.
+
 ## 2026-11-23
 
 ### The first volunteer cell is on the map
