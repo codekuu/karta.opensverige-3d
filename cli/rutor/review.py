@@ -23,23 +23,18 @@ not to the tile service.
 from __future__ import annotations
 
 import argparse
-import hmac
 import json
 import re
-import secrets
 import struct
-import sys
 import threading
 import time
-import traceback
 import webbrowser
-from collections.abc import Callable
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from rutor import api, config
 from rutor.errors import RutorError, bad_input, environment, network
+from rutor.localpage import LocalPage, Refusal, Reply, json_reply
 
 PAGE_DIR = Path(__file__).resolve().parent / "review_page"
 # The page's own files, by the name the browser asks for. Nothing else is read from disk.
@@ -48,11 +43,6 @@ PAGE_FILES = {
     "app.js": ("app.js", "text/javascript; charset=utf-8"),
     "app.css": ("app.css", "text/css; charset=utf-8"),
 }
-POLICY = (
-    "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; "
-    "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-)
-
 CELL_PX = 1024
 TILE_PX = 512
 SIDES = (1024, 1536)
@@ -240,25 +230,14 @@ def _cell_body(raw: bytes) -> tuple[dict[str, object], dict[str, object]]:
     return {"sheet": sheet, "col": col, "row": row}, body
 
 
-class _Answer(Exception):
-    """An answer that ends the request: a status and one line for the page."""
-
-    def __init__(self, status: int, message: str, code: str = "") -> None:
-        self.status = status
-        self.message = message
-        # A word the page knows and puts into its own language.
-        self.code = code
-        super().__init__(message)
+# An answer that ends the request: a status and one line for the page.
+_Answer = Refusal
 
 
 # The tile service answers only pages it knows, told by the Referer header, and it knows pages
 # on this machine. So the sender says what it is: a page on 127.0.0.1. No port and no path, so
 # the key in this page's address never travels.
 _FROM_THIS_MACHINE = {"Referer": "http://127.0.0.1/"}
-
-
-# RutorError codes: 1 bad input, 2 the service refused, 3 this machine, 4 the network.
-STATUS_FOR = {1: 400, 2: 409, 3: 500, 4: 502}
 
 
 class _Review:
@@ -402,159 +381,51 @@ class _Review:
 # ---- the server
 
 
-def _handler(review: _Review, key: str, host: str) -> type[BaseHTTPRequestHandler]:
-    origin = f"http://{host}"
-
-    class Handler(BaseHTTPRequestHandler):
-        timeout = 30
-
-        def log_message(self, format: str, *args: object) -> None:
-            # The address holds the key, so requests are not logged.
-            return
-
-        def _send(self, status: int, content_type: str, body: bytes) -> None:
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Content-Security-Policy", POLICY)
-            self.send_header("Referrer-Policy", "no-referrer")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("X-Frame-Options", "DENY")
-            self.send_header("Cache-Control", "no-store")
-            try:
-                self.end_headers()
-                self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
-                # The browser stopped waiting, as it does when another cell is chosen.
-                pass
-
-        def _json(self, status: int, payload: object) -> None:
-            self._send(status, "application/json; charset=utf-8", json.dumps(payload).encode("utf-8"))
-
-        def _inside(self) -> str | None:
-            """The path after the key, or None once the request has been turned away."""
-            if (self.headers.get("Host") or "") != host:
-                self._json(403, {"error": "this page answers on this machine only"})
-                return None
-            path = self.path.split("?", 1)[0]
-            parts = path.split("/", 2)
-            if len(parts) != 3 or parts[0] != "" or not hmac.compare_digest(parts[1].encode(), key.encode()):
-                self._json(404, {"error": "not found"})
-                return None
-            return parts[2]
-
-        def _run(self, work: Callable[[], None]) -> None:
-            try:
-                work()
-            except _Answer as exc:
-                self._json(exc.status, {"error": exc.message, "code": exc.code} if exc.code else {"error": exc.message})
-            except RutorError as exc:
-                self._json(STATUS_FOR.get(exc.code, 500), {"error": api.one_line(exc.message)})
-            except Exception as exc:  # noqa: BLE001 - the last stop before the socket
-                # The kind of fault and where, for the terminal. Never the message: this
-                # process holds the login and no fault text is trusted to leave it out.
-                where = traceback.extract_tb(exc.__traceback__)[-1]
-                print(f"review: {type(exc).__name__} at {Path(where.filename).name}:{where.lineno}", file=sys.stderr)
-                self._json(500, {"error": "the page failed on this machine; see the terminal"})
-
-        def do_GET(self) -> None:
-            rest = self._inside()
-            if rest is None:
-                return
-            self._run(lambda: self._get(rest))
-
-        def _get(self, rest: str) -> None:
-            page = PAGE_FILES.get(rest)
-            if page is not None:
-                self._send(200, page[1], (PAGE_DIR / page[0]).read_bytes())
-                return
-            if rest == "api/queue":
-                self._json(200, review.queue())
-                return
-            for name, pattern in ROUTES.items():
-                found = pattern.fullmatch(rest)
-                if found is None:
-                    continue
-                sheet, col, row = found["sheet"], int(found["col"]), int(found["row"])
-                if name == "facts":
-                    self._json(200, review.facts(sheet, col, row))
-                elif name == "upload":
-                    self._send(200, "image/png", review.upload(sheet, col, row))
-                else:
-                    self._send(200, "image/webp", review.tile(sheet, col, row))
-                return
-            self._json(404, {"error": "not found"})
-
-        def do_POST(self) -> None:
-            rest = self._inside()
-            if rest is None:
-                return
-            sent_from = self.headers.get("Origin")
-            if sent_from is not None and sent_from != origin:
-                self._json(403, {"error": "this page takes no requests from other pages"})
-                return
-            if rest not in ("api/approve", "api/reject"):
-                self._json(404, {"error": "not found"})
-                return
-            if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
-                self._json(415, {"error": "send JSON"})
-                return
-            length = self.headers.get("Content-Length") or ""
-            if not (length.isascii() and length.isdigit()) or not 0 < int(length) <= BODY_MAX:
-                self._json(400, {"error": "the body is missing or too large"})
-                return
-            raw = self.rfile.read(int(length))
-            self._run(lambda: self._json(200, review.approve(raw) if rest == "api/approve" else review.reject(raw)))
-
-        def _no(self) -> None:
-            self._json(405, {"error": "GET and POST only"})
-
-        do_HEAD = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _no
-
-    return Handler
+def _get(review: _Review, rest: str) -> Reply | None:
+    page = PAGE_FILES.get(rest)
+    if page is not None:
+        return Reply(200, page[1], (PAGE_DIR / page[0]).read_bytes())
+    if rest == "api/queue":
+        return json_reply(200, review.queue())
+    for name, pattern in ROUTES.items():
+        found = pattern.fullmatch(rest)
+        if found is None:
+            continue
+        sheet, col, row = found["sheet"], int(found["col"]), int(found["row"])
+        if name == "facts":
+            return json_reply(200, review.facts(sheet, col, row))
+        if name == "upload":
+            return Reply(200, "image/png", review.upload(sheet, col, row))
+        return Reply(200, "image/webp", review.tile(sheet, col, row))
+    return None
 
 
-class _OwnPort(ThreadingHTTPServer):
-    # Nobody else may listen on the port while the page is up. On Windows the default lets them.
-    allow_reuse_address = False
-
-    def handle_error(self, request: object, client_address: object) -> None:
-        # A browser drops a connection whenever another cell is chosen. That is not a fault,
-        # and the standard report of it would print the address, which holds the key.
-        if isinstance(sys.exc_info()[1], ConnectionError):
-            return
-        print(f"review: {type(sys.exc_info()[1]).__name__} while answering", file=sys.stderr)
+def _post(review: _Review, rest: str, raw: bytes) -> Reply | None:
+    if rest == "api/approve":
+        return json_reply(200, review.approve(raw))
+    if rest == "api/reject":
+        return json_reply(200, review.reject(raw))
+    return None
 
 
 class ReviewServer:
-    """The page on 127.0.0.1, under an address nobody can guess.
-
-    The port is a free one, new at every start. A fixed port would give the page the same
-    origin every time, and whatever an earlier program left in the browser under that origin
-    would still be there.
-    """
+    """The review page behind the shell every page on this machine has: see `localpage`."""
 
     def __init__(self, token: str) -> None:
-        self.key = secrets.token_urlsafe(32)
-        self._httpd = _OwnPort(("127.0.0.1", 0), BaseHTTPRequestHandler)
-        self.port = int(self._httpd.server_address[1])
-        self._httpd.RequestHandlerClass = _handler(_Review(token), self.key, f"127.0.0.1:{self.port}")
-        self.url = f"http://127.0.0.1:{self.port}/{self.key}/"
-        self._thread: threading.Thread | None = None
+        review = _Review(token)
+        self._page = LocalPage("review", lambda rest: _get(review, rest), lambda rest, raw: _post(review, rest, raw), BODY_MAX)
+        self.key = self._page.key
+        self.port = self._page.port
+        self.url = self._page.url
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
-        self._thread.start()
+        self._page.start()
 
     def serve_forever(self) -> None:
-        self._httpd.serve_forever()
+        self._page.serve_forever()
 
     def stop(self) -> None:
-        if self._thread is not None:
-            self._httpd.shutdown()
-            self._thread.join(timeout=5)
-            self._thread = None
-        self._httpd.server_close()
+        self._page.stop()
 
 
 def cmd_review(args: argparse.Namespace) -> int:
