@@ -54,6 +54,8 @@ TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 STACK_MARKER = "pixelbygget-stack.sha256"
 NODE_MARKER = "pixelbygget-node-version"
 RENDERER_MARKER = ".pixelbygget-lock.sha256"
+# The model's marker lies in the app's folder and names the two commits that were fetched.
+MODEL_MARKER = "model-fetched"
 
 # The stack's wheels unpack to more than they weigh, and pip holds a wheel twice while it
 # arrives. Room for that is asked for on top of what is still to fetch.
@@ -410,9 +412,7 @@ class Installer:
         self._stop_asked = False
         self._run: app_jobs.Run | None = None
         self._lines: list[str] = []
-        # The model child said in this process that both downloads are whole.
-        self._model_done = False
-        self._measured: tuple[float, float, float] | None = None
+        self._measured: tuple[float, float, float, bool] | None = None
 
     # ---- what other threads ask
 
@@ -422,7 +422,7 @@ class Installer:
             measured = self._measured
         app = config.app_dir()
         if app is None:
-            return {"phase": "idle", "done_gb": 0.0, "total_gb": 0.0, "problem": ""}
+            return {"phase": "idle", "done_gb": 0.0, "total_gb": 0.0, "problem": "", "whole": False}
         now = self._clock()
         # Counting files takes a moment, and the page asks every second.
         if measured is None or now - measured[0] >= MEASURE_SECONDS:
@@ -430,12 +430,22 @@ class Installer:
                 manifest = load_manifest()
                 done = sum(self._on_disk(app, manifest, name) for name in PHASES) / 1e9
                 total = manifest.total() / 1e9
+                whole = all(_complete(app, manifest, name) for name in PHASES)
             except (OSError, ValueError, KeyError, TypeError):
-                done, total = 0.0, 0.0
-            measured = (now, done, total)
+                done, total, whole = 0.0, 0.0, False
+            measured = (now, done, total, whole)
             with self._lock:
                 self._measured = measured
-        return {"phase": phase, "done_gb": measured[1], "total_gb": measured[2], "problem": problem}
+        return {
+            "phase": phase,
+            "done_gb": measured[1],
+            "total_gb": measured[2],
+            "problem": problem,
+            # Every phase ended well, for this lock and these commits. tools() says whether
+            # what was fetched works; this says whether the fetch was finished. The page
+            # needs both: PyTorch imports long before the model is all there.
+            "whole": measured[3],
+        }
 
     def running(self) -> bool:
         with self._lock:
@@ -578,7 +588,7 @@ class Installer:
             # Not the list the installer shipped. Nothing from it is installed.
             raise _Failed("changed")
         marker = app / "python" / STACK_MARKER
-        if _text(marker) == digest:
+        if _complete(app, manifest, "stack"):
             return
         cache, temp = app / "pip-cache", app / "tmp"
         _remove(temp)
@@ -594,6 +604,7 @@ class Installer:
             "PIP_NO_INPUT": "1",
             # Packages the person installed for another Python of theirs are not this one's.
             "PYTHONNOUSERSITE": "1",
+            **_UTF8,
         }
         argv = [
             str(_python()), "-m", "pip", "install", "--require-hashes", "--no-input",
@@ -610,14 +621,44 @@ class Installer:
         code, said = self._child(argv, env)
         if code != 0:
             raise self._ended_badly(said)
+        if wheels.is_dir():
+            self._bundled_again(lock, wheels, temp, env)
         marker.write_text(digest, encoding="utf-8")
         _remove(cache)
         _remove(temp)
 
+    def _bundled_again(self, lock: Path, wheels: Path, temp: Path, env: dict[str, str]) -> None:
+        """Put the installer's own wheels in again, whatever is installed already.
+
+        The wheel of diffusers carries the same version at every commit, so after an
+        upgrade pip would call the newer one already installed. Its hash is still checked,
+        and nothing but the folder the installer made is looked in.
+        """
+        try:
+            lines = [line for line in lock.read_text(encoding="utf-8").splitlines() if line.startswith("diffusers==")]
+        except (OSError, UnicodeDecodeError) as exc:
+            raise _Failed("failed") from exc
+        if not lines:
+            return
+        only = temp / "bundled.lock"
+        only.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        code, said = self._child(
+            [
+                str(_python()), "-m", "pip", "install", "--require-hashes", "--no-input",
+                "--only-binary", ":all:", "--no-deps", "--force-reinstall",
+                "--no-index", "--find-links", str(wheels),
+                "-r", str(only),
+            ],  # fmt: skip
+            env,
+        )
+        only.unlink(missing_ok=True)
+        if code != 0:
+            raise self._ended_badly(said)
+
     def _node(self, app: Path, manifest: _Manifest) -> None:
         node = manifest.node
         folder = app / "node"
-        if _text(folder / NODE_MARKER) == node.version and (folder / "node.exe").is_file():
+        if _complete(app, manifest, "node"):
             return
         downloads = app / "downloads"
         archive = downloads / "node.zip"
@@ -642,7 +683,11 @@ class Installer:
             # What has arrived stays, and the next try goes on from there.
             raise _Failed("disk" if _is_full(exc) else "network") from exc
         try:
-            matches = archive.is_file() and _sha256(archive) == node.sha256
+            if not archive.is_file() or archive.stat().st_size < node.size:
+                # A connection that closes early reads as the end of the file. What has
+                # arrived is kept, and the next try goes on from there.
+                raise _Failed("network")
+            matches = _sha256(archive) == node.sha256
         except OSError as exc:
             raise _Failed("failed") from exc
         if not matches:
@@ -672,9 +717,10 @@ class Installer:
         except OSError as exc:
             raise _Failed("failed") from exc
         marker = root / "node_modules" / RENDERER_MARKER
-        if _text(marker) == digest and google.renderer_missing(root) is None:
+        if _complete(app, manifest, "renderer"):
             return
         node = app / "node"
+        cache = app / "npm-cache"
         code, said = self._child(
             [
                 # npm's own program, run by the app's Node. npm.cmd would go through cmd.exe,
@@ -687,13 +733,15 @@ class Installer:
                 "--no-audit",
                 "--no-fund",
             ],
-            # The packages' own install steps start `node`, and must find this one.
-            config.tool_env(),
+            # The packages' own install steps start `node`, and must find this one. npm's
+            # cache is kept in the app's folder, so that nothing is left in the person's own.
+            {**config.tool_env(), "npm_config_cache": str(cache), "npm_config_update_notifier": "false"},
         )
         if code != 0:
             raise self._ended_badly(said)
         if marker.parent.is_dir():
             marker.write_text(digest, encoding="utf-8")
+        _remove(cache)
 
     def _model(self, app: Path, manifest: _Manifest) -> None:
         model_revision = pipeline.PINS.get("model_revision", "")
@@ -706,12 +754,12 @@ class Installer:
                 str(_python()), "-c", _MODEL_SCRIPT,
                 pipeline.MODEL_ID, model_revision, pipeline.LORA_ID, lora_revision,
             ],  # fmt: skip
-            {"HF_HUB_DISABLE_TELEMETRY": "1", "HF_HUB_DISABLE_PROGRESS_BARS": "1", "PYTHONNOUSERSITE": "1"},
+            {"HF_HUB_DISABLE_TELEMETRY": "1", "HF_HUB_DISABLE_PROGRESS_BARS": "1", "PYTHONNOUSERSITE": "1", **_UTF8},
         )
         if code != 0:
             raise self._ended_badly(said, _MODEL_EXITS.get(code, ""))
-        with self._lock:
-            self._model_done = True
+        # The child is the one that knows both downloads are whole, and it just said so.
+        (app / MODEL_MARKER).write_text(_model_pins(), encoding="utf-8")
 
     # ---- what is on the disk
 
@@ -723,39 +771,62 @@ class Installer:
             (app / "node" / NODE_MARKER).unlink(missing_ok=True)
         elif name == "renderer":
             (google.default_render_dir() / "node_modules" / RENDERER_MARKER).unlink(missing_ok=True)
+        elif name == "model":
+            (app / MODEL_MARKER).unlink(missing_ok=True)
 
     def _on_disk(self, app: Path, manifest: _Manifest, name: str) -> int:
         """How much of a phase is on the disk, in bytes, and never more than the phase holds."""
         size = manifest.size(name)
+        if _complete(app, manifest, name):
+            return size
         if name == "stack":
-            marked = _text(app / "python" / STACK_MARKER)
-            if marked and marked == _file_sha256(app / LOCK_NAME):
-                return size
             # pip holds what it has fetched in its temp folder, and keeps finished wheels
             # in its cache across a failure.
             return min(size, max(_tree_bytes(app / "tmp"), _tree_bytes(app / "pip-cache")))
         if name == "node":
-            folder = app / "node"
-            if _text(folder / NODE_MARKER) == manifest.node.version and (folder / "node.exe").is_file():
-                return size
-            archive = app / "downloads" / "node.zip"
             try:
-                return min(size, archive.stat().st_size)
+                return min(size, (app / "downloads" / "node.zip").stat().st_size)
             except OSError:
                 return 0
         if name == "renderer":
-            root = google.default_render_dir()
-            if _text(root / "node_modules" / RENDERER_MARKER) and google.renderer_missing(root) is None:
-                return size
-            return min(size, _tree_bytes(root / "node_modules"))
-        with self._lock:
-            if self._model_done:
-                return size
+            return min(size, _tree_bytes(google.default_render_dir() / "node_modules"))
         cache = commands._hub_cache()
         held = 0
         for repo in (pipeline.MODEL_ID, pipeline.LORA_ID):
-            held += _tree_bytes(cache / ("models--" + repo.replace("/", "--")) / "blobs")
+            # The whole folder: where links cannot be made, the hub library moves a
+            # finished file out of blobs and into snapshots.
+            held += _tree_bytes(cache / ("models--" + repo.replace("/", "--")))
         return min(size, held)
+
+
+# pip writes a pipe in the machine's own code page, and the page reads UTF-8. Without this
+# a path under a name like "Åsa Öberg" arrives broken, and the fault report cannot take
+# the name out of it.
+_UTF8 = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+
+
+def _model_pins() -> str:
+    return f"{pipeline.PINS.get('model_revision', '')} {pipeline.PINS.get('lora_revision', '')}"
+
+
+def _complete(app: Path, manifest: _Manifest, name: str) -> bool:
+    """Whether a phase ended well, for the lock, the versions and the commits of today.
+
+    Each marker is written when its phase's child has ended with 0, and names what was
+    fetched. An upgrade that brings another lock or another model makes it stale.
+    """
+    if name == "stack":
+        marked = _text(app / "python" / STACK_MARKER)
+        return bool(marked) and marked == _file_sha256(app / LOCK_NAME)
+    if name == "node":
+        folder = app / "node"
+        return _text(folder / NODE_MARKER) == manifest.node.version and (folder / "node.exe").is_file()
+    if name == "renderer":
+        root = google.default_render_dir()
+        marked = _text(root / "node_modules" / RENDERER_MARKER)
+        return bool(marked) and marked == _file_sha256(root / "package-lock.json") and google.renderer_missing(root) is None
+    pins = _model_pins()
+    return bool(pins.strip()) and " " in pins.strip() and _text(app / MODEL_MARKER) == pins and commands._model_is_cached()
 
 
 def _file_sha256(path: Path) -> str:

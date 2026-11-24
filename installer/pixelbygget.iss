@@ -73,31 +73,35 @@ Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\start.pyw"""; Working
 Type: filesandordirs; Name: "{app}"
 
 [Code]
-const
-  QuitSeconds = 180;
-
-procedure AskTheAppToEnd(const Folder: String);
+function AskTheAppToEnd(const Folder: String): Boolean;
 var
   Python: String;
   Code: Integer;
 begin
   // An app that is running holds its own files open. It is asked to end the way its page
-  // ends it: the job is stopped and the cell's lock is given back first.
+  // ends it: the job is stopped and the cell's lock is given back first. -I keeps the
+  // person's own Python settings away from the app's Python.
+  Result := True;
   Python := Folder + '\python\python.exe';
   if FileExists(Python) then
-    Exec(Python, '-m rutor app --quit --quiet', Folder, SW_HIDE, ewWaitUntilTerminated, Code);
+    if Exec(Python, '-I -m rutor app --quit --quiet', Folder, SW_HIDE, ewWaitUntilTerminated, Code) then
+      Result := (Code = 0);
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  AskTheAppToEnd(ExpandConstant('{app}'));
-  Result := '';
+  // "Stang Pixelbygget och forsok igen.", with its Swedish letters as character codes.
+  if AskTheAppToEnd(ExpandConstant('{app}')) then
+    Result := ''
+  else
+    Result := 'St'#228'ng Pixelbygget och f'#246'rs'#246'k igen.';
 end;
 
 function InitializeUninstall(): Boolean;
 begin
-  AskTheAppToEnd(ExpandConstant('{app}'));
-  Result := True;
+  Result := AskTheAppToEnd(ExpandConstant('{app}'));
+  if not Result then
+    MsgBox('St'#228'ng Pixelbygget och f'#246'rs'#246'k igen.', mbError, MB_OK);
 end;
 
 function HubCache(): String;

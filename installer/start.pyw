@@ -18,6 +18,9 @@ from pathlib import Path
 NO_WINDOW = 0x08000000
 # CREATE_NEW_PROCESS_GROUP: the app does not end with whatever started the shortcut.
 NEW_GROUP = 0x00000200
+# How long a start is watched. An app that is still up after this has started.
+WATCH_SECONDS = 4.0
+SORRY = "Pixelbygget kunde inte starta. Installera appen igen."
 
 
 def command(app: Path) -> list[str]:
@@ -46,7 +49,7 @@ def _say(text: str) -> None:
 def main() -> int:
     app = Path(__file__).resolve().parent
     try:
-        subprocess.Popen(
+        started = subprocess.Popen(
             command(app),
             cwd=str(app),
             env=environment(app, os.environ),
@@ -56,8 +59,19 @@ def main() -> int:
             creationflags=(NO_WINDOW | NEW_GROUP) if os.name == "nt" else 0,
         )
     except OSError:
-        _say("Pixelbygget kunde inte starta. Installera appen igen.")
+        _say(SORRY)
         return 1
+    try:
+        code = started.wait(timeout=WATCH_SECONDS)
+    except subprocess.TimeoutExpired:
+        # Still up: the page is being served.
+        return 0
+    if code != 0:
+        # It died at once: no free port, a broken install. A double-click that does
+        # nothing at all is the worst answer, and there is no terminal to read a fault in.
+        _say(SORRY)
+        return 1
+    # Ended well at once: another Pixelbygget was up already, and its page was opened.
     return 0
 
 

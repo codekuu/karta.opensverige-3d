@@ -1609,7 +1609,9 @@ class FakeInstaller:
     def __init__(self) -> None:
         self.runs: list[tuple[str, ...]] = []
         self.stops = 0
-        self.answer: dict[str, object] = {"phase": "idle", "done_gb": 0.0, "total_gb": 15.9, "problem": ""}
+        self.answer: dict[str, object] = {
+            "phase": "idle", "done_gb": 0.0, "total_gb": 15.9, "problem": "", "whole": True,
+        }  # fmt: skip
         self.said: list[str] = []
         # A run returns at once unless the test holds it here.
         self.go = threading.Event()
@@ -2024,11 +2026,30 @@ class AppServerTests(_OwnHome):
 
     def test_the_state_carries_the_progress(self) -> None:
         self._app_install()
-        self.installer.answer = {"phase": "model", "done_gb": 12.2, "total_gb": 20.0, "problem": ""}
+        self.installer.answer = {"phase": "model", "done_gb": 12.2, "total_gb": 20.0, "problem": "", "whole": False}
         self.assertEqual(
             self._state()["install"],
-            {"phase": "model", "done_gb": 12.2, "total_gb": 20.0, "problem": "", "app": True},
+            {"phase": "model", "done_gb": 12.2, "total_gb": 20.0, "problem": "", "whole": False, "app": True},
         )
+
+    def test_a_cell_is_not_built_on_a_fetch_that_is_not_whole(self) -> None:
+        # PyTorch imports, so tools() says ready, but the model stopped half way. The redraw
+        # would fetch the rest in silence under a locked cell.
+        self._app_install()
+        self.installer.answer = {"phase": "failed", "done_gb": 9.0, "total_gb": 15.9, "problem": "network", "whole": False}
+        self.call("POST", f"{self.base}/api/cell", {"next": True})
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual((status, json.loads(body).get("code")), (409, "not_ready"))
+        self.assertEqual(self.fake.calls, [])
+        self.installer.answer["whole"] = True
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual(status, 200, body)
+
+    def test_an_install_made_by_hand_is_built_on_whatever_the_fetch_says(self) -> None:
+        self.installer.answer["whole"] = False
+        self.call("POST", f"{self.base}/api/cell", {"next": True})
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual(status, 200, body)
 
     def test_the_phase_of_a_tool_that_is_still_missing_is_done_again(self) -> None:
         self._app_install()
@@ -2072,7 +2093,9 @@ class AppServerTests(_OwnHome):
         self.assertEqual(self.installer.stops, 1)
         self.assertFalse(self.installer.running())
 
-    def test_a_page_that_stops_asking_ends_the_fetch(self) -> None:
+    def test_a_page_that_stops_asking_does_not_end_the_fetch(self) -> None:
+        # A browser puts a tab nobody looks at to sleep, and the page says that the machine
+        # can be used meanwhile. A fetch holds no card and no lock, so silence does not stop it.
         now = [1000.0]
         installer = FakeInstaller()
         builder = app.Builder(FakeStart(), clock=lambda: now[0])
@@ -2092,8 +2115,10 @@ class AppServerTests(_OwnHome):
             now[0] += 100.0
             time.sleep(0.1)
             self.assertEqual(installer.stops, 0)
-            now[0] += app.GONE_SECONDS
-            wait_until(lambda: installer.stops == 1)
+            now[0] += app.GONE_SECONDS + 3600.0
+            time.sleep(0.15)
+            self.assertEqual(installer.stops, 0)
+            self.assertTrue(installer.running())
 
     def test_the_report_says_how_the_fetch_went(self) -> None:
         self._app_install()
@@ -2363,6 +2388,18 @@ class WindowlessTests(_OwnHome):
         self.assertIsNone(app.running_page())
         self.assertFalse(path.exists())
 
+    def test_a_first_start_that_is_slow_to_answer_is_still_the_app(self) -> None:
+        # The machine is busy drawing and the person clicks the icon again. An app that is
+        # alive and listening is not replaced because it took its time.
+        path = app.running_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        url = "http://127.0.0.1:9/" + "k" * 43 + "/"
+        path.write_text(json.dumps({"pid": os.getpid(), "url": url}), encoding="utf-8")
+        with patch("rutor.app._answers", return_value="slow") as asked, patch("time.sleep"):
+            self.assertEqual(app.running_page(), url)
+        self.assertGreaterEqual(asked.call_count, 3)
+        self.assertTrue(path.exists())
+
     def test_an_address_of_another_shape_is_never_asked(self) -> None:
         path = app.running_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2579,6 +2616,7 @@ class WindowlessTests(_OwnHome):
     def test_the_shortcut_starts_one_hidden_process_and_ends(self) -> None:
         start = _load_start_script()
         with patch("subprocess.Popen") as popen:
+            popen.return_value.wait.side_effect = subprocess.TimeoutExpired("python", 4)
             self.assertEqual(start.main(), 0)  # type: ignore[attr-defined]
         argv = popen.call_args.args[0]
         self.assertEqual(argv[1:], ["-m", "rutor", "app", "--quiet"])
@@ -2588,7 +2626,25 @@ class WindowlessTests(_OwnHome):
         self.assertEqual(options["stderr"], subprocess.DEVNULL)
         # 0x08000000 is CREATE_NO_WINDOW: a console nobody sees, which every child inherits.
         self.assertEqual(start.NO_WINDOW, 0x08000000)  # type: ignore[attr-defined]
-        popen.return_value.wait.assert_not_called()
+
+    def test_a_start_that_dies_at_once_is_said_in_a_box(self) -> None:
+        # There is no terminal to read a fault in. A double-click that does nothing is the
+        # worst answer.
+        start = _load_start_script()
+        with patch("subprocess.Popen") as popen, patch.object(start, "_say") as say:
+            popen.return_value.wait.return_value = 3
+            self.assertEqual(start.main(), 1)  # type: ignore[attr-defined]
+        say.assert_called_once()
+        # An app that is still up after a few seconds started, and so did one that found
+        # another already running and ended with 0.
+        for outcome in (subprocess.TimeoutExpired("python", 4), 0):
+            with patch("subprocess.Popen") as popen, patch.object(start, "_say") as say:
+                if isinstance(outcome, int):
+                    popen.return_value.wait.return_value = outcome
+                else:
+                    popen.return_value.wait.side_effect = outcome
+                self.assertEqual(start.main(), 0)  # type: ignore[attr-defined]
+            say.assert_not_called()
 
 
 class PageFilesTests(unittest.TestCase):
@@ -2665,6 +2721,11 @@ class PageFilesTests(unittest.TestCase):
             self.assertIn(wanted, page)
         self.assertIn(">Hämta →<", page)
         self.assertIn(">Avbryt<", page)
+
+    def test_step_five_is_done_only_when_the_fetch_is_whole(self) -> None:
+        script = self.read("app.js")
+        self.assertIn("s.install.whole === true", script)
+        self.assertNotIn("Hämtningen stannar om du stänger den", self.read("index.html"))
 
     def test_the_fetch_is_said_in_swedish(self) -> None:
         script = self.read("app.js")

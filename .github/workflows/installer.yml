@@ -23,6 +23,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    # The lock's check fetches about 4 GB. Anything much longer is a start that never ended.
+    timeout-minutes: 45
     outputs:
       version: ${{ steps.version.outputs.version }}
     defaults:
@@ -129,6 +131,7 @@ jobs:
           & $python -m rutor app --quit --quiet
           if ($LASTEXITCODE -ne 0) { throw "rutor app --quit ended with $LASTEXITCODE" }
           if (Test-Path -LiteralPath $note) { throw 'The running note is still there after --quit' }
+          Start-Sleep -Seconds 2
           $left = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:PB_APP, [System.StringComparison]::OrdinalIgnoreCase) })
           if ($left.Count -ne 0) { throw "Still running from the app's folder: $($left.Name -join ', ')" }
 

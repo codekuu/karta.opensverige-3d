@@ -200,7 +200,9 @@ function klara(s) {
     s.terms.accepted === true,
     Boolean(s.login.login),
     s.cesium.ok === true,
-    s.tools.ready === true,
+    // In an app install the fetch has to be whole too: PyTorch answers long before the
+    // model is all there.
+    s.tools.ready === true && (s.install.app !== true || s.install.whole === true),
     Boolean(s.cell),
     klart,
     klart,
@@ -417,7 +419,7 @@ function hamtning(s) {
   // Step 5 in an app install: the app fetches the tools itself, and says how far it is.
   const t = s.tools;
   const i = s.install;
-  const klart = t.ready === true;
+  const klart = t.ready === true && i.whole === true;
   const gar = Object.prototype.hasOwnProperty.call(HAMTAR, i.phase);
   const stannat = !klart && !gar && i.phase === "stopped";
   const fel = !klart && !gar && i.phase === "failed";
@@ -429,7 +431,7 @@ function hamtning(s) {
 
   text("rubrik-5", klart ? "Ritverktyget" : gar ? "Ritverktyget hämtas" : "Hämta ritverktyget");
   if (klart) text("verktyg-ingress", "Allt som behövs finns på datorn.");
-  else if (gar) text("verktyg-ingress", "Det tar en stund. Datorn går att använda under tiden.");
+  else if (gar) text("verktyg-ingress", "Det tar en stund. Du kan göra annat under tiden.");
   else text("verktyg-ingress", hela + " GB, en gång. Det tar en stund.");
 
   visa("hamta-gar", gar);

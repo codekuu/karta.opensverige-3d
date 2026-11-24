@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.error
 import urllib.request
 import webbrowser
 from collections.abc import Callable, Iterator
@@ -1431,11 +1432,10 @@ class AppServer:
                 # Looked at before the tick, which may be what stops the job.
                 working = self._installing() or self._builder.busy()
                 quiet = self._builder.quiet_for()
+                # Only a job is stopped for a page that has gone silent. A fetch holds no card
+                # and no lock, and a tab that the browser put to sleep is not a closed one:
+                # it goes on until it is done, stopped from the page, or the app is closed.
                 self._builder.tick()
-                if self._installing() and self._builder.away():
-                    # A closed tab stops a fetch as it stops a job. What has arrived stays,
-                    # and the next press goes on from there.
-                    self._installer.stop()
                 if self._idle_exit is not None and self._idle(working, quiet):
                     self._end_soon()
             except Exception as exc:
@@ -1533,6 +1533,10 @@ class AppServer:
             with self._start_lock:
                 if self._installing():
                     raise Refusal(409, "the tools are being fetched", "busy")
+                if app_install.is_app() and self._installer.state().get("whole") is not True:
+                    # The tools may answer while the model is half fetched. The redraw
+                    # would then fetch the rest in silence, under a locked cell.
+                    raise Refusal(409, "the drawing tools are not all fetched", "not_ready")
                 self._builder.build()
             return json_reply(200, {"ok": True})
         if rest == "api/install":
@@ -1706,6 +1710,7 @@ class AppServer:
 # The address of a page this program serves: this machine, a port and the page's long key.
 _PAGE_URL = re.compile(r"http://127\.0\.0\.1:\d{1,5}/[A-Za-z0-9_-]{20,100}/")
 ALIVE_SECONDS = 3.0
+ALIVE_TRIES = 4
 RACE_SECONDS = 5.0
 # How long a running app gets to stop its job, give the lock back and end.
 QUIT_SECONDS = 150.0
@@ -1728,7 +1733,8 @@ def _alive(pid: int) -> bool:
         # os.kill is no question on Windows: with any signal number it ends the process.
         import ctypes
 
-        kernel = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        # A handle of this function's own, so that the types set here are not everybody's.
+        kernel = ctypes.WinDLL("kernel32")  # type: ignore[attr-defined]
         kernel.OpenProcess.restype = ctypes.c_void_p
         kernel.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
         kernel.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
@@ -1752,16 +1758,24 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def _answers(url: str) -> bool:
-    """Whether the app page at this address says that it is one. No proxy sees the address."""
+def _answers(url: str) -> str:
+    """Whether the app page at this address says that it is one: "yes", "no" or "slow".
+
+    "slow" is a port that took the connection and did not answer in time, which is an app
+    that is busy, not one that is gone. No proxy sees the address.
+    """
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
     try:
         with opener.open(f"{url}api/alive", timeout=ALIVE_SECONDS) as response:
             found = json.loads(response.read(1000).decode("utf-8"))
+    except TimeoutError:
+        return "slow"
+    except urllib.error.URLError as exc:
+        return "slow" if isinstance(exc.reason, TimeoutError) else "no"
     except Exception:
-        # Refused, slow, not JSON: in every case there is no app page there.
-        return False
-    return isinstance(found, dict) and found.get("app") == "pixelbygget"
+        # Refused, or not JSON: there is no app page there.
+        return "no"
+    return "yes" if isinstance(found, dict) and found.get("app") == "pixelbygget" else "no"
 
 
 def running_page() -> str | None:
@@ -1790,9 +1804,18 @@ def running_page() -> str | None:
             # Only an address of the page's own shape is ever asked: the file is data.
             and _PAGE_URL.fullmatch(url)
             and _alive(pid)
-            and _answers(url)
         ):
-            return url
+            for _attempt in range(ALIVE_TRIES):
+                answer = _answers(url)
+                if answer == "yes":
+                    return url
+                if answer == "no":
+                    break
+                time.sleep(0.5)
+            else:
+                # Alive, listening and slow every time: a machine that is busy drawing. It is
+                # still the app, and a second one beside it would be worse than a slow page.
+                return url
     with contextlib.suppress(OSError):
         path.unlink()
     return None
@@ -1974,7 +1997,7 @@ def _quit_running() -> int:
         # Gone when the page is, and, for another process than this one, when it has ended:
         # only then are its files free.
         other = isinstance(pid, int) and not isinstance(pid, bool) and pid != os.getpid()
-        if not _answers(url) and not (other and _alive(pid)):
+        if _answers(url) == "no" and not (other and _alive(pid)):
             return 0
         time.sleep(0.2)
     raise environment("the running Pixelbygget did not end; close it and try again")

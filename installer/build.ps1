@@ -20,6 +20,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $ProgressPreference = 'SilentlyContinue'
+# The staged Python is run below. It must not leave compiled files in what ships.
+$env:PYTHONDONTWRITEBYTECODE = '1'
 
 # ---- what is fetched, each by an exact address and a SHA-256
 #
@@ -72,8 +74,9 @@ foreach ($folder in @($Stage, $Out, $Fetched)) {
 
 $pythonArchive = Join-Path $Fetched 'python.tar.gz'
 Get-Pinned -Url $PythonUrl -Sha256 $PythonSha256 -Path $pythonArchive
-# The archive holds one folder, python\.
-Invoke-Checked 'tar' @('-xzf', $pythonArchive, '-C', $Stage)
+# The archive holds one folder, python\. Windows' own tar, by its full path: a tar from
+# Git, if one comes first on PATH, reads the drive letter as a host name.
+Invoke-Checked (Join-Path $env:SystemRoot 'System32\tar.exe') @('-xzf', $pythonArchive, '-C', $Stage)
 $Python = Join-Path $Stage 'python\python.exe'
 if (-not (Test-Path -LiteralPath $Python)) { throw 'The Python archive held no python\python.exe' }
 
@@ -141,8 +144,17 @@ $loraFolder = 'models--' + $model.lora.Replace('/', '--')
 
 # ---- the installer
 
-$iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
-if (-not (Test-Path -LiteralPath $iscc)) { throw "Inno Setup is not installed: $iscc is missing" }
+# Where Inno Setup 6 puts its compiler: for the whole machine, or for one person.
+$iscc = @(
+    (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+    (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe')
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $iscc) {
+    $onPath = Get-Command 'ISCC.exe' -ErrorAction SilentlyContinue
+    if (-not $onPath) { throw 'Inno Setup is not installed: ISCC.exe was not found' }
+    $iscc = $onPath.Source
+}
 Invoke-Checked $iscc @(
     "/DAppVersion=$Version",
     "/DStage=$Stage",

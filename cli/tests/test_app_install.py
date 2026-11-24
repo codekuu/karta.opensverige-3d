@@ -322,6 +322,9 @@ class _Install(_AppFolder):
                 made = self.render.joinpath("node_modules", *part)
                 made.parent.mkdir(parents=True, exist_ok=True)
                 made.write_text("", encoding="utf-8")
+        if name == "model":
+            folder = "models--" + pipeline.MODEL_ID.replace("/", "--")
+            (self.hub / folder / "snapshots" / argv[-3]).mkdir(parents=True, exist_ok=True)
 
     def model_blobs(self, size: int) -> None:
         blobs = self.hub / ("models--" + pipeline.MODEL_ID.replace("/", "--")) / "blobs"
@@ -384,6 +387,95 @@ class InstallJobTests(_Install):
         self.installer.run()
         _name, _npm, npm_env = self.children.calls[1]
         self.assertEqual(npm_env["PUPPETEER_CACHE_DIR"], str(self.app / "chrome"))
+
+    def test_the_fetch_is_whole_only_when_every_phase_ended_well(self) -> None:
+        # tools() can say that PyTorch, Node and the renderer are there while the model is
+        # half fetched. The page moves on only when the job says it is whole as well.
+        self.assertIs(self.state()["whole"], False)
+        self.children.script("model", ["ended: ConnectError"], code=4)
+        self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("failed", "network"))
+        self.assertIs(self.state()["whole"], False)
+        self.installer.run()
+        self.assertEqual(self.state()["phase"], "done")
+        self.assertIs(self.state()["whole"], True)
+        # It is on the disk, not in memory: an app that is started again still knows.
+        again = app_install.Installer(Children(), self.fetches, lambda: self.free)
+        self.assertIs(again.state()["whole"], True)
+
+    def test_a_renderer_that_stopped_half_way_is_not_whole(self) -> None:
+        # npm had made the folders the renderer check looks for when Chrome's download was cut.
+        self.children.script("npm", ["npm error code ECONNRESET"], code=1)
+        self.installer.run()
+        self.assertIsNone(google.renderer_missing(self.render))
+        self.assertIs(self.state()["whole"], False)
+        self.installer.run()
+        self.assertEqual(self.children.names(), ["pip", "npm", "npm", "model"])
+        self.assertIs(self.state()["whole"], True)
+
+    def test_a_newer_lock_or_another_model_is_not_whole(self) -> None:
+        self.installer.run()
+        self.assertIs(self.state()["whole"], True)
+        with patch.dict(pipeline.PINS, {"model_revision": "f" * 40}):
+            self.assertIs(app_install.Installer(Children(), self.fetches, lambda: self.free).state()["whole"], False)
+        lock = self.LOCK + "numpy==2.4.6 --hash=sha256:" + "ef" * 32 + "\n"
+        (self.app / "requirements-app.lock").write_text(lock, encoding="utf-8")
+        self.install(json.dumps({"version": "0.2.0", "lock_sha256": hashlib.sha256(lock.encode()).hexdigest()}))
+        self.assertIs(app_install.Installer(Children(), self.fetches, lambda: self.free).state()["whole"], False)
+
+    def test_a_download_that_ends_early_without_a_fault_is_the_network(self) -> None:
+        # A connection that closes early reads as the end of the file, not as an error.
+        def fetch(url: str, target: Path, progress: Callable[[int], None]) -> None:
+            have = target.stat().st_size if target.exists() else 0
+            target.parent.mkdir(parents=True, exist_ok=True)
+            end = len(self.zip) if have else len(self.zip) // 2
+            with target.open("ab") as out:
+                out.write(self.zip[have:end])
+            progress(end)
+
+        self.installer = app_install.Installer(self.children, fetch, lambda: self.free)
+        self.installer.run()
+        self.assertEqual((self.state()["phase"], self.state()["problem"]), ("failed", "network"))
+        self.assertEqual((self.app / "downloads" / "node.zip").stat().st_size, len(self.zip) // 2)
+        self.installer.run()
+        self.assertEqual(self.state()["phase"], "done")
+
+    def test_children_write_in_utf8_whatever_the_machine_uses(self) -> None:
+        # pip writes a pipe in the machine's own code page. A path under "Åsa Öberg" would
+        # arrive broken, and the fault report could not take her name out of it.
+        self.installer.run()
+        for name, _argv, env in self.children.calls:
+            if name in ("pip", "model"):
+                self.assertEqual((env.get("PYTHONUTF8"), env.get("PYTHONIOENCODING")), ("1", "utf-8"), name)
+
+    def test_the_bundled_wheel_is_put_in_again_at_every_stack_install(self) -> None:
+        # The wheel of diffusers has the same version at every commit, so pip would call a
+        # newer one already installed.
+        (self.app / "wheels").mkdir()
+        lock = self.LOCK + "diffusers==0.42.0.dev0 --hash=sha256:" + "aa" * 32 + "\n"
+        (self.app / "requirements-app.lock").write_text(lock, encoding="utf-8")
+        self.install(json.dumps({"version": "0.1.0", "lock_sha256": hashlib.sha256(lock.encode()).hexdigest()}))
+        self.installer.run()
+        self.assertEqual(self.children.names(), ["pip", "pip", "npm", "model"])
+        second = self.children.calls[1][1]
+        for flag in ("--require-hashes", "--force-reinstall", "--no-deps", "--no-index"):
+            self.assertIn(flag, second)
+        self.assertEqual(second[second.index("--find-links") + 1], str(self.app / "wheels"))
+        only = Path(second[second.index("-r") + 1])
+        self.assertEqual(self.state()["phase"], "done")
+        self.assertFalse(only.exists())
+
+    def test_npm_keeps_its_cache_in_the_apps_folder_and_takes_it_away(self) -> None:
+        self.installer.run()
+        _name, _npm, env = self.children.calls[1]
+        self.assertEqual(env["npm_config_cache"], str(self.app / "npm-cache"))
+        self.assertFalse((self.app / "npm-cache").exists())
+
+    def test_the_shipped_manifest_is_one_this_code_reads(self) -> None:
+        shipped = Path(app_install.__file__).with_name("app_install.json")
+        manifest = app_install.load_manifest(shipped)
+        self.assertTrue(manifest.node.url.startswith("https://nodejs.org/dist/"))
+        self.assertGreater(manifest.total(), 10_000_000_000)
 
     def test_nothing_is_left_behind_after_the_fetch(self) -> None:
         self.installer.run()
@@ -595,7 +687,9 @@ class InstallJobTests(_Install):
         self.assertEqual(caught.exception.code, "not_an_app")
         self.assertEqual(self.children.names(), [])
         self.assertEqual(self.fetches.calls, [])
-        self.assertEqual(self.state(), {"phase": "idle", "done_gb": 0.0, "total_gb": 0.0, "problem": ""})
+        self.assertEqual(
+            self.state(), {"phase": "idle", "done_gb": 0.0, "total_gb": 0.0, "problem": "", "whole": False}
+        )
 
     def test_nothing_is_installed_into_another_python(self) -> None:
         # install.json copied into a clone does not make it an app install: pip would
@@ -612,11 +706,19 @@ class InstallJobTests(_Install):
         self.model_blobs(600)
         fresh = app_install.Installer(self.children, self.fetches, lambda: self.free)
         self.assertEqual(fresh.state()["done_gb"], 600 / 1e9)
+        self.assertIs(fresh.state()["whole"], False)
         self.assertEqual(self.children.names(), [])
         # More on the disk than the pinned size is never shown as more than all of it.
         self.model_blobs(5000)
         fresh = app_install.Installer(self.children, self.fetches, lambda: self.free)
         self.assertEqual(fresh.state()["done_gb"], 2000 / 1e9)
+
+    def test_progress_counts_model_files_wherever_the_hub_library_puts_them(self) -> None:
+        # On a Windows that cannot make links, a finished file is moved into snapshots.
+        snapshot = self.hub / ("models--" + pipeline.MODEL_ID.replace("/", "--")) / "snapshots" / "abc" / "vae"
+        snapshot.mkdir(parents=True)
+        (snapshot / "model.safetensors").write_bytes(b"\0" * 700)
+        self.assertEqual(self.state()["done_gb"], 700 / 1e9)
 
     def test_progress_counts_what_pip_has_fetched(self) -> None:
         seen: list[object] = []
