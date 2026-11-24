@@ -1,1 +1,232 @@
-/* Placeholder. The page itself is written in the next task. */
+/* The app page. A checklist rail on the left that never leaves, one plain question at a
+   time on the right. Light theme only. No font file and nothing else from outside: the
+   stack names a face the machine may have and falls back to the system's own. */
+
+:root {
+  --paper: hsl(42 45% 98%);
+  --paper-deep: hsl(42 26% 92%);
+  --yta: hsl(0 0% 100%);
+  --ink: hsl(45 17% 5%);
+  --ink-soft: hsl(30 7% 22%);
+  --muted: hsl(40 11% 32%);
+  --line: hsl(40 20% 87%);
+  --line-strong: hsl(45 14% 60%);
+  --moss: hsl(120 24% 23%);
+  --moss-tint: hsl(120 24% 23% / 0.1);
+  --moss-soft: hsl(120 22% 46%);
+  --knapp-fg: hsl(42 45% 98%);
+  --rust: hsl(25 60% 34%);
+  --rust-tint: hsl(25 60% 34% / 0.08);
+  --ochre: hsl(40 70% 42%);
+  --mark: hsl(42 30% 86%);
+  --sans: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html { background: var(--paper); }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.5;
+  padding: 28px 16px 56px;
+  -webkit-text-size-adjust: 100%;
+}
+h1, h2, h3, p, ul, ol { margin: 0; }
+ul, ol { padding: 0; list-style: none; }
+a { color: var(--moss); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--moss); outline-offset: 2px; }
+h2:focus { outline: none; }
+
+.wrap { max-width: 1040px; margin: 0 auto; }
+
+/* ---- the window */
+
+.app { background: var(--yta); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.bar {
+  display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between;
+  padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--paper-deep);
+}
+.bar h1 { font-size: 16px; font-weight: 700; }
+.bar .adress { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+.banderoll {
+  padding: 10px 20px; border-bottom: 1px solid var(--line);
+  background: var(--rust-tint); color: var(--rust); font-weight: 500;
+}
+
+.kropp { display: grid; grid-template-columns: 250px minmax(0, 1fr); }
+
+/* ---- the rail */
+
+.rad { border-right: 1px solid var(--line); padding: 16px 12px; }
+.rad ol { display: flex; flex-direction: column; gap: 2px; }
+.rad button {
+  display: flex; gap: 10px; align-items: center; width: 100%; text-align: left;
+  padding: 9px 10px; border: 0; border-radius: 8px; background: none; color: var(--ink-soft);
+  font: inherit; font-size: 15px; cursor: pointer; transition: background 0.3s var(--ease);
+}
+.rad button:hover:not(:disabled) { background: var(--paper-deep); }
+.rad button:disabled { cursor: default; color: var(--muted); }
+.rad button[aria-current="step"] { background: var(--moss-tint); color: var(--ink); font-weight: 500; }
+.rad .prick {
+  flex: none; width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid var(--line-strong);
+  display: grid; place-items: center; font-family: var(--mono); font-size: 11px; color: var(--muted);
+  transition: background 0.3s var(--ease), border-color 0.3s var(--ease);
+}
+.rad button.klar .prick { background: var(--moss); border-color: var(--moss); color: var(--knapp-fg); }
+.rad button[aria-current="step"]:not(.klar) .prick { border-color: var(--moss); color: var(--moss); }
+
+.mobilsteg { display: none; padding: 14px 20px 0; flex-direction: column; gap: 8px; }
+.mobilsteg span { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.matare { height: 4px; border-radius: 2px; background: var(--mark); overflow: hidden; }
+.matare i { display: block; height: 100%; width: 12.5%; background: var(--moss); transition: width 0.6s var(--ease); }
+
+/* ---- one step */
+
+.steg {
+  padding: 32px clamp(20px, 4vw, 40px) 36px;
+  display: flex; flex-direction: column; gap: 20px;
+  min-width: 0; min-height: 430px;
+  animation: in 0.5s var(--ease);
+}
+@keyframes in { from { opacity: 0; transform: translateY(6px); } }
+.steg h2 { font-size: clamp(24px, 3.6vw, 32px); line-height: 1.12; font-weight: 700; text-wrap: balance; max-width: 22ch; }
+.steg > p { color: var(--ink-soft); max-width: 56ch; }
+.steg > p.liten { font-size: 14px; color: var(--muted); }
+
+.rader { display: flex; flex-direction: column; border-top: 1px solid var(--line); max-width: 560px; }
+.rader li {
+  display: flex; gap: 12px; justify-content: space-between; align-items: baseline;
+  padding: 11px 0; border-bottom: 1px solid var(--line);
+}
+.rader .varde { font-family: var(--mono); font-size: 13px; color: var(--ink-soft); text-align: right; overflow-wrap: anywhere; }
+.ok { color: var(--moss); font-weight: 500; }
+.nej { color: var(--rust); font-weight: 500; }
+.rader .varde.ok { color: var(--moss); }
+.rader .varde.nej { color: var(--rust); }
+
+.besked { padding: 14px 16px; border-radius: 10px; background: var(--moss-tint); max-width: 560px; }
+.besked.nejruta { background: none; border: 1.5px solid var(--rust); color: var(--rust); }
+
+.knappar { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin-top: auto; padding-top: 8px; }
+.knapp {
+  display: inline-block; font: inherit; font-weight: 500; padding: 11px 18px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--moss); background: var(--moss); color: var(--knapp-fg); text-decoration: none;
+  transition: transform 0.3s var(--ease), opacity 0.3s var(--ease);
+}
+.knapp:hover:not(:disabled) { transform: translateY(-1px); }
+.knapp:disabled { opacity: 0.4; cursor: default; }
+.knapp.tyst { background: none; color: var(--ink); border-color: var(--line-strong); }
+.lank {
+  font: inherit; background: none; border: 0; padding: 0; color: var(--muted);
+  text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
+}
+
+.puls::after {
+  content: "\25D0"; display: inline-block; margin-left: 8px; color: var(--moss);
+  animation: snurr 1.6s linear infinite;
+}
+@keyframes snurr { to { transform: rotate(360deg); } }
+
+/* ---- step 2: the terms, as they are written */
+
+.villkor { max-width: 640px; display: flex; flex-direction: column; gap: 10px; }
+.villkor li { color: var(--ink-soft); padding-left: 1.7em; text-indent: -1.7em; overflow-wrap: anywhere; }
+.kryss { display: flex; gap: 10px; align-items: center; font-weight: 500; }
+.kryss input { width: 18px; height: 18px; accent-color: var(--moss); flex: none; }
+
+/* ---- step 3: the code */
+
+.kod {
+  font-family: var(--mono); font-size: clamp(26px, 5vw, 38px); letter-spacing: 0.08em;
+  padding: 14px 20px; border: 1px dashed var(--line-strong); border-radius: 10px;
+  width: fit-content; max-width: 100%; overflow-wrap: anywhere; user-select: all;
+}
+
+/* ---- step 4: the key */
+
+.tre { display: flex; flex-direction: column; gap: 8px; counter-reset: t; max-width: 560px; }
+.tre li { display: grid; grid-template-columns: 26px 1fr; }
+.tre li::before {
+  counter-increment: t; content: counter(t);
+  font-family: var(--mono); font-size: 12px; color: var(--muted); padding-top: 4px;
+}
+.falt { display: flex; flex-direction: column; gap: 6px; max-width: 460px; }
+.falt label { font-size: 14px; color: var(--muted); }
+.falt input {
+  font-family: var(--mono); font-size: 14px; padding: 11px 12px; border-radius: 8px;
+  border: 1px solid var(--line-strong); background: var(--paper); color: var(--ink); width: 100%;
+}
+
+/* ---- step 5: what is missing */
+
+.saknas { display: flex; flex-direction: column; border-top: 1px solid var(--line); max-width: 560px; }
+.saknas li { padding: 11px 0; border-bottom: 1px solid var(--line); color: var(--rust); font-weight: 500; }
+
+/* ---- step 6: the cells */
+
+.karta {
+  max-width: 640px; padding: 10px; border-radius: 10px; background: var(--paper-deep);
+  line-height: 0;
+}
+.karta canvas { display: block; width: 100%; height: auto; border-radius: 4px; cursor: pointer; image-rendering: pixelated; }
+.forklaring { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 14px; color: var(--ink-soft); }
+.forklaring span { display: inline-flex; gap: 7px; align-items: center; }
+.forklaring i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.forklaring .live { background: var(--moss-soft); }
+.forklaring .vantar { background: var(--ochre); }
+.forklaring .last { background: var(--rust); }
+.forklaring .fri { background: var(--yta); border: 1.5px dashed var(--line-strong); }
+.ruta-id { font-family: var(--mono); font-size: 14px; }
+
+/* ---- step 7: the four phases */
+
+.steg-del { display: flex; flex-direction: column; gap: 20px; }
+.steg-del > p { color: var(--ink-soft); max-width: 56ch; }
+
+.faser { max-width: 560px; display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.faser li {
+  display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between;
+  padding: 11px 0; border-bottom: 1px solid var(--line); color: var(--muted);
+}
+.faser li.nu { color: var(--ink); font-weight: 500; }
+.faser li.gjord { color: var(--ink-soft); }
+.faser li.nu .namn::after {
+  content: "\25D0"; display: inline-block; margin-left: 8px; color: var(--moss);
+  animation: snurr 1.6s linear infinite;
+}
+.faser li.gjord .namn::before { content: "\2713"; margin-right: 8px; color: var(--moss); }
+.faser .tid { font-family: var(--mono); font-size: 13px; font-weight: 400; }
+.detalj {
+  font-family: var(--mono); font-size: 13px; color: var(--muted);
+  max-width: 560px; min-height: 1.5em; overflow-wrap: anywhere;
+}
+.rapport {
+  font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--ink-soft);
+  width: 100%; max-width: 560px; height: 180px; padding: 10px 12px; resize: vertical;
+  border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper);
+}
+
+/* ---- narrow screens: the rail becomes one line and a meter */
+
+@media (max-width: 720px) {
+  body { padding-top: 16px; }
+  .kropp { grid-template-columns: minmax(0, 1fr); }
+  .rad { display: none; }
+  .mobilsteg { display: flex; }
+  .steg { min-height: 0; padding-top: 24px; }
+  .rader li { flex-direction: column; gap: 2px; }
+  .rader .varde { text-align: left; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

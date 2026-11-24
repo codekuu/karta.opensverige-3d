@@ -1601,5 +1601,76 @@ class AppServerTests(_OwnHome):
         self.assertIn("app_page/*", shipped)
 
 
+class PageFilesTests(unittest.TestCase):
+    """The page's three files, read as text: what they may not hold and what they must."""
+
+    def read(self, name: str) -> str:
+        return (app.PAGE_DIR / name).read_text(encoding="utf-8")
+
+    def test_the_page_loads_nothing_from_outside(self) -> None:
+        for name in ("index.html", "app.css"):
+            text = self.read(name)
+            self.assertNotIn("http://", text, name)
+            self.assertNotIn("https://", text, name)
+            self.assertNotIn("//fonts.", text, name)
+            self.assertNotIn("@import", text, name)
+            self.assertNotIn("url(", text, name)
+        script = self.read("app.js")
+        # The two places a person is sent to: GitHub's device page and Cesium ion. Links, not loads.
+        allowed = {"https://github.com/login/device", "https://ion.cesium.com"}
+        found = set(re.findall(r"https?://[^\s\"'`)]*", script))
+        self.assertEqual(found - allowed, set())
+        self.assertEqual(found, allowed)
+        for loader in ("import(", "importScripts", "new Worker", "XMLHttpRequest", "WebSocket", "EventSource"):
+            self.assertNotIn(loader, script, loader)
+
+    def test_text_is_never_set_as_markup(self) -> None:
+        script = self.read("app.js")
+        for markup in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser", "eval(", "new Function"):
+            self.assertNotIn(markup, script, markup)
+        page = self.read("index.html")
+        # The policy stops inline script and style, so the page must not need them.
+        for inline in ("<style", "style=", "onclick", "onload", "javascript:"):
+            self.assertNotIn(inline, page, inline)
+        self.assertEqual(len(re.findall(r"<script\b", page)), 1)
+        self.assertIn('<script src="app.js" defer></script>', page)
+        self.assertIn('<link rel="stylesheet" href="app.css">', page)
+
+    def test_every_step_of_the_sketch_is_there(self) -> None:
+        page = self.read("index.html")
+        for number in range(1, 9):
+            self.assertEqual(page.count(f'id="steg-{number}"'), 1, number)
+        self.assertNotIn('id="steg-9"', page)
+        self.assertIn('lang="sv"', page)
+
+    def test_no_emoji_in_the_page(self) -> None:
+        for name in ("index.html", "app.js", "app.css"):
+            for ch in self.read(name):
+                code = ord(ch)
+                emoji = 0x1F000 <= code <= 0x1FAFF or 0x2600 <= code <= 0x26FF or code in (0xFE0F, 0x200D)
+                self.assertFalse(emoji, f"{name}: U+{code:04X}")
+
+    def test_every_problem_word_has_a_swedish_sentence(self) -> None:
+        script = self.read("app.js")
+        words = (
+            "mac", "no_card", "small_card", "disk",
+            "missing", "refused", "twice", "no_access", "unreachable", "broken",
+            "expired", "network",
+            "taken", "machine", "check", "failed",
+            "busy", "no_cell", "not_ready", "terms", "none_free",
+        )
+        for word in words:
+            self.assertRegex(script, rf"\b{word}: \"", word)
+        self.assertIn("Något gick fel. Försök igen.", script)
+
+    def test_a_sentence_in_the_page_is_at_most_twelve_words(self) -> None:
+        page = re.sub(r"<[^>]+>", "\n", self.read("index.html"))
+        script_strings = re.findall(r'"([^"\n]*[a-zåäö][^"\n]*[.?!])"', self.read("app.js"))
+        for chunk in [*page.split("\n"), *script_strings]:
+            for sentence in re.split(r"(?<=[.?!])\s+", chunk.strip()):
+                words = [w for w in sentence.split() if re.search(r"[A-Za-zÅÄÖåäö0-9]", w)]
+                self.assertLessEqual(len(words), 12, sentence)
+
+
 if __name__ == "__main__":
     unittest.main()
