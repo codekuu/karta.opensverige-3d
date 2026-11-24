@@ -2143,7 +2143,7 @@ class AppServerTests(_OwnHome):
             with patch("getpass.getuser", side_effect=fault):
                 status, _headers, body = self.call("GET", f"{self.base}/api/report")
             self.assertEqual(status, 200, body)
-            self.assertIn(b"Pixelbygget app report", body)
+            self.assertIn(b"Tech Embassy Pixel report", body)
 
     def test_next_on_a_sheet_that_just_filled_up_says_none_is_free(self) -> None:
         # The page knew of a free cell a moment ago. Someone took the last one since.
@@ -2662,12 +2662,13 @@ class PageFilesTests(unittest.TestCase):
             self.assertNotIn("@import", text, name)
             self.assertNotIn("url(", text, name)
         script = self.read("app.js")
-        # The three places a person is sent to: GitHub's device page, Cesium ion and the
-        # release page of a newer app. Links, not loads.
+        # The four places a person is sent to: GitHub's device page, Cesium ion, the release
+        # page of a newer app and the map's own site. Links, not loads.
         allowed = {
             "https://github.com/login/device",
             "https://ion.cesium.com",
             "https://github.com/opensverige/karta.opensverige-3d/releases/",
+            "https://techembassy.se",
         }
         found = set(re.findall(r"https?://[^\s\"'`)]*", script))
         self.assertEqual(found - allowed, set())
@@ -2748,10 +2749,23 @@ class PageFilesTests(unittest.TestCase):
 
     def test_the_page_has_a_way_to_close_the_app(self) -> None:
         page = self.read("index.html")
-        self.assertGreaterEqual(page.count(">Stäng Pixelbygget<"), 1)
+        self.assertEqual(page.count(">Stäng appen<"), 2)
         self.assertIn('id="stangd"', page)
         self.assertIn("Appen stängs. Du kan stänga fliken.", page)
         self.assertIn('"api/quit"', self.read("app.js"))
+
+    def test_the_page_carries_its_name_and_what_it_is_for(self) -> None:
+        # "Pixelbygget" is the project's own word. A person sees the name that points at the
+        # site, one sentence about what the program does, and where the map is.
+        page = self.read("index.html")
+        self.assertIn("<title>Tech Embassy Pixel</title>", page)
+        self.assertIn("<h1>Tech Embassy Pixel</h1>", page)
+        self.assertIn("Din dator ritar en ruta av Sveriges pixelkarta.", page)
+        # The address itself is set by the script, like every link the page has.
+        self.assertIn('id="syfte-lank"', page)
+        self.assertIn('const SAJTEN = "https://techembassy.se";', self.read("app.js"))
+        for name in ("index.html", "app.js"):
+            self.assertNotIn("Pixelbygget", self.read(name), name)
 
     def test_the_page_can_say_a_newer_app_is_out(self) -> None:
         page = self.read("index.html")

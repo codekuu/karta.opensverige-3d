@@ -934,7 +934,7 @@ class InstallerFilesTests(unittest.TestCase):
         script = self.read("installer", "pixelbygget.iss")
         self.assertIn("PrivilegesRequired=lowest", script)
         self.assertNotIn("PrivilegesRequiredOverridesAllowed", script.replace("; PrivilegesRequiredOverridesAllowed", ""))
-        self.assertIn(r"DefaultDirName={localappdata}\Pixelbygget", script)
+        self.assertIn(r"DefaultDirName={localappdata}\TechEmbassyPixel", script)
         # Nothing outside the person's own folder: no machine-wide registry, no PATH.
         for forbidden in ("HKLM", "[Registry]", "ChangesEnvironment", "{commonpf", "{sys}", "{win}"):
             self.assertNotIn(forbidden, script)
@@ -943,8 +943,24 @@ class InstallerFilesTests(unittest.TestCase):
         script = self.read("installer", "pixelbygget.iss")
         icons = script[script.index("[Icons]") : script.index("[Run]")]
         self.assertEqual(icons.count(r'Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\start.pyw"""'), 2)
-        self.assertIn(r"{autoprograms}\Pixelbygget", icons)
-        self.assertIn(r"{autodesktop}\Pixelbygget", icons)
+        self.assertIn(r"{autoprograms}\Tech Embassy Pixel", icons)
+        self.assertIn(r"{autodesktop}\Tech Embassy Pixel", icons)
+
+    def test_a_person_sees_the_outward_name_and_what_the_program_is_for(self) -> None:
+        # "Pixelbygget" is the project's own word and is shown to nobody.
+        script = self.read("installer", "pixelbygget.iss")
+        self.assertIn("AppName=Tech Embassy Pixel", script)
+        self.assertIn("AppPublisherURL=https://techembassy.se", script)
+        self.assertIn("WelcomeLabel2=Din dator ritar en ruta av Sveriges pixelkarta.", script)
+        self.assertIn("techembassy.se", script[script.index("WelcomeLabel2=") :])
+        shown = [line for line in script.splitlines() if not line.lstrip().startswith((";", "//"))]
+        self.assertEqual([line for line in shown if "Pixelbygget" in line], [])
+        start = self.read("installer", "start.pyw")
+        self.assertIn('"Tech Embassy Pixel kunde inte starta. Installera appen igen."', start)
+        workflow = self.read(".github", "workflows", "installer.yml")
+        self.assertIn("TechEmbassyPixel-Setup-", workflow)
+        self.assertNotIn("Pixelbygget-Setup", workflow)
+        self.assertIn('$exe = Join-Path $Out "TechEmbassyPixel-Setup-$Version.exe"', self.read("installer", "build.ps1"))
 
     def test_the_installer_script_is_plain_ascii(self) -> None:
         # Inno Setup reads a file without a byte order mark in the machine's own code page.

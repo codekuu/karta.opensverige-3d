@@ -56,6 +56,8 @@ h2:focus { outline: none; }
 }
 .bar h1 { font-size: 16px; font-weight: 700; }
 .bar .adress { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+/* What the program is for, and where the map is: one quiet line under the name. */
+.bar .syfte { flex-basis: 100%; font-size: 14px; color: var(--ink-soft); }
 
 .banderoll {
   padding: 10px 20px; border-bottom: 1px solid var(--line);

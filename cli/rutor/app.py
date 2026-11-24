@@ -1332,7 +1332,7 @@ def _report(
     # The host name is left out on purpose: a report is pasted into an issue.
     text = "\n".join(
         [
-            "Pixelbygget app report",
+            "Tech Embassy Pixel report",
             f"rutor: {__version__}",
             app_line,
             f"pipeline: {pipeline.PIPELINE}",
@@ -1952,7 +1952,7 @@ def _serve(args: argparse.Namespace, quiet: bool) -> int:
                 _show(found, args)
                 return 0
             if time.monotonic() >= deadline:
-                raise environment("another Pixelbygget was starting and did not come up; start it again")
+                raise environment("another Tech Embassy Pixel was starting and did not come up; start it again")
             time.sleep(0.2)
     try:
         _show(server.url, args)
@@ -1991,7 +1991,7 @@ def _quit_running() -> int:
         with opener.open(request, timeout=QUIT_SECONDS) as response:
             response.read(1000)
     except Exception as exc:
-        raise environment("the running Pixelbygget did not answer; close it and try again") from exc
+        raise environment("the running Tech Embassy Pixel did not answer; close it and try again") from exc
     deadline = time.monotonic() + QUIT_SECONDS
     while time.monotonic() < deadline:
         # Gone when the page is, and, for another process than this one, when it has ended:
@@ -2000,7 +2000,7 @@ def _quit_running() -> int:
         if _answers(url) == "no" and not (other and _alive(pid)):
             return 0
         time.sleep(0.2)
-    raise environment("the running Pixelbygget did not end; close it and try again")
+    raise environment("the running Tech Embassy Pixel did not end; close it and try again")
 
 
 def cmd_app(args: argparse.Namespace) -> int:

@@ -1,9 +1,10 @@
-# Build the Pixelbygget installer for Windows.
+# Build the installer of Tech Embassy Pixel for Windows. (Pixelbygget is the project's own
+# name for it; a person who installs it never sees that word.)
 #
 #   installer\build.ps1 -Version 0.1.0
 #
 # Lays out the folder the installer will put on a person's machine (installer\stage) and
-# runs Inno Setup on it. Output: installer\out\Pixelbygget-Setup-<version>.exe.
+# runs Inno Setup on it. Output: installer\out\TechEmbassyPixel-Setup-<version>.exe.
 #
 # The installer is small on purpose: a Python of its own, the rutor code and one wheel.
 # Everything large is fetched by the app page, after it has said that the machine can draw.
@@ -165,7 +166,7 @@ Invoke-Checked $iscc @(
     (Join-Path $PSScriptRoot 'pixelbygget.iss')
 )
 
-$exe = Join-Path $Out "Pixelbygget-Setup-$Version.exe"
+$exe = Join-Path $Out "TechEmbassyPixel-Setup-$Version.exe"
 if (-not (Test-Path -LiteralPath $exe)) { throw "Inno Setup wrote no $exe" }
 $size = [math]::Round((Get-Item -LiteralPath $exe).Length / 1MB, 1)
 # The installer is what a person fetches before the page has said whether their machine

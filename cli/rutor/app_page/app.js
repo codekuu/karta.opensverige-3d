@@ -82,12 +82,13 @@ const HAMTAR = {
   model: "Hämtar ritmodellen",
 };
 
-// The three places the page sends a person to. They are links the person presses. The page
+// The four places the page sends a person to. They are links the person presses. The page
 // itself loads nothing from them.
 const GITHUB_KOD = "https://github.com/login/device";
 const CESIUM_ION = "https://ion.cesium.com";
 const KARTANS_VARD = "karta.opensverige.se";
 const NY_VERSION = "https://github.com/opensverige/karta.opensverige-3d/releases/";
+const SAJTEN = "https://techembassy.se";
 
 const FRAGA_SEKUNDER = 2;
 const FRAGA_SEKUNDER_UNDER_JOBB = 1;
@@ -244,7 +245,7 @@ function rita() {
   const arbetar = gar(s) || Object.prototype.hasOwnProperty.call(HAMTAR, s.install.phase);
   if (!arbetar) stangFraga = false;
   for (const knapp of document.querySelectorAll("[data-stang]")) {
-    knapp.textContent = stangFraga ? "Stäng ändå. Arbetet avbryts." : "Stäng Pixelbygget";
+    knapp.textContent = stangFraga ? "Stäng ändå. Arbetet avbryts." : "Stäng appen";
     knapp.disabled = upptagen;
   }
   const fas = s.job.phase;
@@ -911,6 +912,7 @@ function koppla() {
   }
 
   for (const knapp of document.querySelectorAll("[data-stang]")) knapp.addEventListener("click", stang);
+  el("syfte-lank").setAttribute("href", SAJTEN);
   el("hamta").addEventListener("click", () => gor("api/install", {}, "svar"));
   el("hamta-avbryt").addEventListener("click", () => gor("api/install/stop", {}, "svar"));
 }

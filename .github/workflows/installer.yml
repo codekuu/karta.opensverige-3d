@@ -1,6 +1,6 @@
 name: installer
 
-# Builds the Windows installer of the Pixelbygget app and tries it on a Windows that has
+# Builds the Windows installer of Tech Embassy Pixel (the Pixelbygget app) and tries it on a Windows that has
 # never seen it: install, start, ask the page, close, uninstall. The runner has no graphics
 # card, so the page's "this machine cannot draw" is the proof that the bundle starts.
 #
@@ -64,9 +64,9 @@ jobs:
       - name: Install without a click, under a profile named Åsa Öberg
         run: |
           $profile = Join-Path $env:RUNNER_TEMP 'Åsa Öberg'
-          $app = Join-Path $profile 'AppData\Local\Pixelbygget'
+          $app = Join-Path $profile 'AppData\Local\TechEmbassyPixel'
           New-Item -ItemType Directory -Path $profile -Force | Out-Null
-          $setup = "installer\out\Pixelbygget-Setup-${{ steps.version.outputs.version }}.exe"
+          $setup = "installer\out\TechEmbassyPixel-Setup-${{ steps.version.outputs.version }}.exe"
           $done = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList '/VERYSILENT', '/CURRENTUSER', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$app`""
           if ($done.ExitCode -ne 0) { throw "The installer ended with $($done.ExitCode)" }
           foreach ($needed in 'python\python.exe', 'python\pythonw.exe', 'start.pyw', 'install.json', 'requirements-app.lock', 'TERMS.md', 'cli\rutor\app.py', 'cli\google-render\package-lock.json') {
@@ -148,8 +148,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Pixelbygget-Setup-${{ steps.version.outputs.version }}
-          path: installer/out/Pixelbygget-Setup-${{ steps.version.outputs.version }}.exe
+          name: TechEmbassyPixel-Setup-${{ steps.version.outputs.version }}
+          path: installer/out/TechEmbassyPixel-Setup-${{ steps.version.outputs.version }}.exe
           if-no-files-found: error
 
   draft:
@@ -162,13 +162,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: Pixelbygget-Setup-${{ needs.build.outputs.version }}
+          name: TechEmbassyPixel-Setup-${{ needs.build.outputs.version }}
       - name: A draft release with the installer
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "Pixelbygget-Setup-$VERSION.exe" \
+          gh release create "$GITHUB_REF_NAME" "TechEmbassyPixel-Setup-$VERSION.exe" \
             --repo "$GITHUB_REPOSITORY" --draft \
-            --title "Pixelbygget $VERSION" \
-            --notes "The Windows installer of the Pixelbygget app. A draft: a person publishes it."
+            --title "Tech Embassy Pixel $VERSION" \
+            --notes "The Windows installer of Tech Embassy Pixel. A draft: a person publishes it."

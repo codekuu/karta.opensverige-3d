@@ -1,4 +1,4 @@
-"""What the Pixelbygget shortcut starts: the app page, without a terminal window.
+"""What the Tech Embassy Pixel shortcut starts: the app page, without a terminal window.
 
 The shortcut runs this file with pythonw.exe, which has no console. It starts the app's own
 python.exe once, with a console that has no window, and ends. Everything the app starts
@@ -20,7 +20,8 @@ NO_WINDOW = 0x08000000
 NEW_GROUP = 0x00000200
 # How long a start is watched. An app that is still up after this has started.
 WATCH_SECONDS = 4.0
-SORRY = "Pixelbygget kunde inte starta. Installera appen igen."
+NAME = "Tech Embassy Pixel"
+SORRY = "Tech Embassy Pixel kunde inte starta. Installera appen igen."
 
 
 def command(app: Path) -> list[str]:
@@ -43,7 +44,7 @@ def _say(text: str) -> None:
         return
     import ctypes
 
-    ctypes.windll.user32.MessageBoxW(None, text, "Pixelbygget", 0x10)  # type: ignore[attr-defined]
+    ctypes.windll.user32.MessageBoxW(None, text, NAME, 0x10)  # type: ignore[attr-defined]
 
 
 def main() -> int:
@@ -71,7 +72,7 @@ def main() -> int:
         # nothing at all is the worst answer, and there is no terminal to read a fault in.
         _say(SORRY)
         return 1
-    # Ended well at once: another Pixelbygget was up already, and its page was opened.
+    # Ended well at once: another one was up already, and its page was opened.
     return 0
 
 
