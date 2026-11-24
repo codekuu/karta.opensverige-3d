@@ -10,6 +10,8 @@ import json
 import os
 import re
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -70,15 +72,16 @@ class CesiumTokenTests(_OwnHome):
         config.write_cesium_token(CESIUM)
         self.assertEqual(stat.S_IMODE(config.cesium_token_path().stat().st_mode), 0o600)
 
-    def test_the_stored_token_is_handed_on_only_when_none_is_set(self) -> None:
+    def test_the_token_pasted_into_the_page_is_the_one_handed_on(self) -> None:
         self.assertEqual(config.cesium_env(), {})
-        config.write_cesium_token(CESIUM)
-        self.assertEqual(config.cesium_env(), {"CESIUM_ION_TOKEN": CESIUM})
-        # The person's own variable wins: the child inherits it, and nothing is added.
+        # The person's own variable, and nothing pasted: the child inherits it, nothing is added.
         os.environ["CESIUM_ION_TOKEN"] = "x.y.z"
         self.assertEqual(config.cesium_env(), {})
-        # A variable that is set to nothing is not a token.
-        os.environ["CESIUM_ION_TOKEN"] = "  "
+        # A token pasted into the page is the page's answer to "which token", so it wins. A
+        # variable that has gone stale could otherwise never be put right from the page.
+        config.write_cesium_token(CESIUM)
+        self.assertEqual(config.cesium_env(), {"CESIUM_ION_TOKEN": CESIUM})
+        os.environ.pop("CESIUM_ION_TOKEN")
         self.assertEqual(config.cesium_env(), {"CESIUM_ION_TOKEN": CESIUM})
 
     def test_handing_the_token_on_does_not_set_it_here(self) -> None:
@@ -188,8 +191,7 @@ class ChecksTests(_OwnHome):
 
     def test_missing_tools_are_named(self) -> None:
         with (
-            patch("rutor.commands._torch_missing", return_value="no"),
-            patch("rutor.commands._bitsandbytes_missing", return_value=None),
+            patch("rutor.app._model_stack_missing", return_value=["torch"]),
             patch("rutor.commands._render_missing", return_value=None),
             patch("rutor.commands._model_is_cached", return_value=False),
             patch("rutor.renderer.google.node_missing", return_value="no"),
@@ -202,8 +204,7 @@ class ChecksTests(_OwnHome):
         with (
             patch("rutor.renderer.google.node_missing", side_effect=AssertionError("node was asked")),
             patch("rutor.renderer.google.renderer_missing", side_effect=AssertionError("renderer was asked")),
-            patch("rutor.commands._torch_missing", return_value=None),
-            patch("rutor.commands._bitsandbytes_missing", return_value=None),
+            patch("rutor.app._model_stack_missing", return_value=[]),
             patch("rutor.commands._render_missing", return_value=None),
             patch("rutor.commands._model_is_cached", return_value=True),
         ):
@@ -211,6 +212,33 @@ class ChecksTests(_OwnHome):
         self.assertTrue(found["ready"])
         self.assertEqual(found["missing"], [])
         self.assertTrue(found["model_cached"])
+
+    def test_the_page_does_not_import_the_model_stack_itself(self) -> None:
+        # PyTorch in the page's own process would sit in memory beside the redraw for as long
+        # as the page is open. It is asked about in a child that ends.
+        with (
+            patch("rutor.commands._torch_missing", side_effect=AssertionError("torch was imported here")),
+            patch("rutor.commands._bitsandbytes_missing", side_effect=AssertionError("bitsandbytes was imported here")),
+            patch("rutor.app._model_stack_missing", return_value=["bitsandbytes"]),
+            patch("rutor.commands._render_missing", return_value=None),
+            patch("rutor.commands._model_is_cached", return_value=True),
+        ):
+            self.assertEqual(app.tools("open")["missing"], ["bitsandbytes"])
+
+    def test_the_model_stack_is_asked_about_in_a_child(self) -> None:
+        had = {name for name in ("torch", "bitsandbytes") if name in sys.modules}
+        found = app._model_stack_missing()
+        self.assertLessEqual(set(found), {"torch", "bitsandbytes"})
+        self.assertEqual({name for name in ("torch", "bitsandbytes") if name in sys.modules}, had)
+
+    def test_a_child_that_cannot_answer_counts_as_missing(self) -> None:
+        with patch("rutor.app.subprocess.run", side_effect=OSError("no python")):
+            self.assertEqual(app._model_stack_missing(), ["torch", "bitsandbytes"])
+        with patch("rutor.app.subprocess.run", return_value=subprocess.CompletedProcess([], 1, "Traceback\n", "")):
+            self.assertEqual(app._model_stack_missing(), ["torch", "bitsandbytes"])
+        said = "torch ok\nbitsandbytes missing\n<b>noise</b>\n"
+        with patch("rutor.app.subprocess.run", return_value=subprocess.CompletedProcess([], 0, said, "")):
+            self.assertEqual(app._model_stack_missing(), ["bitsandbytes"])
 
     def test_cesium_answers_are_words_the_page_knows(self) -> None:
         def at(status: int, code: str = "") -> Mock:
@@ -251,10 +279,22 @@ class ChecksTests(_OwnHome):
         found = app.cesium(ask=ask)
         self.assertEqual(asked, ["a.b.c"])
         self.assertEqual(found, {"set": True, "ok": True, "problem": ""})
+        # The pasted token is the one judged, also beside a variable: it is the one handed on.
         os.environ["CESIUM_ION_TOKEN"] = "x.y.z"
         asked.clear()
         app.cesium(ask=ask)
+        self.assertEqual(asked, ["a.b.c"])
+        config.cesium_token_path().unlink()
+        asked.clear()
+        app.cesium(ask=ask)
         self.assertEqual(asked, ["x.y.z"])
+
+    def test_a_token_with_a_letter_no_header_can_carry_is_broken(self) -> None:
+        # A token is plain ASCII. A pasted ellipsis or a letter with an accent cannot be sent.
+        quiet = Mock(side_effect=AssertionError("asked"))
+        for pasted in ("a.b.c\u2026", "a.\u00e9.c"):
+            self.assertEqual(app.cesium(pasted, ask=quiet), {"set": True, "ok": False, "problem": "broken"})
+        quiet.assert_not_called()
 
     def test_the_token_is_in_no_answer(self) -> None:
         secret = "a.b.c-secret"
@@ -342,6 +382,8 @@ class FakeRun:
         self._released = threading.Event()
         self._ended = threading.Event()
         self.stopped = False
+        # What a stopped child exits with: -15 from a signal, 1 from taskkill on Windows.
+        self.stopped_code = -15
 
     def lines(self) -> Iterator[app_jobs.Line]:
         for text in self._first:
@@ -375,7 +417,7 @@ class FakeRun:
     def wait(self) -> int:
         # A stop ends the child wherever it is, so wait() must not hang on a reader.
         self._ended.wait(timeout=30.0)
-        return -15 if self.stopped else self._code
+        return self.stopped_code if self.stopped else self._code
 
     def stop(self) -> None:
         self.stopped = True
@@ -810,7 +852,7 @@ class JobTests(_OwnHome):
         builder, fake = self._builder()
         fake.script(
             "claim",
-            ["error: refused: too_many_locks: Five of your cells are waiting already."],
+            ["error: refused: sheet_closed: That sheet is not open for claims."],
             code=2,
         )
         builder.choose(self.SHEET, 74, 20)
@@ -1210,6 +1252,98 @@ class JobTests(_OwnHome):
         self.assertEqual(self._state(builder)["problem"], "machine")
         self.assertEqual(self._started(fake), ["login", "claim"])
 
+    def test_too_many_locks_and_too_many_waiting_have_words_of_their_own(self) -> None:
+        # "Try again in a while" is no help to someone the service will refuse for two days.
+        for said, word in (
+            ("error: refused: too_many_locks: You already hold as many cells as you may.", "locks"),
+            ("error: refused: too_many_waiting: Five of your cells are waiting for review.", "waiting"),
+        ):
+            with self.subTest(word=word):
+                builder, fake = self._builder()
+                fake.script("claim", [said], code=2)
+                builder.choose(self.SHEET, 74, 20)
+                builder.build()
+                wait_until(lambda builder=builder: self._state(builder)["phase"] == "failed")
+                builder.stop()
+                self.assertEqual(self._state(builder)["problem"], word)
+                self.assertNotIn("release", self._started(fake))
+
+    def _left_holding(self) -> tuple[app.Builder, FakeStart]:
+        """A job whose render failed and whose lock could not be given back."""
+        builder, fake = self._builder()
+        self._claimed(fake)
+        fake.script("render", [], code=4)
+        fake.script("release", ["error: could not reach the service"], code=4)
+        fake.script("release", ["error: could not reach the service"], code=4)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._started(fake).count("release") == 2 and self._state(builder)["phase"] == "failed")
+        builder.stop()
+        self.assertTrue(self._state(builder)["held"])
+        return builder, fake
+
+    def _releases(self, fake: FakeStart) -> list[list[str]]:
+        return [argv for argv, _env in fake.calls if argv[0] == "release"]
+
+    def test_a_lock_that_could_not_be_given_back_is_asked_back_before_the_next_cell(self) -> None:
+        builder, fake = self._left_holding()
+        builder.choose(self.SHEET, 75, 20)
+        fake.script("release", [f"released: {self.SHEET} 74_20"])
+        fake.script("claim", [f"claimed: {self.SHEET} 75_20 expires 2026-11-25T12:00"])
+        fake.script("render", ["rendered: x"])
+        fake.script("redraw", ["check: ok"])
+        fake.script("upload", [f"uploaded: {self.SHEET} 75_20 state vantar"])
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "done")
+        builder.stop()
+        # Every release names the cell that was locked, never the one chosen after it.
+        self.assertEqual(self._releases(fake), [["release", self.SHEET, "74_20"]] * 3)
+        self.assertEqual(fake.calls[-4][0], ["claim", self.SHEET, "75_20"])
+        self.assertFalse(self._state(builder)["held"])
+
+    def test_a_lock_that_is_still_out_stops_the_next_cell_before_it_is_claimed(self) -> None:
+        builder, fake = self._left_holding()
+        claims = self._started(fake).count("claim")
+        builder.choose(self.SHEET, 75, 20)
+        fake.script("release", ["error: could not reach the service"], code=4)
+        fake.script("release", ["error: could not reach the service"], code=4)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "failed" and self._started(fake).count("release") == 4)
+        builder.stop()
+        state = self._state(builder)
+        self.assertEqual((state["problem"], state["held"]), ("lock_left", True))
+        self.assertEqual(self._started(fake).count("claim"), claims)
+        self.assertEqual(self._releases(fake), [["release", self.SHEET, "74_20"]] * 4)
+
+    def test_a_stopped_claim_is_released_whatever_its_exit_says(self) -> None:
+        # taskkill on Windows ends a child with exit 1, which otherwise reads as "bad input".
+        builder, fake = self._builder()
+        fake.script("claim", [], hold=True)
+
+        def as_windows_ends_it(argv: list[str]) -> None:
+            if argv[0] == "claim":
+                fake.runs[-1].stopped_code = 1
+
+        fake.on_start = as_windows_ends_it
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._started(fake)[-1] == "claim")
+        builder.stop()
+        self.assertEqual(self._started(fake), ["login", "claim", "release"])
+        self.assertEqual(self._state(builder)["phase"], "stopped")
+
+    def test_rita_on_a_cell_that_is_already_in_is_refused(self) -> None:
+        builder, fake = self._builder()
+        self._script_ok(fake)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "done")
+        with self.assertRaises(Refusal) as caught:
+            builder.build()
+        self.assertEqual(caught.exception.code, "no_cell")
+        self.assertEqual(self._started(fake).count("claim"), 1)
+        self.assertEqual(self._state(builder)["phase"], "done")
+
 
 # What the page's checks answer in these tests. The real ones read the machine.
 _MACHINE = {
@@ -1577,6 +1711,26 @@ class AppServerTests(_OwnHome):
         self.assertEqual(json.loads(body).get("code"), "none_free")
         self.assertIsNone(self.builder.chosen())
 
+    def test_a_page_that_stops_asking_ends_the_job_without_anyone_pressing(self) -> None:
+        # The whole chain: nobody asks for the state, the server's own timer notices, the
+        # child is stopped and the lock is given back.
+        self.now = 0.0
+        fake = FakeStart()
+        builder = app.Builder(fake, clock=lambda: self.now)
+        fake.script("claim", ["claimed: stockholm-norr 0_0 expires 2026-11-25T12:00"])
+        fake.script("render", ["note: this takes a while"], hold=True)
+        with patch("rutor.app.TICK_SECONDS", 0.02):
+            server = app.AppServer(builder)
+            self.addCleanup(server.stop)
+            server.start()
+            builder.choose("stockholm-norr", 0, 0)
+            builder.build()
+            wait_until(lambda: builder.job_state()["phase"] == "render")
+            self.now += app.GONE_SECONDS + 1
+            wait_until(lambda: builder.job_state()["phase"] == "stopped" and builder.job_state()["held"] is False)
+        self.assertTrue(fake.runs[1].stopped)
+        self.assertEqual(fake.calls[-1][0], ["release", "stockholm-norr", "0_0"])
+
     def test_a_body_that_is_not_what_the_route_takes_is_refused(self) -> None:
         status, _headers, _body = self.call("POST", f"{self.base}/api/terms", {"accept": "yes"})
         self.assertEqual(status, 400)
@@ -1656,7 +1810,7 @@ class PageFilesTests(unittest.TestCase):
             "mac", "no_card", "small_card", "disk",
             "missing", "refused", "twice", "no_access", "unreachable", "broken",
             "expired", "network",
-            "taken", "machine", "check", "failed",
+            "taken", "machine", "check", "failed", "locks", "waiting", "lock_left",
             "busy", "no_cell", "not_ready", "terms", "none_free",
         )
         for word in words:

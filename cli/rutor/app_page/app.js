@@ -35,6 +35,9 @@ const ORD = {
     network: "Nätet svarade inte. Försök igen.",
     check: "Bilden klarade inte kontrollen. Den skickades inte in.",
     failed: "Något gick fel. Försök igen.",
+    locks: "Du har redan en låst ruta. Den släpps inom två dygn.",
+    waiting: "Fem av dina rutor väntar på granskning. Vänta tills en är granskad.",
+    lock_left: "En tidigare ruta är fortfarande låst. Försök igen om en stund.",
   },
   svar: {
     busy: "En ruta ritas redan.",
@@ -77,7 +80,7 @@ let lage = null;
 let visat = 0;
 let forraFas = "";
 let missar = 0;
-let fragar = false;
+let pagaende = null;
 let nastaFraga = 0;
 
 let rutnat = null;
@@ -211,6 +214,8 @@ function rita() {
 
   if (visat === 0) visat = langst;
   if (gar(s)) visat = 7;
+  // A cell that has gone in has no question left to ask: step 7 would offer Rita again.
+  else if (fas === "done" && visat === 7) visat = 8;
   else if (fas !== forraFas && fas === "done") visat = 8;
   else if (fas !== forraFas && (fas === "failed" || fas === "stopped")) visat = 7;
   if (visat > langst) visat = langst;
@@ -449,6 +454,9 @@ function steg7(s) {
   text("rubrik-7", avbrutet ? "Ritandet avbröts" : "Rutan blev inte ritad");
   el("slut-besked").classList.toggle("nejruta", !avbrutet);
   text("slut-besked", stegFel || (avbrutet ? "Ritandet stannade. Kortet är ledigt igen." : ord("jobb", j.problem)));
+  // Where the sentence above already says which cell is locked, or that none was, no more is said.
+  const sagt = ["taken", "locks", "waiting", "lock_left"].includes(j.problem);
+  visa("slut-las", !sagt);
   text("slut-las", j.held ? "Rutan är fortfarande låst. Låset släpps av sig självt inom två dygn." : "Rutan är inte låst. Inget skickades in.");
   visa("slut-rapport-rad", rapportVisad);
   visa("slut-rapport", rapportVisad && Boolean(el("slut-rapport").value));
@@ -596,9 +604,24 @@ function klickPaRutnat(handelse) {
 
 // ---- asking the app, and telling it what the person pressed
 
-async function fraga() {
-  if (fragar) return;
-  fragar = true;
+function fraga() {
+  // One question at a time. Whoever asks while one is under way gets that one's answer.
+  if (pagaende === null) {
+    pagaende = hamtaLage().finally(() => {
+      pagaende = null;
+    });
+  }
+  return pagaende;
+}
+
+async function farskFraga() {
+  // After a press the page must see what the press changed. An answer that was already on
+  // its way may be older than the press, so it is waited out and the app is asked anew.
+  if (pagaende !== null) await pagaende;
+  await fraga();
+}
+
+async function hamtaLage() {
   window.clearTimeout(nastaFraga);
   try {
     const svar = await fetch("api/state", { cache: "no-store" });
@@ -609,7 +632,6 @@ async function fraga() {
   } catch (fel) {
     missar += 1;
   }
-  fragar = false;
   rita();
   const paus = lage && gar(lage) ? FRAGA_SEKUNDER_UNDER_JOBB : FRAGA_SEKUNDER;
   nastaFraga = window.setTimeout(fraga, paus * 1000);
@@ -624,7 +646,7 @@ async function gor(vag, kropp, grupp) {
   const svar = await skicka(vag, kropp);
   upptagen = false;
   if (!svar.ok) stegFel = ord(grupp, svar.data.code);
-  await fraga();
+  await farskFraga();
   return svar.ok ? svar.data : null;
 }
 

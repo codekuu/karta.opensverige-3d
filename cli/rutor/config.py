@@ -78,12 +78,12 @@ def write_cesium_token(token: str) -> None:
 def cesium_env() -> dict[str, str]:
     """What to add to a child's environment so that it can read the Cesium token.
 
-    Nothing when the person has set the variable themselves: the child inherits it, and theirs
-    wins. Otherwise the token the app page stored, if there is one. This process's own
-    environment is never changed, so the token reaches only the commands that are handed it.
+    The token the person pasted into the app page, when there is one: it is what the page
+    checked and showed as working, so it wins over a variable, and a variable that has gone
+    stale can be put right from the page. With nothing pasted, nothing is added, and the
+    child inherits the person's own variable if they set one. This process's environment is
+    never changed, so a pasted token reaches only the commands that are handed it.
     """
-    if os.environ.get(CESIUM_TOKEN_ENV, "").strip():
-        return {}
     stored = read_cesium_token()
     return {CESIUM_TOKEN_ENV: stored} if stored else {}
 

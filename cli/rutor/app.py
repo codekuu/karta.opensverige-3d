@@ -18,6 +18,7 @@ import json
 import os
 import platform
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -128,12 +129,43 @@ def machine() -> dict[str, object]:
     }
 
 
+_MODEL_STACK = ("torch", "bitsandbytes")
+# Run by a child of this process. It prints one line for each: "torch ok", "torch missing".
+_MODEL_STACK_SCRIPT = (
+    "from rutor import commands\n"
+    "checks = (('torch', commands._torch_missing), ('bitsandbytes', commands._bitsandbytes_missing))\n"
+    "for name, check in checks:\n"
+    "    print(name, 'missing' if check() is not None else 'ok', flush=True)\n"
+)
+_MODEL_STACK_SECONDS = 120
+
+
+def _model_stack_missing() -> list[str]:
+    """Which of PyTorch and bitsandbytes this Python lacks, asked in a child that ends.
+
+    Importing them here would leave PyTorch in the page's memory for as long as the page is
+    open, beside the redraw that needs the memory, and a reinstalled PyTorch would not be
+    seen until the page was started again. A child that cannot answer counts as missing.
+    """
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", _MODEL_STACK_SCRIPT],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_MODEL_STACK_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return list(_MODEL_STACK)
+    present = {line.split()[0] for line in done.stdout.splitlines() if line.split()[1:] == ["ok"]}
+    return [name for name in _MODEL_STACK if name not in present]
+
+
 def tools(sheet_kind: str) -> dict[str, object]:
-    missing: list[str] = []
-    if commands._torch_missing() is not None:
-        missing.append("torch")
-    if commands._bitsandbytes_missing() is not None:
-        missing.append("bitsandbytes")
+    missing: list[str] = _model_stack_missing()
     if commands._render_missing() is not None:
         missing.append("render")
     # An open-data sheet has no Node render, so those checks are not asked.
@@ -150,13 +182,11 @@ def _page_token(candidate: str | None) -> str:
     """The token to judge. A paste, even a blank one, does not fall through."""
     if candidate is not None:
         return candidate.strip()
-    set_here = os.environ.get(config.CESIUM_TOKEN_ENV, "").strip()
-    if set_here:
-        return set_here
+    # The same order as config.cesium_env: the token pasted into the page, else the variable.
     stored = config.read_cesium_token()
-    if not stored:
-        return ""
-    return stored.strip()
+    if stored:
+        return stored.strip()
+    return os.environ.get(config.CESIUM_TOKEN_ENV, "").strip()
 
 
 def cesium(candidate: str | None = None, ask: google.Asker | None = None) -> dict[str, object]:
@@ -164,7 +194,8 @@ def cesium(candidate: str | None = None, ask: google.Asker | None = None) -> dic
     if not token:
         return {"set": False, "ok": False, "problem": "missing"}
     # A space or a line break inside the token is a bad paste. Cesium is not asked.
-    if any(character.isspace() or not character.isprintable() for character in token):
+    # So is anything that is not plain ASCII: a token has none, and a header cannot carry it.
+    if not token.isascii() or any(character.isspace() or not character.isprintable() for character in token):
         return {"set": True, "ok": False, "problem": "broken"}
     try:
         # Cesium's own code is not one of the page's words. The token stays here.
@@ -252,6 +283,9 @@ _PROBLEM_BY_EXIT = {2: "refused", 3: "machine", 4: "network", 5: "check"}
 # service refused (2), or this machine was not ready and the service was never asked (3).
 _NO_LOCK_EXITS = frozenset({1, 2, 3})
 
+# Refusals of a claim that the page has a sentence of its own for, by the service's word.
+_CLAIM_REFUSALS = (("taken", "taken"), ("too_many_locks", "locks"), ("too_many_waiting", "waiting"))
+
 
 class Builder:
     """The state of the page's steps, and the children it runs for the person.
@@ -295,7 +329,9 @@ class Builder:
         self._detail = ""
         self._job_problem = ""
         self._job_url = ""
-        self._held = False
+        # The cell this page holds a lock on, as (sheet, cell), or None. It names the cell
+        # because the one being built now may be another than the one still locked.
+        self._held: tuple[str, str] | None = None
         self._stop_asked = False
         # A claim that ended without saying whether the service gave the lock.
         self._unsure = False
@@ -441,7 +477,9 @@ class Builder:
             if self._busy():
                 raise Refusal(409, "a cell is being built", "busy")
             sheet, col, row = self._sheet, self._col, self._row
-        if not sheet:
+            done = self._phase == "done"
+        if not sheet or done:
+            # A cell that has gone in is not built twice: the service would call it taken.
             raise Refusal(409, "choose a cell first", "no_cell")
         # The machine, the tools, the login and the token are asked here: they read the
         # disk and, for a stored login, the service. None of that happens under the lock.
@@ -514,7 +552,7 @@ class Builder:
                 "sheet": self._sheet,
                 "col": self._col,
                 "row": self._row,
-                "held": self._held,
+                "held": self._held is not None,
             }
 
     def job_lines(self) -> list[str]:
@@ -548,15 +586,19 @@ class Builder:
                 self._job_problem = problem
             # No command runs now, so there is no progress line left to show.
             self._detail = ""
-            held = self._held
-            unsure = self._unsure and not held
+            # An earlier cell's lock that was just asked back in vain is not asked a third time.
+            held = None if problem == "lock_left" else self._held
+            unsure = self._unsure and held is None and problem != "lock_left"
             # A lock that is still out is given back before another job may start.
-            self._releasing = held or unsure
-        if held or unsure:
+            self._releasing = held is not None or unsure
+        if held is not None or unsure:
             try:
                 # A lock that is known is asked back twice. One that only may exist is asked
                 # back once, and what the service answers is not held against the page.
-                self._release(sheet, cell, tries=2 if held else 1)
+                if held is not None:
+                    self._release(held[0], held[1], tries=2)
+                else:
+                    self._release(sheet, cell, tries=1)
             except Exception as exc:  # noqa: BLE001 - the page still has to learn it ended
                 print(f"app: {type(exc).__name__} while releasing", file=sys.stderr)
             finally:
@@ -565,6 +607,15 @@ class Builder:
 
     def _run_commands(self, sheet: str, cell: str) -> str:
         """Run the four commands for one cell. "" when the upload went out, else the problem."""
+        with self._lock:
+            left = self._held
+        if left is not None:
+            # A lock from an earlier job that could not be given back then. A new builder may
+            # hold one cell, so it is asked back before another is claimed, by its own name.
+            self._release(left[0], left[1], tries=2)
+            with self._lock:
+                if self._held is not None:
+                    return "lock_left"
         for command in ("claim", "render", "redraw", "upload"):
             with self._lock:
                 if self._stop_asked:
@@ -591,12 +642,12 @@ class Builder:
                     self._keep(line, detail=True)
                     if command == "claim" and line.kind == "claimed":
                         with self._lock:
-                            self._held = True
+                            self._held = (sheet, cell)
                     elif command == "upload" and line.kind == "uploaded":
                         # The service has the cell from here on, and the lock is spent.
                         taken_in = True
                         with self._lock:
-                            self._held = False
+                            self._held = None
                     elif command == "upload" and line.kind == "url":
                         # Only the map's own address is handed to the page.
                         if line.text.startswith(f"{config.MAP_URL}#"):
@@ -617,18 +668,22 @@ class Builder:
             if exit_code == 0 or taken_in:
                 with self._lock:
                     if command == "claim":
-                        self._held = True
+                        self._held = (sheet, cell)
                     elif command == "upload":
                         # The cell waits for review on the map; no lock is out any more.
-                        self._held = False
+                        self._held = None
                 continue
-            if command == "claim" and exit_code not in _NO_LOCK_EXITS:
-                # Stopped, cut off by the network or broken: the service may have given the
-                # lock without the claim living to say so.
+            if command == "claim":
                 with self._lock:
-                    self._unsure = True
-            if exit_code == 2 and last_error.startswith("refused: taken"):
-                return "taken"
+                    # Stopped, cut off by the network or broken: the service may have given
+                    # the lock without the claim living to say so. A stopped child's exit
+                    # says nothing: a signal gives -15, taskkill on Windows gives 1.
+                    if self._stop_asked or exit_code not in _NO_LOCK_EXITS:
+                        self._unsure = True
+                if exit_code == 2:
+                    for said, word in _CLAIM_REFUSALS:
+                        if last_error.startswith(f"refused: {said}"):
+                            return word
             return _PROBLEM_BY_EXIT.get(exit_code, "failed")
         return ""
 
@@ -645,7 +700,8 @@ class Builder:
                 self._keep(line, detail=False)
             if run.wait() == 0:
                 with self._lock:
-                    self._held = False
+                    if self._held == (sheet, cell):
+                        self._held = None
                 return
 
     def _keep(self, line: app_jobs.Line, *, detail: bool) -> None:
@@ -686,6 +742,8 @@ TICK_SECONDS = 5.0
 # How long an answer that cost something is allowed to stand.
 _MACHINE_SECONDS = 30.0
 _TOOLS_SECONDS = 30.0
+# Asking starts a child that imports PyTorch, so a yes stands for a while.
+_TOOLS_READY_SECONDS = 600.0
 _CESIUM_OK_SECONDS = 600.0
 _CESIUM_BAD_SECONDS = 30.0
 _PRICE_SECONDS = 600.0
@@ -832,7 +890,8 @@ class _Known:
         running = self._running()
         with self._lock:
             hit = self._tools
-        if hit is not None and (running or (hit[0] == kind and self._clock() - hit[2] < _TOOLS_SECONDS)):
+        limit = _TOOLS_READY_SECONDS if hit is not None and hit[1].get("ready") is True else _TOOLS_SECONDS
+        if hit is not None and (running or (hit[0] == kind and self._clock() - hit[2] < limit)):
             return hit[1]
         if running:
             return dict(_BLANK_TOOLS)
