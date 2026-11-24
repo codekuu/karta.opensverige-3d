@@ -232,9 +232,26 @@ def token_unusable(env: Mapping[str, str] | None = None, ask: Asker | None = Non
         return exc.message
 
 
+def _tool_environ(env: Mapping[str, str] | None) -> dict[str, str]:
+    """The environment Node is looked for and started in.
+
+    One that is handed in is used as it is. Otherwise it is this process's own, with the
+    app's own Node in front when this is an app install.
+    """
+    if env is not None:
+        return dict(env)
+    return {**os.environ, **config.tool_env()}
+
+
+def _which_in(environ: Mapping[str, str]) -> Which:
+    """Look a program up on the path of the environment it will run in, not on this process's."""
+    return lambda name: shutil.which(name, path=environ.get("PATH"))
+
+
 def node_missing(which: Which | None = None, run: Runner | None = None, env: Mapping[str, str] | None = None) -> str | None:
     try:
-        _node(which or shutil.which, run or _run, dict(os.environ if env is None else env))
+        environ = _tool_environ(env)
+        _node(which or _which_in(environ), run or _run, environ)
     except RutorError as exc:
         return exc.message
     return None
@@ -294,8 +311,8 @@ def render_google(
 ) -> dict[str, str]:
     """Write the 1536 px source render for one cell from Google's tiles. Returns what node reported."""
     run = run or _run
-    environ = dict(os.environ if env is None else env)
-    which = which or shutil.which
+    environ = _tool_environ(env)
+    which = which or _which_in(environ)
     root = render_dir or default_render_dir()
     no_token = token_missing(environ)
     if no_token is not None:

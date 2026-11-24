@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import urllib.parse
@@ -166,3 +167,48 @@ def work_dir(sheet: str) -> Path:
     return path
 
 
+# ---- the app install: the folder the Windows installer makes
+
+# The installer writes this file beside `cli`. A clone has none, and that is how the two
+# are told apart: the page installs tools into an app install and into nothing else.
+INSTALL_FILE = "install.json"
+_INSTALL_KEYS = ("version", "lock_sha256")
+
+
+def app_install() -> dict[str, str] | None:
+    """What the installer wrote about itself, or None on an install made by hand."""
+    try:
+        found = json.loads((repo_root() / INSTALL_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(found, dict):
+        return None
+    values = {key: found.get(key) for key in _INSTALL_KEYS}
+    if not all(isinstance(value, str) and value for value in values.values()):
+        return None
+    return {key: str(value) for key, value in values.items()}
+
+
+def app_dir() -> Path | None:
+    """The folder the installer made, or None on an install made by hand."""
+    return repo_root() if app_install() is not None else None
+
+
+def tool_env() -> dict[str, str]:
+    """What to add to an environment so that the app's own tools are found first.
+
+    The page fetches Node into the app's folder; nothing is put on the person's own PATH.
+    A folder without node.exe is a download that did not finish, and counts as no Node.
+    On an install made by hand nothing is added: there the person's own Node is used.
+    """
+    folder = app_dir()
+    if folder is None:
+        return {}
+    node = folder / "node"
+    if not (node / "node.exe").is_file():
+        return {}
+    parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    # A child of the page asks again with the folder already in front.
+    if not parts or parts[0] != str(node):
+        parts.insert(0, str(node))
+    return {"PATH": os.pathsep.join(parts)}

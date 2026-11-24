@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from rutor import config
 from rutor.api import one_line
 
 TERM_SECONDS = 10.0
@@ -185,4 +186,5 @@ def start_process(command: list[str], extra_env: Mapping[str, str]) -> Run:
 
 def start_rutor(argv: list[str], extra_env: Mapping[str, str]) -> Run:
     """Start this same Python running the CLI, so the app page runs the version it ships with."""
-    return start_process([sys.executable, "-m", "rutor", *argv], extra_env)
+    # In an app install the child finds the app's own Node before any other.
+    return start_process([sys.executable, "-m", "rutor", *argv], {**config.tool_env(), **extra_env})
