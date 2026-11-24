@@ -59,7 +59,7 @@ Read this before you start. It is what building a cell asks of you and your mach
 - The redraw model has a research license that does not allow commercial use.
 - `stockholm-norr` is drawn from Google's 3D tiles through your Cesium account. Google's policy does not allow that. You decide for yourself.
 
-**Not measured:** how much ordinary memory the machine needs. The test machine has 32 GB.
+**Memory:** the redraw holds about 13 GB of the machine's ordinary memory at its peak, measured on a machine with 32 GB. A machine with 16 GB has not been tried. `rutor app` warns below 17 GB and does not refuse.
 
 The quickest way to know whether a machine will do is `rutor preflight --machine`. It needs no login and answers in seconds.
 
@@ -94,6 +94,40 @@ Today's free cells are on `stockholm-norr`, which needs Node 22, `npm ci` in `cl
 `rutor preflight` checks Python, the NVIDIA card, the disk, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login. With `--sheet stockholm-norr` it also checks what that sheet's source needs: Node, the Google renderer and the Cesium ion token. Do not claim, render or redraw when any line says `missing`. `rutor claim` refuses on a Google sheet until those three are in place, so no cell is locked that the machine cannot render.
 
 Exit codes: 0 done, 1 bad input, 2 refused by the service, 3 something missing on this machine, 4 network, 5 the redraw failed the quality check, 6 the SE3 price is high (try later).
+
+## Build from a page
+
+`rutor app` does the steps above from a page on your own machine, so that after the install you need no terminal:
+
+```bash
+rutor app        # or: rutor bygg
+```
+
+It prints `url:` with the page's address, opens it in your browser, and runs until you press Ctrl-C. The page is in Swedish and takes you through eight steps, one question at a time:
+
+1. It looks at the machine itself: the NVIDIA card, the free disk and the memory. A machine that cannot draw gets a plain no here, and one with less than 17 GB of memory a warning.
+2. The ten terms ([TERMS.md](TERMS.md)), word for word, and a box to tick.
+3. The GitHub login: the page shows the device code and you approve it at GitHub.
+4. Your Cesium ion token, for a sheet that needs one. You paste it once. Cesium ion is asked whether it works before it is kept.
+5. What is missing of PyTorch, bitsandbytes, Pillow, Node and the Google renderer. The page installs nothing: see [Setup](#setup).
+6. The sheet's cells, and a button that picks the next free one.
+7. The page asks before the card is used, shows the SE3 price, and then runs claim, render, redraw and upload for that one cell.
+8. The cell waits for review, with its address on the map.
+
+What is worth knowing:
+
+- **The page drives the same commands.** It starts `rutor claim`, `render`, `redraw` and `upload` as its own child processes and reads the lines they print. There is one drawing code, not two.
+- **The cell is locked when you press Rita,** not when you choose it. One cell at a time.
+- **Stopping gives the lock back.** Avbryt ends the running command and what it started, Node and Chrome too, and releases the cell. So does Ctrl-C.
+- **A closed tab stops the job too,** after two and a half minutes without the page asking. A tab you have only switched away from keeps asking and keeps the job.
+- **Nothing runs when the page is closed.** No scheduled job, no service, no background loop.
+- **The page is for you alone.** It listens on 127.0.0.1, under an address with a long random key that is new at every start, and loads nothing from outside. Whoever has that address can build cells as you while the page is up, so keep it to yourself.
+- **Your login and your Cesium token stay on the machine.** Neither is in anything the page is sent. A token pasted into the page is kept beside the login (`cesium-token`, readable by you only) and is the one the page uses, also when `CESIUM_ION_TOKEN` is set.
+- **When a cell fails,** "Kopiera felrapport" copies a report with your user name and home folder taken out. You paste it into an issue yourself. The page sends nothing on its own.
+
+The page says no on a Mac and on a machine without a 12 GB NVIDIA card, as `rutor claim` does. The install is still done by hand, as under [Setup](#setup).
+
+The first cell built this way was `stockholm-norr` 82_24, on an RTX 5070 on Windows: about 2 minutes 45 seconds from Rita to waiting for review.
 
 ## Setup
 

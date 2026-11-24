@@ -16,10 +16,61 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-STOCKHOLM = ZoneInfo("Europe/Stockholm")
+
+def _clocks_change(year: int, month: int) -> datetime:
+    """01:00 UTC on the last Sunday of March or October, when the EU's clocks change."""
+    last = datetime(year, month, 31, 1)
+    return last - timedelta(days=(last.weekday() + 1) % 7)
+
+
+class SwedishTime(tzinfo):
+    """Swedish time by its rule: UTC+1, and UTC+2 from the last Sunday of March to that of October.
+
+    Windows has no time zone database of its own, and Python finds one there only when the
+    tzdata package is installed. Without this class every Windows machine without that
+    package failed at `ZoneInfo("Europe/Stockholm")`, before a price was ever read.
+    """
+
+    def _summer(self, wall: datetime) -> bool:
+        clock = wall.replace(tzinfo=None)
+        # On the wall the change is at 02:00 in March and at 03:00, back to 02:00, in October.
+        start = _clocks_change(clock.year, 3) + timedelta(hours=1)
+        end = _clocks_change(clock.year, 10) + timedelta(hours=2)
+        if clock < start or clock >= end:
+            return False
+        if clock < start + timedelta(hours=1):
+            # An hour that is skipped. The database reads it by its fold too.
+            return wall.fold == 1
+        if clock >= end - timedelta(hours=1):
+            # The hour that comes twice: first in summer time, then again in winter time.
+            return wall.fold == 0
+        return True
+
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        return timedelta(hours=2 if dt is not None and self._summer(dt) else 1)
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        return timedelta(hours=1 if dt is not None and self._summer(dt) else 0)
+
+    def tzname(self, dt: datetime | None) -> str:
+        return "CEST" if dt is not None and self._summer(dt) else "CET"
+
+    def fromutc(self, dt: datetime) -> datetime:
+        utc = dt.replace(tzinfo=None)
+        end = _clocks_change(utc.year, 10)
+        summer = _clocks_change(utc.year, 3) <= utc < end
+        local = (utc + timedelta(hours=2 if summer else 1)).replace(tzinfo=self)
+        # The first hour of winter time shows the same clock as the last hour of summer time.
+        return local.replace(fold=1) if end <= utc < end + timedelta(hours=1) else local
+
+
+try:
+    STOCKHOLM: tzinfo = ZoneInfo("Europe/Stockholm")
+except ZoneInfoNotFoundError:
+    STOCKHOLM = SwedishTime()
 AREA = "SE3"
 SOURCE = "https://www.elprisetjustnu.se/api/v1/prices"
 # Wait when the current price is more than 25% above the cheapest hour.
