@@ -115,6 +115,7 @@ h2:focus { outline: none; }
 
 .besked { padding: 14px 16px; border-radius: 10px; background: var(--moss-tint); max-width: 560px; }
 .besked.nejruta { background: none; border: 1.5px solid var(--rust); color: var(--rust); }
+.besked.varning { background: none; border: 1.5px solid var(--ochre); }
 
 .knappar { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin-top: auto; padding-top: 8px; }
 .knapp {

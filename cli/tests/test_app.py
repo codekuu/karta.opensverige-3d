@@ -190,6 +190,23 @@ class ChecksTests(_OwnHome):
         self.assertNotIsInstance(ram, bool)
         self.assertGreater(ram, 0)
 
+    def test_little_memory_is_a_warning_not_a_no(self) -> None:
+        # Measured on the first cell built from the page: the redraw held 12.6 GiB of the
+        # machine's memory at its peak. Below that plus 4 GiB for everything else, the page
+        # warns. It does not refuse: nobody has tried a 16 GB machine yet.
+        self.assertEqual((app.REDRAW_PEAK_GB, app.MEMORY_MARGIN_GB), (13, 4))
+        for ram, warning in ((8, "memory"), (16, "memory"), (17, ""), (32, ""), (None, "")):
+            with self.subTest(ram=ram), patch("rutor.app._ram_gb", return_value=ram):
+                found = self._machine([("GeForce RTX 5070", 12227)])
+                self.assertEqual(found["warning"], warning)
+                self.assertTrue(found["ok"])
+                self.assertEqual(found["problem"], "")
+
+    def test_a_machine_that_cannot_draw_gets_its_no_and_no_warning_about_memory(self) -> None:
+        with patch("rutor.app._ram_gb", return_value=8):
+            found = self._machine([("GeForce GTX 1060", 6144)])
+        self.assertEqual((found["ok"], found["problem"], found["warning"]), (False, "small_card", ""))
+
     def test_missing_tools_are_named(self) -> None:
         with (
             patch("rutor.app._model_stack_missing", return_value=["torch"]),
@@ -1873,6 +1890,7 @@ class PageFilesTests(unittest.TestCase):
             "missing", "refused", "twice", "no_access", "unreachable", "broken",
             "expired", "network",
             "taken", "machine", "check", "failed", "locks", "waiting", "lock_left",
+            "memory",
             "busy", "no_cell", "not_ready", "terms", "none_free",
         )
         for word in words:

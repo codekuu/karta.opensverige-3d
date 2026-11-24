@@ -15,6 +15,9 @@ const ORD = {
     small_card: "Grafikkortet har för lite minne. Det krävs 12 GB.",
     disk: "Disken är för full. Gör plats och kom tillbaka.",
   },
+  varning: {
+    memory: "Datorn har lite minne. Ritandet kan gå långsamt eller avbrytas.",
+  },
   nyckel: {
     missing: "Ingen nyckel är sparad än.",
     refused: "Cesium tog inte emot nyckeln. Skapa en ny och försök igen.",
@@ -274,6 +277,8 @@ function steg1(s) {
     text("rubrik-1", "Den här datorn kan inte rita");
     text("dator-besked", ord("dator", m.problem));
   }
+  visa("dator-varning", m.ok && Boolean(m.warning));
+  if (m.warning) text("dator-varning", ord("varning", m.warning));
   visa("dator-ingress", m.ok);
   visa("dator-trost", m.problem === "mac");
   visa("dator-vidare", m.ok);

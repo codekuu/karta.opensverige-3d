@@ -102,6 +102,14 @@ def _ram_gb() -> int | None:
     return None
 
 
+# Measured on mogadishu on 2026-11-24, on the first cell built from the page: the redraw
+# child held 12.6 GiB of memory at its peak (and had asked the system for 22.8 GiB). Under
+# that plus a margin for the system and the browser the page warns. It does not refuse:
+# the only machine tried has 32 GB, so what 16 GB does is not known.
+REDRAW_PEAK_GB = 13
+MEMORY_MARGIN_GB = 4
+
+
 def machine() -> dict[str, object]:
     needed = int(commands.DISK_MIN_CACHED_GB if commands._model_is_cached() else commands.DISK_MIN_GB)
     free = commands._free_gb()
@@ -124,14 +132,18 @@ def machine() -> dict[str, object]:
                 problem = "small_card"
             elif free < needed:
                 problem = "disk"
+    ram = _ram_gb()
+    # A warning is for a machine that may draw. One that gets a no has heard enough.
+    little = problem == "" and ram is not None and ram < REDRAW_PEAK_GB + MEMORY_MARGIN_GB
     return {
         "ok": problem == "",
         "card": card,
         "card_gb": card_gb,
         "free_gb": int(free),
         "needed_gb": needed,
-        "ram_gb": _ram_gb(),
+        "ram_gb": ram,
         "problem": problem,
+        "warning": "memory" if little else "",
     }
 
 
@@ -770,6 +782,7 @@ _BLANK_MACHINE: dict[str, object] = {
     "needed_gb": 0,
     "ram_gb": None,
     "problem": "",
+    "warning": "",
 }
 _BLANK_TOOLS: dict[str, object] = {"ready": False, "model_cached": False, "missing": []}
 _BLANK_PRICE: dict[str, object] = {"decision": "unknown", "after": ""}
