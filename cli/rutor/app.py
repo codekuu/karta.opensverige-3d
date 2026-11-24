@@ -12,17 +12,23 @@ claim, drawing, check and upload of one cell.
 
 from __future__ import annotations
 
+import argparse
+import getpass
+import json
 import os
+import platform
 import re
 import sys
 import threading
 import time
+import webbrowser
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
-from rutor import api, app_jobs, commands, config, login, pipeline, se3_price
-from rutor.errors import RutorError
-from rutor.localpage import Refusal
+from rutor import __version__, api, app_jobs, commands, config, login, pipeline, se3_price
+from rutor.errors import RutorError, bad_input, environment, network
+from rutor.localpage import LocalPage, Refusal, Reply, json_reply
 from rutor.renderer import google
 from rutor.renderer.sources import SHEET_KINDS
 
@@ -663,3 +669,627 @@ class Builder:
             thread.join(timeout=15)
         # A job that is drawing is stopped the way the page stops it, lock and all.
         self.stop()
+
+
+# ---- the server
+
+
+PAGE_DIR = Path(__file__).resolve().parent / "app_page"
+# The page's own files, by the name the browser asks for. Nothing else is read from disk.
+PAGE_FILES = {
+    "": ("index.html", "text/html; charset=utf-8"),
+    "app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "app.css": ("app.css", "text/css; charset=utf-8"),
+}
+TICK_SECONDS = 5.0
+
+# How long an answer that cost something is allowed to stand.
+_MACHINE_SECONDS = 30.0
+_TOOLS_SECONDS = 30.0
+_CESIUM_OK_SECONDS = 600.0
+_CESIUM_BAD_SECONDS = 30.0
+_PRICE_SECONDS = 600.0
+_SHEET_SECONDS = 60.0
+_CESIUM_TOKEN_MAX = 2000
+
+_CELL_STATES = frozenset({"fri", "last", "vantar", "godkand", "live", "ute"})
+
+_BLANK_MACHINE: dict[str, object] = {
+    "ok": False,
+    "card": "",
+    "card_gb": 0,
+    "free_gb": 0,
+    "needed_gb": 0,
+    "ram_gb": None,
+    "problem": "",
+}
+_BLANK_TOOLS: dict[str, object] = {"ready": False, "model_cached": False, "missing": []}
+_BLANK_PRICE: dict[str, object] = {"decision": "unknown", "after": ""}
+_BLANK_CESIUM: dict[str, object] = {"set": False, "ok": False, "problem": ""}
+# A sheet that is not Google's needs no Cesium account. That is not a cached answer.
+_NO_CESIUM: dict[str, object] = {"set": False, "ok": True, "problem": ""}
+
+
+def _no_sheet(problem: str) -> dict[str, object]:
+    return {"id": "", "name": "", "kind": "", "cols": 0, "rows": 0, "pipeline": "", "problem": problem}
+
+
+def _short(value: object) -> str:
+    return api.one_line(value, 80) if isinstance(value, str) else ""
+
+
+def _size(value: object) -> int | None:
+    """A sheet's width or height: a whole number from 1 to 10000, never a bool."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 10000:
+        return None
+    return value
+
+
+def _open_record(raw: object) -> dict[str, object] | None:
+    """One sheet from the queue, or None when it is not an open sheet this page can draw."""
+    if not isinstance(raw, dict):
+        return None
+    sheet_id = raw.get("id")
+    if not isinstance(sheet_id, str) or config.SHEET_ID.fullmatch(sheet_id) is None:
+        return None
+    if raw.get("state") != "open":
+        return None
+    done, total = raw.get("done"), raw.get("total")
+    if isinstance(done, bool) or isinstance(total, bool) or not isinstance(done, int) or not isinstance(total, int):
+        return None
+    if done >= total:
+        return None
+    cols, rows = _size(raw.get("cols")), _size(raw.get("rows"))
+    if cols is None or rows is None:
+        return None
+    return {
+        "id": sheet_id,
+        "name": _short(raw.get("name")),
+        "kind": SHEET_KINDS.get(sheet_id, ""),
+        "cols": cols,
+        "rows": rows,
+        "pipeline": _short(raw.get("pipeline")),
+        "problem": "",
+    }
+
+
+def _any_free(cells: object) -> bool:
+    if not isinstance(cells, list):
+        return False
+    for cell in cells:
+        if isinstance(cell, list) and len(cell) >= 3 and cell[2] == "fri":
+            return True
+    return False
+
+
+def _search_open_sheet() -> dict[str, object]:
+    """The first open sheet that still has a free cell. Raises when the service cannot be asked."""
+    token = config.read_token()
+    _status, body = api.get("/v1/sheets", token=token)
+    sheets = body.get("sheets") if isinstance(body, dict) else None
+    if not isinstance(sheets, list):
+        return _no_sheet("none_free")
+    for raw in sheets:
+        record = _open_record(raw)
+        if record is None:
+            continue
+        _grid_status, grid = api.get(f"/v1/grid/{record['id']}", token=token)
+        cells = grid.get("cells") if isinstance(grid, dict) else None
+        if _any_free(cells):
+            return record
+    return _no_sheet("none_free")
+
+
+def _kind_of(sheet: dict[str, object]) -> str:
+    """Which renderer the checks should ask. No sheet yet means the one every free cell uses."""
+    if not sheet.get("id"):
+        return "google"
+    kind = sheet.get("kind")
+    return kind if isinstance(kind, str) else ""
+
+
+class _Known:
+    """Answers that cost something, kept until they are old or a job has the card.
+
+    While a job is drawing, nothing here is worked out again: the page asks every second
+    and the card is busy. The lock guards only the stored answers. The work happens
+    outside it, because a check can take a while and must not stall the page.
+    """
+
+    def __init__(self, builder: Builder, clock: Callable[[], float] = time.monotonic) -> None:
+        self._builder = builder
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._machine: tuple[dict[str, object], float] | None = None
+        self._tools: tuple[str, dict[str, object], float] | None = None
+        self._cesium: tuple[dict[str, object], float] | None = None
+        self._price: tuple[dict[str, object], float] | None = None
+        self._sheet: tuple[dict[str, object], float] | None = None
+
+    def forget_cesium(self) -> None:
+        """The person pasted a token. The next state asks Cesium again."""
+        with self._lock:
+            self._cesium = None
+
+    def parts(self) -> dict[str, object]:
+        sheet = self.sheet()
+        kind = _kind_of(sheet)
+        return {
+            "machine": self.machine(),
+            "tools": self.tools(kind),
+            "cesium": self.cesium(kind),
+            "price": self.price(),
+            "sheet": sheet,
+        }
+
+    def machine(self) -> dict[str, object]:
+        return self._kept("machine", _MACHINE_SECONDS, _BLANK_MACHINE, machine)
+
+    def price(self) -> dict[str, object]:
+        return self._kept("price", _PRICE_SECONDS, _BLANK_PRICE, price)
+
+    def tools(self, kind: str) -> dict[str, object]:
+        running = self._running()
+        with self._lock:
+            hit = self._tools
+        if hit is not None and (running or (hit[0] == kind and self._clock() - hit[2] < _TOOLS_SECONDS)):
+            return hit[1]
+        if running:
+            return dict(_BLANK_TOOLS)
+        found = _dict(tools(kind), _BLANK_TOOLS)
+        with self._lock:
+            if not self._running():
+                self._tools = (kind, found, self._clock())
+        return found
+
+    def cesium(self, kind: str) -> dict[str, object]:
+        if kind != "google":
+            return dict(_NO_CESIUM)
+        running = self._running()
+        with self._lock:
+            hit = self._cesium
+        limit = _CESIUM_OK_SECONDS if hit is not None and hit[0].get("ok") is True else _CESIUM_BAD_SECONDS
+        if hit is not None and (running or self._clock() - hit[1] < limit):
+            return hit[0]
+        if running:
+            return dict(_BLANK_CESIUM)
+        found = _dict(cesium(), _BLANK_CESIUM)
+        with self._lock:
+            if not self._running():
+                self._cesium = (found, self._clock())
+        return found
+
+    def sheet(self) -> dict[str, object]:
+        """The open sheet. A service that cannot be asked becomes problem network."""
+        try:
+            return self._sheet_now(swallow=True)
+        except RutorError:
+            found = _no_sheet("network")
+            self._remember_sheet(found)
+            return found
+
+    def sheet_for_choice(self) -> dict[str, object]:
+        """The open sheet for a click. A dead service is said as the service said it."""
+        return self._sheet_now(swallow=False)
+
+    def _sheet_now(self, *, swallow: bool) -> dict[str, object]:
+        running = self._running()
+        with self._lock:
+            hit = self._sheet
+        if hit is not None and (running or self._clock() - hit[1] < _SHEET_SECONDS):
+            return hit[0]
+        if running:
+            return hit[0] if hit is not None else _no_sheet("")
+        try:
+            found = _search_open_sheet()
+        except RutorError:
+            if not swallow:
+                raise
+            found = _no_sheet("network")
+        self._remember_sheet(found)
+        return found
+
+    def _remember_sheet(self, found: dict[str, object]) -> None:
+        with self._lock:
+            if self._running() and self._sheet is not None:
+                return
+            self._sheet = (found, self._clock())
+
+    def _kept(
+        self,
+        slot: str,
+        seconds: float,
+        blank: dict[str, object],
+        load: Callable[..., dict[str, object]],
+    ) -> dict[str, object]:
+        running = self._running()
+        with self._lock:
+            hit = self._machine if slot == "machine" else self._price
+        if hit is not None and (running or self._clock() - hit[1] < seconds):
+            return hit[0]
+        if running:
+            return dict(blank)
+        found = _dict(load(), blank)
+        with self._lock:
+            if self._running():
+                previous = self._machine if slot == "machine" else self._price
+                if previous is not None:
+                    return previous[0]
+            stamped = (found, self._clock())
+            if slot == "machine":
+                self._machine = stamped
+            else:
+                self._price = stamped
+        return found
+
+    def _running(self) -> bool:
+        phase = self._builder.job_state().get("phase")
+        return isinstance(phase, str) and phase in _RUNNING
+
+
+def _dict(found: object, blank: dict[str, object]) -> dict[str, object]:
+    if not isinstance(found, dict):
+        return dict(blank)
+    return dict(found)
+
+
+def _body(raw: bytes) -> dict[str, object]:
+    """A JSON object. Anything else is a 400, including a body of nothing but brackets."""
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise bad_input("the body is not JSON") from exc
+    if not isinstance(parsed, dict):
+        raise bad_input("the body is not a JSON object")
+    return parsed
+
+
+def _coord(value: object, size: object) -> int | None:
+    """A column or row inside the sheet. A bool is not a coordinate."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if isinstance(size, bool) or not isinstance(size, int):
+        return None
+    if 0 <= value < size:
+        return value
+    return None
+
+
+def _service_grid(sheet_id: str) -> list[object]:
+    _status, body = api.get(f"/v1/grid/{sheet_id}", token=config.read_token())
+    cells = body.get("cells") if isinstance(body, dict) else None
+    if not isinstance(cells, list):
+        raise network("service answer has no cells")
+    return cells
+
+
+def _public_cells(cols: int, rows: int, cells: object) -> list[list[object]]:
+    """Cells the page may draw. The login and the time in each row are not its business."""
+    if not isinstance(cells, list):
+        return []
+    kept: list[list[object]] = []
+    for cell in cells:
+        if not isinstance(cell, list) or len(cell) < 3:
+            continue
+        col, row, state = cell[0], cell[1], cell[2]
+        if isinstance(col, bool) or isinstance(row, bool):
+            continue
+        if not isinstance(col, int) or not isinstance(row, int) or not isinstance(state, str):
+            continue
+        if state not in _CELL_STATES or not (0 <= col < cols and 0 <= row < rows):
+            continue
+        kept.append([col, row, state])
+    return kept
+
+
+def _is_free(cells: list[object], col: int, row: int) -> bool:
+    for cell in cells:
+        if not isinstance(cell, list) or len(cell) < 3:
+            continue
+        found_col, found_row, state = cell[0], cell[1], cell[2]
+        if isinstance(found_col, bool) or isinstance(found_row, bool):
+            continue
+        if found_col == col and found_row == row and state == "fri":
+            return True
+    return False
+
+
+def _sheet_id(sheet: dict[str, object]) -> str:
+    found = sheet.get("id")
+    return found if isinstance(found, str) else ""
+
+
+def _replace_names(text: str, names: set[str]) -> str:
+    """The person's name, wherever it stands as its own word, becomes user."""
+    cleaned = [name for name in names if name]
+    if not cleaned:
+        return text
+    cleaned.sort(key=len, reverse=True)
+    pattern = re.compile(
+        "|".join(rf"(?<![0-9A-Za-z]){re.escape(name)}(?![0-9A-Za-z])" for name in cleaned),
+        re.IGNORECASE,
+    )
+    return pattern.sub("user", text)
+
+
+def _secrets() -> list[str]:
+    """Tokens long enough to be worth hiding. Short ones are not searched for."""
+    found: list[str] = []
+    for value in (config.read_token(), config.read_cesium_token(), os.environ.get(config.CESIUM_TOKEN_ENV)):
+        if isinstance(value, str) and len(value) >= 8:
+            found.append(value)
+    found.sort(key=len, reverse=True)
+    return found
+
+
+def _scrub(text: str) -> str:
+    """Take the home folder, the person's name and any stored token out of a report."""
+    home = Path.home()
+    text = text.replace(str(home), "~")
+    names = {home.name}
+    try:
+        names.add(getpass.getuser())
+    except (OSError, KeyError, ImportError):
+        # Which of these a system without a user name raises depends on the Python.
+        pass
+    text = _replace_names(text, names)
+    for secret in _secrets():
+        text = text.replace(secret, "[removed]")
+    return text
+
+
+def _report(machine_info: dict[str, object], builder: Builder) -> str:
+    card = machine_info.get("card")
+    card_gb = machine_info.get("card_gb")
+    if isinstance(card, str) and card and isinstance(card_gb, int) and not isinstance(card_gb, bool):
+        card_line = f"card: {card} {card_gb} GB"
+    else:
+        card_line = "card: none"
+    ram = machine_info.get("ram_gb")
+    if isinstance(ram, int) and not isinstance(ram, bool):
+        memory_line = f"memory: {ram} GB"
+    else:
+        memory_line = "memory: unknown"
+    free = machine_info.get("free_gb")
+    free_gb = free if isinstance(free, int) and not isinstance(free, bool) else 0
+    chosen = builder.chosen()
+    if chosen is None:
+        cell_line = "cell: none"
+    else:
+        cell_line = f"cell: {chosen['sheet']} {chosen['col']}_{chosen['row']}"
+    job = builder.job_state()
+    phase = job.get("phase")
+    phase_text = phase if isinstance(phase, str) else ""
+    problem = job.get("problem")
+    problem_text = problem if isinstance(problem, str) and problem else "none"
+    held = "yes" if job.get("held") is True else "no"
+    lines = [f"  {line}" for line in builder.job_lines()]
+    # The host name is left out on purpose: a report is pasted into an issue.
+    text = "\n".join(
+        [
+            "Pixelbygget app report",
+            f"rutor: {__version__}",
+            f"pipeline: {pipeline.PIPELINE}",
+            f"system: {platform.system()} {platform.release()} {platform.machine()}",
+            f"python: {platform.python_version()}",
+            card_line,
+            memory_line,
+            f"disk: {free_gb} GB free",
+            cell_line,
+            f"phase: {phase_text}",
+            f"problem: {problem_text}",
+            f"held: {held}",
+            "lines:",
+            *lines,
+        ]
+    )
+    return _scrub(text)
+
+
+class AppServer:
+    """The build page behind the shell every page on this machine has: see `localpage`."""
+
+    def __init__(self, builder: Builder | None = None) -> None:
+        self._builder = builder if builder is not None else Builder()
+        self._known = _Known(self._builder)
+        self._page = LocalPage("app", self._get, self._post)
+        self.key = self._page.key
+        self.port = self._page.port
+        self.url = self._page.url
+        self._timer_stop = threading.Event()
+        self._timer: threading.Thread | None = None
+        self._timer_lock = threading.Lock()
+
+    def _ensure_timer(self) -> None:
+        with self._timer_lock:
+            if self._timer is not None and self._timer.is_alive():
+                return
+            self._timer_stop.clear()
+            self._timer = threading.Thread(target=self._tick_loop, daemon=True)
+            self._timer.start()
+
+    def _tick_loop(self) -> None:
+        # A fault in one tick must not end the timer: the page is still open.
+        while not self._timer_stop.wait(TICK_SECONDS):
+            try:
+                self._builder.tick()
+            except Exception as exc:
+                print(f"app: {type(exc).__name__} in tick", file=sys.stderr)
+
+    def start(self) -> None:
+        self._ensure_timer()
+        self._page.start()
+
+    def serve_forever(self) -> None:
+        self._ensure_timer()
+        self._page.serve_forever()
+
+    def stop(self) -> None:
+        with self._timer_lock:
+            self._timer_stop.set()
+            timer = self._timer
+            self._timer = None
+        if timer is not None and timer is not threading.current_thread():
+            timer.join(timeout=130)
+        # No new request gets in, and then anything the page started is stopped.
+        self._page.stop()
+        self._builder.shutdown()
+
+    def _get(self, rest: str) -> Reply | None:
+        page = PAGE_FILES.get(rest)
+        if page is not None:
+            return Reply(200, page[1], (PAGE_DIR / page[0]).read_bytes())
+        if rest == "api/state":
+            return json_reply(200, self._state())
+        if rest == "api/grid":
+            return json_reply(200, self._grid())
+        if rest == "api/report":
+            text = _report(self._known.machine(), self._builder)
+            return Reply(200, "text/plain; charset=utf-8", text.encode("utf-8"))
+        return None
+
+    def _post(self, rest: str, raw: bytes) -> Reply | None:
+        if rest == "api/terms":
+            return json_reply(200, self._terms(raw))
+        if rest == "api/login":
+            _body(raw)
+            self._builder.start_login()
+            return json_reply(200, {"ok": True})
+        if rest == "api/cesium":
+            return json_reply(200, self._cesium_post(raw))
+        if rest == "api/cell":
+            return json_reply(200, self._cell(raw))
+        if rest == "api/build":
+            _body(raw)
+            self._builder.build()
+            return json_reply(200, {"ok": True})
+        if rest == "api/stop":
+            _body(raw)
+            self._builder.stop()
+            return json_reply(200, {"ok": True})
+        return None
+
+    def _state(self) -> dict[str, object]:
+        # Asked for, so the page is still there. A closed tab stops a job on its own.
+        self._builder.seen()
+        parts = self._known.parts()
+        sheet = parts["sheet"]
+        if not isinstance(sheet, dict):
+            sheet = _no_sheet("network")
+        return {
+            "machine": parts["machine"],
+            "tools": parts["tools"],
+            "terms": {"lines": terms(), "accepted": self._builder.terms_accepted()},
+            "login": self._builder.login_state(),
+            "cesium": parts["cesium"],
+            "price": parts["price"],
+            "sheet": sheet,
+            "cell": self._builder.chosen(),
+            "job": self._builder.job_state(),
+            "version": version(sheet),
+        }
+
+    def _grid(self) -> dict[str, object]:
+        sheet = self._known.sheet()
+        sheet_id = _sheet_id(sheet)
+        cols, rows = sheet.get("cols"), sheet.get("rows")
+        if (
+            not sheet_id
+            or isinstance(cols, bool)
+            or isinstance(rows, bool)
+            or not isinstance(cols, int)
+            or not isinstance(rows, int)
+        ):
+            return {"sheet": None, "cells": []}
+        # The cells are asked again every time. Who holds one can change while the page is open.
+        return {
+            "sheet": {
+                "id": sheet_id,
+                "name": sheet.get("name") if isinstance(sheet.get("name"), str) else "",
+                "cols": cols,
+                "rows": rows,
+                "pipeline": sheet.get("pipeline") if isinstance(sheet.get("pipeline"), str) else "",
+            },
+            "cells": _public_cells(cols, rows, _service_grid(sheet_id)),
+        }
+
+    def _terms(self, raw: bytes) -> dict[str, object]:
+        if _body(raw).get("accept") is not True:
+            raise bad_input("accept must be true")
+        self._builder.accept_terms()
+        return {"ok": True}
+
+    def _cesium_post(self, raw: bytes) -> dict[str, object]:
+        token = _body(raw).get("token")
+        if not isinstance(token, str) or not 1 <= len(token) <= _CESIUM_TOKEN_MAX:
+            raise bad_input("the Cesium token must be 1 to 2000 characters")
+        answer = cesium(token)
+        # A token Cesium refused is not stored. The old one, if any, stays.
+        if answer.get("ok") is True:
+            config.write_cesium_token(token)
+        self._known.forget_cesium()
+        problem = answer.get("problem")
+        return {"ok": answer.get("ok") is True, "problem": problem if isinstance(problem, str) else ""}
+
+    def _cell(self, raw: bytes) -> dict[str, object]:
+        body = _body(raw)
+        if body.get("next") is True:
+            return self._cell_next()
+        return self._cell_named(body)
+
+    def _open(self) -> dict[str, object]:
+        sheet = self._known.sheet_for_choice()
+        if not _sheet_id(sheet):
+            raise Refusal(409, "no cell is free", "none_free")
+        return sheet
+
+    def _cell_next(self) -> dict[str, object]:
+        sheet = self._open()
+        sheet_id = _sheet_id(sheet)
+        cells = _service_grid(sheet_id)
+        try:
+            col, row = commands.pick_next(sheet, cells)
+        except RutorError as exc:
+            if exc.code != 2:
+                raise
+            # The last free cell went since the page last looked. The page has a word for that.
+            raise Refusal(409, "no cell is free", "none_free") from exc
+        self._builder.choose(sheet_id, col, row)
+        return {"sheet": sheet_id, "col": col, "row": row}
+
+    def _cell_named(self, body: dict[str, object]) -> dict[str, object]:
+        sheet = self._open()
+        sheet_id = _sheet_id(sheet)
+        col = _coord(body.get("col"), sheet.get("cols"))
+        row = _coord(body.get("row"), sheet.get("rows"))
+        if body.get("sheet") != sheet_id or col is None or row is None:
+            raise bad_input("the body names no cell")
+        if not _is_free(_service_grid(sheet_id), col, row):
+            raise Refusal(409, "that cell is not free", "taken")
+        self._builder.choose(sheet_id, col, row)
+        return {"sheet": sheet_id, "col": col, "row": row}
+
+
+def cmd_app(args: argparse.Namespace) -> int:
+    try:
+        server = AppServer()
+    except OSError as exc:
+        raise environment(f"could not open a port on this machine ({exc.strerror})") from exc
+    print(f"url: {server.url}", flush=True)
+    print("Ctrl-C closes the page.", flush=True)
+    if not args.no_open:
+        webbrowser.open(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stop()
+    print("closed")
+    return 0
+
+
+def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    app_parser = sub.add_parser("app", aliases=["bygg"], help="open the page for building a cell")
+    app_parser.add_argument("--no-open", action="store_true", help="print the address and do not open a browser")
+    app_parser.set_defaults(func=cmd_app)

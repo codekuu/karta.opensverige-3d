@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import contextlib
+import getpass
+import http.client
 import io
 import json
 import os
+import re
 import stat
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 from collections.abc import Callable, Iterator, Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from rutor import app, app_jobs, config, login, pipeline, se3_price
+from rutor import app, app_jobs, commands, config, login, pipeline, se3_price
+from rutor.__main__ import main
 from rutor.errors import RutorError, network
 from rutor.localpage import Refusal
 from rutor.renderer import google
@@ -1204,6 +1209,396 @@ class JobTests(_OwnHome):
         builder.stop()
         self.assertEqual(self._state(builder)["problem"], "machine")
         self.assertEqual(self._started(fake), ["login", "claim"])
+
+
+# What the page's checks answer in these tests. The real ones read the machine.
+_MACHINE = {
+    "ok": True,
+    "card": "Test Card",
+    "card_gb": 12,
+    "free_gb": 100,
+    "needed_gb": 2,
+    "ram_gb": 16,
+    "problem": "",
+}
+_TOOLS = {"ready": True, "model_cached": True, "missing": []}
+_PRICE = {"decision": "RUN", "after": ""}
+
+# One of each state the map uses, on a 3 by 3 sheet. (0, 1) is locked by someone else.
+_SHEET_CELLS: list[tuple[int, int, str, str | None]] = [
+    (0, 0, "live", "gustaf"),
+    (1, 0, "fri", None),
+    (2, 0, "fri", None),
+    (0, 1, "last", "klang"),
+    (1, 1, "vantar", "gustaf"),
+    (2, 1, "godkand", "gustaf"),
+    (0, 2, "ute", None),
+    (1, 2, "live", "gustaf"),
+    (2, 2, "fri", None),
+]
+
+
+class AppServerTests(_OwnHome):
+    """The page over real HTTP, against a service on this machine and a scripted child."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.svc = FakeService()
+        self.addCleanup(self.svc.stop)
+        saved_url = os.environ.get("PIXELBYGGET_URL")
+        os.environ["PIXELBYGGET_URL"] = self.svc.start()
+
+        def restore_url() -> None:
+            if saved_url is None:
+                os.environ.pop("PIXELBYGGET_URL", None)
+            else:
+                os.environ["PIXELBYGGET_URL"] = saved_url
+
+        self.addCleanup(restore_url)
+        config.write_token("test-token")
+        config.write_cesium_token("a.b.c")
+        self._put_sheet(list(_SHEET_CELLS))
+        machine_patch = patch("rutor.app.machine", return_value=dict(_MACHINE))
+        tools_patch = patch("rutor.app.tools", return_value=dict(_TOOLS))
+        price_patch = patch("rutor.app.price", return_value=dict(_PRICE))
+        ask_patch = patch("rutor.renderer.google._ask_ion", return_value=(200, ""))
+        self.machine_mock = machine_patch.start()
+        tools_patch.start()
+        price_patch.start()
+        self.ask = ask_patch.start()
+        for patcher in (machine_patch, tools_patch, price_patch, ask_patch):
+            self.addCleanup(patcher.stop)
+        self.fake = FakeStart()
+        self.builder = app.Builder(self.fake)
+        self.server = app.AppServer(self.builder)
+        self.addCleanup(self.server.stop)
+        self.server.start()
+        self.port = self.server.port
+        self.base = f"/{self.server.key}"
+
+    def _put_sheet(self, cells: list[tuple[int, int, str, str | None]]) -> None:
+        sheet: dict[str, object] = {
+            "id": "stockholm-norr",
+            "name": "Stockholm",
+            "state": "open",
+            "done": 1,
+            "total": 9,
+            "cols": 3,
+            "rows": 3,
+            "pipeline": pipeline.PIPELINE,
+        }
+        stored: dict[str, dict[str, object]] = {}
+        grid: list[list[object]] = []
+        for col, row, state, who in cells:
+            stored[f"stockholm-norr/{col}_{row}"] = {
+                "col": col,
+                "row": row,
+                "state": state,
+                "login": who,
+                "updated": "2026-11-17T12:00:00Z",
+            }
+            grid.append([col, row, state, who, "2026-11-17T12:00:00Z"])
+        self.svc.state["sheets"] = {"stockholm-norr": sheet}
+        self.svc.state["cells"] = stored
+        self.grid_cells = grid
+        self.pick_sheet = {"id": "stockholm-norr", "cols": 3, "rows": 3}
+
+    def call(
+        self,
+        method: str,
+        path: str,
+        body: object | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, str], bytes]:
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        sent = dict(headers or {})
+        data = None
+        if body is not None:
+            data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
+            sent.setdefault("Content-Type", "application/json")
+        try:
+            connection.request(method, path, body=data, headers=sent)
+            response = connection.getresponse()
+            return response.status, {k.lower(): v for k, v in response.getheaders()}, response.read()
+        finally:
+            connection.close()
+
+    def _state(self) -> dict[str, object]:
+        status, _headers, body = self.call("GET", f"{self.base}/api/state")
+        self.assertEqual(status, 200, body)
+        parsed = json.loads(body)
+        self.assertIsInstance(parsed, dict)
+        return parsed
+
+    def _assert_no_secret(self, headers: dict[str, str], body: bytes, *extra: bytes) -> None:
+        for secret in (b"test-token", b"a.b.c", *extra):
+            self.assertNotIn(secret, body)
+            for value in headers.values():
+                self.assertNotIn(secret.decode("ascii"), value)
+
+    def test_the_page_and_its_files_are_served(self) -> None:
+        for rest, (name, content_type) in app.PAGE_FILES.items():
+            path = f"{self.base}/" if rest == "" else f"{self.base}/{rest}"
+            status, headers, body = self.call("GET", path)
+            self.assertEqual(status, 200, rest)
+            self.assertEqual(headers.get("content-type"), content_type, rest)
+            self.assertEqual(body, (app.PAGE_DIR / name).read_bytes(), rest)
+        for rest in ("app.py", "../app.py"):
+            status, _headers, _body = self.call("GET", f"{self.base}/{rest}")
+            self.assertEqual(status, 404, rest)
+
+    def test_the_state_has_every_part_the_page_draws(self) -> None:
+        found = self._state()
+        self.assertEqual(
+            set(found),
+            {"machine", "tools", "terms", "login", "cesium", "price", "sheet", "cell", "job", "version"},
+        )
+        terms = found["terms"]
+        self.assertIsInstance(terms, dict)
+        self.assertEqual(len(terms["lines"]), 10)
+        login_state = found["login"]
+        self.assertIsInstance(login_state, dict)
+        self.assertEqual(login_state["login"], "klang")
+        sheet = found["sheet"]
+        self.assertIsInstance(sheet, dict)
+        self.assertEqual(sheet["id"], "stockholm-norr")
+        self.assertEqual(sheet["kind"], "google")
+        self.assertIsNone(found["cell"])
+        job = found["job"]
+        self.assertIsInstance(job, dict)
+        self.assertEqual(job["phase"], "idle")
+
+    def test_neither_secret_leaves_in_any_answer(self) -> None:
+        self.fake.script("login", ["logged in: klang"])
+        pages = (
+            ("GET", f"{self.base}/", None),
+            ("GET", f"{self.base}/app.js", None),
+            ("GET", f"{self.base}/api/state", None),
+            ("GET", f"{self.base}/api/grid", None),
+            ("GET", f"{self.base}/api/report", None),
+            ("POST", f"{self.base}/api/terms", {"accept": True}),
+            ("POST", f"{self.base}/api/login", {}),
+            ("POST", f"{self.base}/api/cesium", {"token": "x.y.z-new"}),
+            ("POST", f"{self.base}/api/cell", {"next": True}),
+            ("POST", f"{self.base}/api/build", {}),
+            ("POST", f"{self.base}/api/stop", {}),
+        )
+        for method, path, body in pages:
+            status, headers, payload = self.call(method, path, body)
+            self.assertEqual(status, 200, (path, payload))
+            extra = (b"x.y.z-new",) if path.endswith("/api/cesium") else ()
+            self._assert_no_secret(headers, payload, *extra)
+
+    def test_a_cesium_token_is_kept_only_when_cesium_accepts_it(self) -> None:
+        self.ask.return_value = (401, "INVALID_TOKEN")
+        status, _headers, body = self.call("POST", f"{self.base}/api/cesium", {"token": "n.e.w"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body), {"ok": False, "problem": "refused"})
+        self.assertEqual(config.read_cesium_token(), "a.b.c")
+        self.ask.return_value = (200, "")
+        status, _headers, body = self.call("POST", f"{self.base}/api/cesium", {"token": "n.e.w"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body), {"ok": True, "problem": ""})
+        self.assertEqual(config.read_cesium_token(), "n.e.w")
+
+    def test_next_picks_the_cell_the_command_would(self) -> None:
+        expect = commands.pick_next(self.pick_sheet, self.grid_cells)
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"next": True})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body), {"sheet": "stockholm-norr", "col": expect[0], "row": expect[1]})
+        cell = self._state()["cell"]
+        self.assertEqual(cell, {"sheet": "stockholm-norr", "col": expect[0], "row": expect[1]})
+        self.assertEqual(self.fake.calls, [])
+
+    def test_a_cell_outside_the_sheet_is_refused(self) -> None:
+        for body in (
+            {"sheet": "stockholm-norr", "col": 9999, "row": 0},
+            {"sheet": "goteborg-norr", "col": 0, "row": 0},
+            {"sheet": "stockholm-norr", "col": True, "row": 0},
+            [1, 2, 3],
+        ):
+            status, _headers, _payload = self.call("POST", f"{self.base}/api/cell", body)
+            self.assertEqual(status, 400, body)
+        self.assertIsNone(self.builder.chosen())
+
+    def test_a_cell_that_is_not_free_is_refused(self) -> None:
+        status, _headers, body = self.call(
+            "POST", f"{self.base}/api/cell", {"sheet": "stockholm-norr", "col": 0, "row": 1}
+        )
+        self.assertEqual(status, 409, body)
+        parsed = json.loads(body)
+        self.assertEqual(parsed["code"], "taken")
+        self.assertIsNone(self.builder.chosen())
+
+    def test_what_the_service_says_arrives_as_one_plain_line(self) -> None:
+        self._state()
+        message = "<script>x</script>" * 100
+        self.svc.fail_next_with(
+            500,
+            json.dumps({"error": "boom", "message": message}).encode("utf-8"),
+            "application/json",
+        )
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"next": True})
+        parsed = json.loads(body)
+        error = parsed["error"]
+        self.assertIsInstance(error, str)
+        self.assertLessEqual(len(error), 200)
+        self.assertNotIn("\n", error)
+        self.assertLess(len(error), len(message))
+        self.assertIn("boom", error)
+
+    def test_other_builders_logins_are_not_passed_on(self) -> None:
+        status, _headers, body = self.call("GET", f"{self.base}/api/grid")
+        self.assertEqual(status, 200, body)
+        self.assertNotIn(b"klang", body)
+        parsed = json.loads(body)
+        cells = parsed["cells"]
+        self.assertIsInstance(cells, list)
+        self.assertGreater(len(cells), 0)
+        for cell in cells:
+            self.assertEqual(len(cell), 3)
+
+    def test_a_sheet_with_nothing_free_says_so(self) -> None:
+        stored = self.svc.state["cells"]
+        self.assertIsInstance(stored, dict)
+        for cell in stored.values():
+            self.assertIsInstance(cell, dict)
+            cell["state"] = "live"
+        found = self._state()
+        sheet = found["sheet"]
+        self.assertIsInstance(sheet, dict)
+        self.assertEqual(sheet["problem"], "none_free")
+        self.assertEqual(sheet["id"], "")
+        status, _headers, body = self.call("GET", f"{self.base}/api/grid")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body), {"sheet": None, "cells": []})
+
+    def test_a_service_that_cannot_be_reached_is_said_in_the_state(self) -> None:
+        self.svc.stop()
+        found = self._state()
+        sheet = found["sheet"]
+        self.assertIsInstance(sheet, dict)
+        self.assertEqual(sheet["problem"], "network")
+
+    def test_checks_are_not_worked_out_at_every_request(self) -> None:
+        for _times in range(3):
+            self._state()
+        self.assertEqual(self.machine_mock.call_count, 1)
+
+    def test_checks_stand_while_a_job_runs(self) -> None:
+        now = {"t": 0.0}
+        self.server._known._clock = lambda: now["t"]
+        self.fake.script("claim", ["claimed: stockholm-norr 1_0 expires 2026-11-25T12:00:00Z"])
+        self.fake.script("render", ["drawing"], hold=True)
+        self._state()
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"next": True})
+        self.assertEqual(status, 200, body)
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual(status, 200, body)
+        # The detail is kept while the child is being read, so the stop has a child to stop.
+        wait_until(lambda: self.builder.job_state()["detail"] == "drawing")
+        calls = self.machine_mock.call_count
+        now["t"] = 10_000.0
+        self._state()
+        self.assertEqual(self.machine_mock.call_count, calls)
+
+    def test_leaving_stops_a_running_job(self) -> None:
+        self.fake.script("claim", ["claimed: stockholm-norr 1_0 expires 2026-11-25T12:00:00Z"])
+        self.fake.script("render", ["drawing"], hold=True)
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"next": True})
+        self.assertEqual(status, 200, body)
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual(status, 200, body)
+        wait_until(lambda: self.builder.job_state()["detail"] == "drawing")
+        render = self.fake.runs[[argv[0] for argv, _env in self.fake.calls].index("render")]
+        self.server.stop()
+        self.assertTrue(render.stopped)
+        self.assertIn("release", [argv[0] for argv, _env in self.fake.calls])
+
+    def test_asking_for_the_state_tells_the_builder_the_page_is_there(self) -> None:
+        seen = {"n": 0}
+        real = self.builder.seen
+
+        def count() -> None:
+            seen["n"] += 1
+            real()
+
+        with patch.object(self.builder, "seen", count):
+            self.call("GET", f"{self.base}/app.css")
+            self.assertEqual(seen["n"], 0)
+            self.call("GET", f"{self.base}/api/state")
+            self.assertEqual(seen["n"], 1)
+
+    def test_the_report_names_no_person_and_no_home_folder(self) -> None:
+        home = str(Path.home())
+        names = {Path.home().name}
+        try:
+            names.add(getpass.getuser())
+        except OSError:
+            pass
+        self.fake.script("claim", [f"{home}/work/x.png", *sorted(names)], code=1)
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"next": True})
+        self.assertEqual(status, 200, body)
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual(status, 200, body)
+        wait_until(lambda: self.builder.job_state()["phase"] == "failed")
+        status, headers, body = self.call("GET", f"{self.base}/api/report")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(headers.get("content-type"), "text/plain; charset=utf-8")
+        text = body.decode("utf-8")
+        self.assertNotIn(home, text)
+        self.assertIn("~", text)
+        self.assertIn("~/work/x.png", text)
+        for name in names:
+            self.assertIsNone(
+                re.search(rf"(?<![0-9A-Za-z]){re.escape(name)}(?![0-9A-Za-z])", text, re.IGNORECASE),
+                name,
+            )
+        self.assertNotIn(b"test-token", body)
+        self.assertNotIn(b"a.b.c", body)
+
+    def test_a_report_is_written_when_the_system_will_not_name_the_user(self) -> None:
+        # getpass raises KeyError on some Pythons and OSError on others when no name is known.
+        for fault in (KeyError("uid"), OSError("no name")):
+            with patch("getpass.getuser", side_effect=fault):
+                status, _headers, body = self.call("GET", f"{self.base}/api/report")
+            self.assertEqual(status, 200, body)
+            self.assertIn(b"Pixelbygget app report", body)
+
+    def test_next_on_a_sheet_that_just_filled_up_says_none_is_free(self) -> None:
+        # The page knew of a free cell a moment ago. Someone took the last one since.
+        self._state()
+        stored = self.svc.state["cells"]
+        assert isinstance(stored, dict)
+        for cell in stored.values():
+            cell["state"] = "live"
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"next": True})
+        self.assertEqual(status, 409, body)
+        self.assertEqual(json.loads(body).get("code"), "none_free")
+        self.assertIsNone(self.builder.chosen())
+
+    def test_a_body_that_is_not_what_the_route_takes_is_refused(self) -> None:
+        status, _headers, _body = self.call("POST", f"{self.base}/api/terms", {"accept": "yes"})
+        self.assertEqual(status, 400)
+        status, _headers, _body = self.call("POST", f"{self.base}/api/cesium", {"token": ""})
+        self.assertEqual(status, 400)
+        status, _headers, _body = self.call("POST", f"{self.base}/api/cesium", {"token": 5})
+        self.assertEqual(status, 400)
+        status, _headers, _body = self.call("POST", f"{self.base}/api/cesium", b"[" * 3000)
+        self.assertEqual(status, 400)
+
+    def test_the_command_is_registered_with_its_swedish_name(self) -> None:
+        for argv in (["app", "--help"], ["bygg", "--help"]):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = main(argv)
+            self.assertEqual(code, 0, argv)
+            self.assertIn("--no-open", stdout.getvalue())
+
+    def test_the_page_files_ship_with_the_package(self) -> None:
+        text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+        shipped = tomllib.loads(text)["tool"]["setuptools"]["package-data"]["rutor"]
+        self.assertIn("app_page/*", shipped)
 
 
 if __name__ == "__main__":

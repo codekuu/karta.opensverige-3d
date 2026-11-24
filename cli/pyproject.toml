@@ -19,4 +19,4 @@ rutor = "rutor.__main__:main"
 include = ["rutor*"]
 
 [tool.setuptools.package-data]
-rutor = ["review_page/*"]
+rutor = ["review_page/*", "app_page/*"]

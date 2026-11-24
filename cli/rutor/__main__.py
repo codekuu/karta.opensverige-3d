@@ -35,7 +35,10 @@ def _builtin_registrars() -> list[Registrar]:
     def register_review(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
         _load(sub, "rutor.review")
 
-    return [register_login, register_commands, register_review]
+    def register_app(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+        _load(sub, "rutor.app")
+
+    return [register_login, register_commands, register_review, register_app]
 
 
 def _open_pipes() -> None:
