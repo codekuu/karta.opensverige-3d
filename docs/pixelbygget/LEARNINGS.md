@@ -4,6 +4,22 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-24
 
+### The installer, built and tried on GitHub
+The Windows installer of the app page (Tech Embassy Pixel to a person, Pixelbygget in here) is built by `installer/build.ps1` and tried by the workflow `installer` on a Windows that has never seen it. The first run, 2026-11-24, was green in every step.
+- **The installer is 35.8 MB.** It holds a Python of its own (CPython 3.11.18 from python-build-standalone), the `rutor` code and one wheel of diffusers. The build refuses anything over 50 MB, since this is what a person fetches before the page has said whether their machine can draw.
+- **The page fetches 15.3 GB after that, and says 16.** The model stack is 2.86 GB (52 wheels), Node 36 MB, the renderer with its Chrome 0.92 GB and the model 11.47 GB. The model's folder on the test PC is 11.4 GB, which agrees with the Hugging Face API's number. README and AGENTS.md still say 20 GB.
+- **The lock is the install that draws today.** `requirements.txt` pins 10 packages and leaves 41 to whatever is newest, so the lock was made from the `pip freeze` of the working install on the test PC, with `pip download` into a folder that was removed afterwards. Nothing was installed there.
+- **pip takes the whole lock with hashes, and builds nothing.** `pip install --dry-run --require-hashes --only-binary :all:` on the runner ends with 53 packages, the diffusers wheel from the installer among them. It fetches torch's 2.75 GB wheel to check its hash, which takes 77 seconds of the run's 3 min 17 s.
+- **No index has a wheel of the pinned diffusers commit.** The build makes one from the commit's zip, pinned by SHA-256, and ships it. Nothing is built on a person's machine.
+- **A machine without a card is told no, and nothing is fetched to it.** On the runner the page answers `no_card`, and `api/install` answers 409 `not_ready`.
+- **A profile named "Åsa Öberg" works.** Install, start, a second start, close, the shortcut, `rutor app --quit` and uninstall all ran under a folder with a space and Swedish letters. After the uninstall no process ran from the app's folder, and both the app's folder and the login folder were gone.
+- **The oldest NVIDIA driver the page accepts is 528.33.** That is the minimum for CUDA 12.x on Windows in NVIDIA's CUDA 12.8 release notes. The same notes name 570.65 for 12.8 GA; a driver between the two is let through and has not been tried.
+- **GitHub starts a hand run only for a workflow that `main` has.** `gh workflow run` on the branch answered 404, "not found on the default branch". Until the merge the workflow runs on each push to its branch.
+- **The Python archive has 830 compiled files of its own.** The build adds none: the count in the installer is the count in the archive.
+- **The runner's image already had Inno Setup 6.7.1.** The Chocolatey step changed nothing.
+- **`actions/checkout@v4` and `actions/upload-artifact@v4` are warned about.** They target Node 20, which the runners force to Node 24. The repository's other workflows use the same versions; they move together, not here.
+- **Not tried:** a machine with a card; the fetch for real (pip against the lock, `npm ci` through the app's own Node, the model); whether a black window ever shows; what Windows says about an unsigned installer; a newer installer run over an older install. `build.ps1` and the Inno Setup script have run on the runner only.
+
 ### A cell built from a page
 `rutor app` serves a page on the builder's own machine that runs claim, render, redraw and upload as child processes. The first cell built from it was stockholm-norr 82_24, on the test PC (Windows, RTX 5070, 32 GB) on 2026-11-24.
 - **Rita to waiting for review took about 2 min 45 s.** The render took 13 seconds, the redraw about 2 min 20 s, the claim and the upload the rest. No command was typed after `rutor app`.

@@ -34,7 +34,8 @@ jobs:
       run:
         shell: pwsh
     env:
-      # Inno Setup as packaged on Chocolatey. It was taken out of the Windows Server 2025 image.
+      # Inno Setup as packaged on Chocolatey. The runner's image had this version already on
+      # 2026-11-24, and then the step changes nothing. It is here for the day the image has none.
       INNO_SETUP_VERSION: "6.7.1"
     steps:
       - uses: actions/checkout@v4
