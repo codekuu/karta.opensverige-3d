@@ -36,3 +36,8 @@ cli/**/__pycache__/
 
 # npm ci in cli/google-render
 node_modules/
+
+# installer\build.ps1 works in these
+installer/stage/
+installer/out/
+installer/fetched/

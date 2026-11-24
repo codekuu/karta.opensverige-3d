@@ -1707,6 +1707,8 @@ class AppServer:
 _PAGE_URL = re.compile(r"http://127\.0\.0\.1:\d{1,5}/[A-Za-z0-9_-]{20,100}/")
 ALIVE_SECONDS = 3.0
 RACE_SECONDS = 5.0
+# How long a running app gets to stop its job, give the lock back and end.
+QUIT_SECONDS = 150.0
 LOG_MAX_BYTES = 256_000
 
 
@@ -1942,12 +1944,49 @@ def _serve(args: argparse.Namespace, quiet: bool) -> int:
     return 0
 
 
+def _quit_running() -> int:
+    """End the app that is running, the way its own page ends it. For the installer.
+
+    The installer replaces files the app holds open, so it asks first. Nothing running is
+    no fault.
+    """
+    path = running_path()
+    url = running_page()
+    if url is None:
+        return 0
+    try:
+        noted = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        noted = {}
+    pid = noted.get("pid") if isinstance(noted, dict) else None
+    request = urllib.request.Request(
+        f"{url}api/quit", data=b"{}", headers={"Content-Type": "application/json"}, method="POST"
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    try:
+        # The answer comes when the job is stopped and its lock is given back.
+        with opener.open(request, timeout=QUIT_SECONDS) as response:
+            response.read(1000)
+    except Exception as exc:
+        raise environment("the running Pixelbygget did not answer; close it and try again") from exc
+    deadline = time.monotonic() + QUIT_SECONDS
+    while time.monotonic() < deadline:
+        # Gone when the page is, and, for another process than this one, when it has ended:
+        # only then are its files free.
+        other = isinstance(pid, int) and not isinstance(pid, bool) and pid != os.getpid()
+        if not _answers(url) and not (other and _alive(pid)):
+            return 0
+        time.sleep(0.2)
+    raise environment("the running Pixelbygget did not end; close it and try again")
+
+
 def cmd_app(args: argparse.Namespace) -> int:
     quiet = bool(getattr(args, "quiet", False))
+    work = _quit_running if getattr(args, "quit", False) else (lambda: _serve(args, quiet))
     if not quiet:
-        return _serve(args, quiet)
+        return work()
     with _quietly():
-        return _serve(args, quiet)
+        return work()
 
 
 def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1958,4 +1997,5 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
         action="store_true",
         help="print nothing, write faults to app.log, and end after ten minutes without a page",
     )
+    app_parser.add_argument("--quit", action="store_true", help="end the app that is running, if one is")
     app_parser.set_defaults(func=cmd_app)

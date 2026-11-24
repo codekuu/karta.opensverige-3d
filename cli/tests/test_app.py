@@ -2286,7 +2286,35 @@ class WindowlessTests(_OwnHome):
     def _args(*, quiet: bool = False, no_open: bool = False) -> object:
         import argparse
 
-        return argparse.Namespace(quiet=quiet, no_open=no_open)
+        return argparse.Namespace(quiet=quiet, no_open=no_open, quit=False)
+
+    def test_the_installer_can_ask_a_running_app_to_end(self) -> None:
+        import argparse
+
+        self.fake.script("claim", ["claimed: stockholm-norr 0_0 expires 2026-11-25T12:00"])
+        self.fake.script("render", ["note: this takes a while"], hold=True)
+        server, thread = self._serving()
+        app._write_running(server.url)
+        with patch("rutor.app.SHEET_KINDS", {"stockholm-norr": "google"}):
+            self.builder.choose("stockholm-norr", 0, 0)
+            self.builder.build()
+            wait_until(lambda: self.builder.job_state()["phase"] == "render")
+            with patch("rutor.app.AppServer", side_effect=AssertionError("a server was made")):
+                code = app.cmd_app(argparse.Namespace(quiet=True, no_open=True, quit=True))
+        self.assertEqual(code, 0)
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        # It was closed the way the page closes it: the job stopped, the lock given back.
+        self.assertTrue(self.fake.runs[1].stopped)
+        self.assertEqual(self.fake.calls[-1][0], ["release", "stockholm-norr", "0_0"])
+        self.assertEqual(self.opened, [])
+
+    def test_ending_an_app_that_is_not_running_is_no_fault(self) -> None:
+        import argparse
+
+        with patch("rutor.app.AppServer", side_effect=AssertionError("a server was made")):
+            self.assertEqual(app.cmd_app(argparse.Namespace(quiet=True, no_open=True, quit=True)), 0)
+        self.assertEqual(self.opened, [])
 
     def test_a_second_start_opens_the_first_ones_page(self) -> None:
         server, _thread = self._serving()

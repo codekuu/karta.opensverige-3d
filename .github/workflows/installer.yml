@@ -1,0 +1,171 @@
+name: installer
+
+# Builds the Windows installer of the Pixelbygget app and tries it on a Windows that has
+# never seen it: install, start, ask the page, close, uninstall. The runner has no graphics
+# card, so the page's "this machine cannot draw" is the proof that the bundle starts.
+#
+# Run by hand, or by a tag app-v<version>. A tag also makes a DRAFT release with the
+# installer attached. Publishing a release is a person's own step, never this workflow's.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The app version, like 0.1.0"
+        required: true
+        default: "0.1.0"
+  push:
+    tags: ["app-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Inno Setup as packaged on Chocolatey. It was taken out of the Windows Server 2025 image.
+      INNO_SETUP_VERSION: "6.7.1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The version
+        id: version
+        env:
+          # Through the environment, so that what was typed is a value and never script.
+          TYPED_VERSION: ${{ inputs.version }}
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME -replace '^app-v', '' } else { $env:TYPED_VERSION }
+          if ($version -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}$') { throw "Not a version: $version" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Inno Setup
+        run: choco install innosetup --version $env:INNO_SETUP_VERSION -y --no-progress
+
+      - name: Build the installer
+        run: installer\build.ps1 -Version ${{ steps.version.outputs.version }}
+
+      - name: The lock installs with hashes, and nothing in it has to be built
+        run: |
+          $stage = 'installer\stage'
+          & "$stage\python\python.exe" -m pip install --dry-run --require-hashes --no-input --only-binary ':all:' `
+            -r "$stage\requirements-app.lock" `
+            --extra-index-url https://download.pytorch.org/whl/cu128 `
+            --find-links "$stage\wheels"
+          if ($LASTEXITCODE -ne 0) { throw "pip refused the lock" }
+
+      - name: Install without a click, under a profile named Åsa Öberg
+        run: |
+          $profile = Join-Path $env:RUNNER_TEMP 'Åsa Öberg'
+          $app = Join-Path $profile 'AppData\Local\Pixelbygget'
+          New-Item -ItemType Directory -Path $profile -Force | Out-Null
+          $setup = "installer\out\Pixelbygget-Setup-${{ steps.version.outputs.version }}.exe"
+          $done = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList '/VERYSILENT', '/CURRENTUSER', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$app`""
+          if ($done.ExitCode -ne 0) { throw "The installer ended with $($done.ExitCode)" }
+          foreach ($needed in 'python\python.exe', 'python\pythonw.exe', 'start.pyw', 'install.json', 'requirements-app.lock', 'TERMS.md', 'cli\rutor\app.py', 'cli\google-render\package-lock.json') {
+            if (-not (Test-Path -LiteralPath (Join-Path $app $needed))) { throw "$needed is missing after the install" }
+          }
+          "PB_PROFILE=$profile" >> $env:GITHUB_ENV
+          "PB_APP=$app" >> $env:GITHUB_ENV
+
+      - name: Start the app, ask its page, close it
+        run: |
+          # The app keeps its login, its log and the model under the person's profile.
+          $env:USERPROFILE = $env:PB_PROFILE
+          $env:PIXELBYGGET_HOME = Join-Path $env:PB_PROFILE '.config\pixelbygget'
+          $env:HF_HOME = Join-Path $env:PB_PROFILE '.cache\huggingface'
+          $python = Join-Path $env:PB_APP 'python\python.exe'
+          $said = Join-Path $env:RUNNER_TEMP 'app-out.txt'
+          $faults = Join-Path $env:RUNNER_TEMP 'app-err.txt'
+          $started = Start-Process -FilePath $python -ArgumentList '-m', 'rutor', 'app', '--no-open' -WorkingDirectory $env:RUNNER_TEMP -PassThru -RedirectStandardOutput $said -RedirectStandardError $faults
+          $url = $null
+          foreach ($try in 1..60) {
+            Start-Sleep -Milliseconds 500
+            $line = Get-Content -LiteralPath $said -ErrorAction SilentlyContinue | Where-Object { $_ -like 'url: *' } | Select-Object -First 1
+            if ($line) { $url = $line.Substring(5).Trim(); break }
+          }
+          if (-not $url) { Get-Content -LiteralPath $faults; throw 'The app printed no address' }
+
+          $state = Invoke-RestMethod -Uri "${url}api/state" -TimeoutSec 180
+          if ($state.machine.problem -ne 'no_card') { throw "machine.problem is '$($state.machine.problem)', expected no_card" }
+          if ($state.install.app -ne $true) { throw 'install.app is not true: the page does not know it is an app install' }
+          if (@($state.tools.missing).Count -eq 0) { throw 'tools.missing is empty on a machine with nothing installed' }
+
+          # Nothing may be fetched to a machine that cannot draw.
+          $refused = Invoke-WebRequest -Uri "${url}api/install" -Method Post -Body '{}' -ContentType 'application/json' -SkipHttpErrorCheck
+          $code = ($refused.Content | ConvertFrom-Json).code
+          if ($refused.StatusCode -ne 409 -or $code -ne 'not_ready') { throw "api/install answered $($refused.StatusCode) $code, expected 409 not_ready" }
+
+          # A second start finds the first one and starts nothing.
+          & $python -m rutor app --no-open | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'A second start failed' }
+
+          $closed = Invoke-RestMethod -Uri "${url}api/quit" -Method Post -Body '{}' -ContentType 'application/json'
+          if ($closed.ok -ne $true) { throw 'api/quit did not say ok' }
+          if (-not $started.WaitForExit(60000)) { throw 'The app did not end after api/quit' }
+          Start-Sleep -Seconds 2
+          $left = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:PB_APP, [System.StringComparison]::OrdinalIgnoreCase) })
+          if ($left.Count -ne 0) { throw "Still running from the app's folder: $($left.Name -join ', ')" }
+
+      - name: The shortcut starts the app, and the installer's own command ends it
+        run: |
+          $env:USERPROFILE = $env:PB_PROFILE
+          $env:PIXELBYGGET_HOME = Join-Path $env:PB_PROFILE '.config\pixelbygget'
+          $env:HF_HOME = Join-Path $env:PB_PROFILE '.cache\huggingface'
+          $pythonw = Join-Path $env:PB_APP 'python\pythonw.exe'
+          $python = Join-Path $env:PB_APP 'python\python.exe'
+          # Not -Wait: that would also wait for the app the shortcut starts.
+          $shortcut = Start-Process -FilePath $pythonw -ArgumentList "`"$(Join-Path $env:PB_APP 'start.pyw')`"" -WorkingDirectory $env:PB_APP -PassThru
+          if (-not $shortcut.WaitForExit(30000)) { throw 'start.pyw did not end' }
+          $note = Join-Path $env:PIXELBYGGET_HOME 'app-running.json'
+          foreach ($try in 1..60) { if (Test-Path -LiteralPath $note) { break }; Start-Sleep -Milliseconds 500 }
+          if (-not (Test-Path -LiteralPath $note)) { Get-Content -LiteralPath (Join-Path $env:PIXELBYGGET_HOME 'app.log') -ErrorAction SilentlyContinue; throw 'The shortcut started no app' }
+          # The way the installer ends a running app before it replaces its files.
+          & $python -m rutor app --quit --quiet
+          if ($LASTEXITCODE -ne 0) { throw "rutor app --quit ended with $LASTEXITCODE" }
+          if (Test-Path -LiteralPath $note) { throw 'The running note is still there after --quit' }
+          $left = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:PB_APP, [System.StringComparison]::OrdinalIgnoreCase) })
+          if ($left.Count -ne 0) { throw "Still running from the app's folder: $($left.Name -join ', ')" }
+
+      - name: Uninstall without a click
+        run: |
+          $env:USERPROFILE = $env:PB_PROFILE
+          $uninstaller = Join-Path $env:PB_APP 'unins000.exe'
+          $done = Start-Process -FilePath $uninstaller -Wait -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          if ($done.ExitCode -ne 0) { throw "The uninstaller ended with $($done.ExitCode)" }
+          # The uninstaller hands the last of its work to a copy of itself.
+          foreach ($try in 1..40) { if (-not (Test-Path -LiteralPath $env:PB_APP)) { break }; Start-Sleep -Milliseconds 500 }
+          if (Test-Path -LiteralPath $env:PB_APP) { Get-ChildItem -LiteralPath $env:PB_APP -Recurse | Select-Object -First 20 FullName; throw 'The folder is still there after the uninstall' }
+          if (Test-Path -LiteralPath (Join-Path $env:PB_PROFILE '.config\pixelbygget')) { throw 'The login folder is still there after the uninstall' }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pixelbygget-Setup-${{ steps.version.outputs.version }}
+          path: installer/out/Pixelbygget-Setup-${{ steps.version.outputs.version }}.exe
+          if-no-files-found: error
+
+  draft:
+    # Only on a tag, and only this job may write: it runs nothing that was fetched.
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Pixelbygget-Setup-${{ needs.build.outputs.version }}
+      - name: A draft release with the installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "Pixelbygget-Setup-$VERSION.exe" \
+            --repo "$GITHUB_REPOSITORY" --draft \
+            --title "Pixelbygget $VERSION" \
+            --notes "The Windows installer of the Pixelbygget app. A draft: a person publishes it."

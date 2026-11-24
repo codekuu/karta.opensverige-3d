@@ -45,6 +45,8 @@ PHASES = ("stack", "node", "renderer", "model")
 
 MANIFEST = Path(__file__).with_name("app_install.json")
 LOCK_NAME = "requirements-app.lock"
+# Wheels the installer carries: diffusers, which is pinned by commit and is on no index.
+WHEELS = "wheels"
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 
 # Written when a phase has ended well, beside what the phase made, so that a folder that
@@ -593,14 +595,19 @@ class Installer:
             # Packages the person installed for another Python of theirs are not this one's.
             "PYTHONNOUSERSITE": "1",
         }
-        code, said = self._child(
-            [
-                str(_python()), "-m", "pip", "install", "--require-hashes", "--no-input",
-                "-r", str(lock),
-                "--extra-index-url", TORCH_INDEX,
-            ],  # fmt: skip
-            env,
-        )
+        argv = [
+            str(_python()), "-m", "pip", "install", "--require-hashes", "--no-input",
+            # Wheels only. A package built here would fetch its build tools from the index,
+            # and no hash of ours covers those.
+            "--only-binary", ":all:",
+            "-r", str(lock),
+            "--extra-index-url", TORCH_INDEX,
+        ]  # fmt: skip
+        wheels = app / WHEELS
+        if wheels.is_dir():
+            # What no index has: the installer brought it, and the lock names its hash.
+            argv += ["--find-links", str(wheels)]
+        code, said = self._child(argv, env)
         if code != 0:
             raise self._ended_badly(said)
         marker.write_text(digest, encoding="utf-8")

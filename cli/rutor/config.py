@@ -178,7 +178,8 @@ _INSTALL_KEYS = ("version", "lock_sha256")
 def app_install() -> dict[str, str] | None:
     """What the installer wrote about itself, or None on an install made by hand."""
     try:
-        found = json.loads((repo_root() / INSTALL_FILE).read_text(encoding="utf-8"))
+        # utf-8-sig: a Windows tool may have put a byte order mark first.
+        found = json.loads((repo_root() / INSTALL_FILE).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
     if not isinstance(found, dict):
@@ -199,6 +200,8 @@ def tool_env() -> dict[str, str]:
 
     The page fetches Node into the app's folder; nothing is put on the person's own PATH.
     A folder without node.exe is a download that did not finish, and counts as no Node.
+    The renderer's Chrome is kept in the app's folder as well, where puppeteer both puts
+    it and looks for it, so that removing the app removes all of it.
     On an install made by hand nothing is added: there the person's own Node is used.
     """
     folder = app_dir()
@@ -211,4 +214,4 @@ def tool_env() -> dict[str, str]:
     # A child of the page asks again with the folder already in front.
     if not parts or parts[0] != str(node):
         parts.insert(0, str(node))
-    return {"PATH": os.pathsep.join(parts)}
+    return {"PATH": os.pathsep.join(parts), "PUPPETEER_CACHE_DIR": str(folder / "chrome")}

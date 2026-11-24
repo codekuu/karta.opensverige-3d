@@ -72,6 +72,12 @@ class AppHomeTests(_AppFolder):
         self.assertEqual(config.app_dir(), self.app)
         self.assertEqual(config.app_install(), {"version": "0.1.0", "lock_sha256": "ab" * 32})
 
+    def test_a_file_written_by_windows_with_its_mark_in_front_is_read(self) -> None:
+        # Windows tools often put a byte order mark first in a UTF-8 file.
+        text = '{"version": "0.1.0", "lock_sha256": "' + "ab" * 32 + '"}'
+        (self.app / "install.json").write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
+        self.assertEqual(config.app_install(), {"version": "0.1.0", "lock_sha256": "ab" * 32})
+
     def test_a_file_of_another_shape_is_no_install(self) -> None:
         for text in ("[]", '{"version": 3}', '{"version": "0.1.0"}', "not json", "", '{"version": "0.1.0", "lock_sha256": 7}'):
             self.install(text)
@@ -83,8 +89,11 @@ class AppHomeTests(_AppFolder):
         self.install()
         folder = self.node()
         found = config.tool_env()
-        self.assertEqual(list(found), ["PATH"])
+        self.assertEqual(sorted(found), ["PATH", "PUPPETEER_CACHE_DIR"])
         self.assertEqual(found["PATH"].split(os.pathsep), [str(folder), "/somewhere/bin", "/usr/bin"])
+        # The renderer's Chrome is kept in the app's folder too, so that removing the app
+        # removes it, and nothing of the app is left in the person's home folder.
+        self.assertEqual(found["PUPPETEER_CACHE_DIR"], str(self.app / "chrome"))
         # Asking does not change this process's own path.
         self.assertEqual(os.environ["PATH"].split(os.pathsep), ["/somewhere/bin", "/usr/bin"])
 
@@ -335,6 +344,7 @@ class InstallJobTests(_Install):
             pip,
             [
                 python, "-m", "pip", "install", "--require-hashes", "--no-input",
+                "--only-binary", ":all:",
                 "-r", str(self.app / "requirements-app.lock"),
                 "--extra-index-url", "https://download.pytorch.org/whl/cu128",
             ],
@@ -358,6 +368,22 @@ class InstallJobTests(_Install):
         self.assertEqual((node / "node.exe").read_bytes(), b"node")
         self.assertEqual((node / "node_modules" / "npm" / "bin" / "npm-cli.js").read_bytes(), b"npm")
         self.assertEqual(self.state()["done_gb"], self.state()["total_gb"])
+
+    def test_wheels_the_installer_brought_are_looked_in(self) -> None:
+        # diffusers is pinned by commit and has no wheel on any index. The installer
+        # carries one, built from that commit, and the lock names its hash.
+        (self.app / "wheels").mkdir()
+        self.installer.run()
+        pip = self.children.calls[0][1]
+        self.assertEqual(pip[pip.index("--find-links") + 1], str(self.app / "wheels"))
+        # Nothing is ever built on the person's machine: a build would fetch build tools
+        # that no hash of ours covers.
+        self.assertEqual(pip[pip.index("--only-binary") + 1], ":all:")
+
+    def test_the_renderers_chrome_is_fetched_into_the_apps_folder(self) -> None:
+        self.installer.run()
+        _name, _npm, npm_env = self.children.calls[1]
+        self.assertEqual(npm_env["PUPPETEER_CACHE_DIR"], str(self.app / "chrome"))
 
     def test_nothing_is_left_behind_after_the_fetch(self) -> None:
         self.installer.run()
@@ -700,6 +726,146 @@ class FetchTests(unittest.TestCase):
         for allowed in ("https://nodejs.org/other.zip", "https://objects.githubusercontent.com/x"):
             followed = follow.redirect_request(request, io.BytesIO(), 302, "Found", {}, allowed)  # type: ignore[arg-type]
             self.assertEqual(followed.full_url, allowed)  # type: ignore[union-attr]
+
+
+def _load_lock_tool() -> object:
+    """tools/make_app_lock.py as a module. It is run by hand on a Windows machine."""
+    import importlib.machinery
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[2] / "tools" / "make_app_lock.py"
+    loader = importlib.machinery.SourceFileLoader("make_app_lock", str(path))
+    spec = importlib.util.spec_from_loader("make_app_lock", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+class LockToolTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tool = _load_lock_tool()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name) / PROFILE / "wheels"
+        self.folder.mkdir(parents=True)
+
+    def put(self, name: str, body: bytes = b"wheel") -> str:
+        (self.folder / name).write_bytes(body)
+        return hashlib.sha256(body).hexdigest()
+
+    def test_a_wheel_is_named_by_its_file(self) -> None:
+        pin = self.tool.wheel_pin  # type: ignore[attr-defined]
+        self.assertEqual(pin("torch-2.11.0+cu128-cp311-cp311-win_amd64.whl"), ("torch", "2.11.0+cu128"))
+        self.assertEqual(pin("huggingface_hub-2.4.0-py3-none-any.whl"), ("huggingface-hub", "2.4.0"))
+        self.assertEqual(pin("PyYAML-6.0.3-cp311-cp311-win_amd64.whl"), ("pyyaml", "6.0.3"))
+        self.assertEqual(pin("typing_extensions-4.15.0-1-py3-none-any.whl"), ("typing-extensions", "4.15.0"))
+        for odd in ("torch.whl", "torch-2.11.0.tar.gz", "a-b.whl"):
+            with self.assertRaises(ValueError):
+                pin(odd)
+
+    def test_every_file_becomes_one_line_with_its_hash(self) -> None:
+        torch = self.put("torch-2.11.0+cu128-cp311-cp311-win_amd64.whl", b"torch")
+        numpy = self.put("numpy-2.4.6-cp311-cp311-win_amd64.whl", b"numpy")
+        lines, size, left_out = self.tool.lock_lines(self.folder)  # type: ignore[attr-defined]
+        self.assertEqual(lines, [f"numpy==2.4.6 --hash=sha256:{numpy}", f"torch==2.11.0+cu128 --hash=sha256:{torch}"])
+        self.assertEqual(size, 10)
+        self.assertEqual(left_out, [])
+
+    def test_the_source_of_diffusers_is_left_to_the_installer(self) -> None:
+        self.put("numpy-2.4.6-cp311-cp311-win_amd64.whl")
+        self.put("diffusers-0.42.0.dev0.zip", b"source")
+        lines, size, left_out = self.tool.lock_lines(self.folder)  # type: ignore[attr-defined]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(left_out, ["diffusers-0.42.0.dev0.zip"])
+        # Its size is not part of what the page fetches.
+        self.assertEqual(size, 5)
+
+    def test_anything_else_that_is_not_a_wheel_stops_the_lock(self) -> None:
+        self.put("numpy-2.4.6-cp311-cp311-win_amd64.whl")
+        self.put("somepackage-1.0.tar.gz")
+        with self.assertRaises(ValueError) as caught:
+            self.tool.lock_lines(self.folder)  # type: ignore[attr-defined]
+        self.assertIn("somepackage-1.0.tar.gz", str(caught.exception))
+
+    def test_two_versions_of_one_package_stop_the_lock(self) -> None:
+        self.put("numpy-2.4.6-cp311-cp311-win_amd64.whl")
+        self.put("numpy-2.4.5-cp311-cp311-win_amd64.whl", b"older")
+        with self.assertRaises(ValueError):
+            self.tool.lock_lines(self.folder)  # type: ignore[attr-defined]
+
+    def test_pip_is_asked_to_download_and_nothing_else(self) -> None:
+        argv = self.tool.download_command(self.folder, Path("requirements.txt"))  # type: ignore[attr-defined]
+        self.assertEqual(argv[1:4], ["-m", "pip", "download"])
+        self.assertNotIn("install", argv)
+        self.assertIn("torch==2.11.0+cu128", argv)
+        self.assertIn("torchvision==0.26.0+cu128", argv)
+        self.assertEqual(argv[argv.index("--dest") + 1], str(self.folder))
+        self.assertEqual(argv[argv.index("--extra-index-url") + 1], app_install.TORCH_INDEX)
+
+
+class InstallerFilesTests(unittest.TestCase):
+    """What the installer may and may not do, read off the files that build it."""
+
+    ROOT = Path(__file__).resolve().parents[2]
+
+    def read(self, *parts: str) -> str:
+        return self.ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+    def test_it_never_asks_for_administrator_rights(self) -> None:
+        script = self.read("installer", "pixelbygget.iss")
+        self.assertIn("PrivilegesRequired=lowest", script)
+        self.assertNotIn("PrivilegesRequiredOverridesAllowed", script.replace("; PrivilegesRequiredOverridesAllowed", ""))
+        self.assertIn(r"DefaultDirName={localappdata}\Pixelbygget", script)
+        # Nothing outside the person's own folder: no machine-wide registry, no PATH.
+        for forbidden in ("HKLM", "[Registry]", "ChangesEnvironment", "{commonpf", "{sys}", "{win}"):
+            self.assertNotIn(forbidden, script)
+
+    def test_the_shortcuts_start_the_app_without_a_terminal(self) -> None:
+        script = self.read("installer", "pixelbygget.iss")
+        icons = script[script.index("[Icons]") : script.index("[Run]")]
+        self.assertEqual(icons.count(r'Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\start.pyw"""'), 2)
+        self.assertIn(r"{autoprograms}\Pixelbygget", icons)
+        self.assertIn(r"{autodesktop}\Pixelbygget", icons)
+
+    def test_the_installer_script_is_plain_ascii(self) -> None:
+        # Inno Setup reads a file without a byte order mark in the machine's own code page.
+        for name in ("pixelbygget.iss", "build.ps1"):
+            self.assertTrue(self.read("installer", name).isascii(), name)
+
+    def test_what_the_build_fetches_is_pinned(self) -> None:
+        build = self.read("installer", "build.ps1")
+        import re
+
+        pins = dict(re.findall(r"^\$(\w+Sha256) = '([0-9a-f]{64})'$", build, re.MULTILINE))
+        self.assertEqual(sorted(pins), ["DiffusersSha256", "PythonSha256"])
+        self.assertIn("cpython-3.11.", build)
+        self.assertIn("x86_64-pc-windows-msvc-install_only.tar.gz", build)
+        for url in re.findall(r"^\$\w+Url = ['\"]([^'\"]+)['\"]$", build, re.MULTILINE):
+            self.assertTrue(url.startswith("https://github.com/"), url)
+        # Each fetch goes through the one function that checks the hash before anything reads the file.
+        self.assertEqual(build.count("Invoke-WebRequest"), 1)
+        self.assertEqual(build.count("Get-Pinned -Url"), 2)
+
+    def test_the_build_makes_the_wheel_of_the_commit_the_requirements_pin(self) -> None:
+        import re
+
+        pinned = re.search(r"diffusers\.git@([0-9a-f]{40})", self.read("requirements.txt"))
+        assert pinned is not None
+        self.assertIn(f"$DiffusersCommit = '{pinned.group(1)}'", self.read("installer", "build.ps1"))
+
+    def test_the_workflow_only_ever_makes_a_draft(self) -> None:
+        workflow = self.read(".github", "workflows", "installer.yml")
+        self.assertEqual(workflow.count("gh release create"), 1)
+        self.assertIn("--draft", workflow[workflow.index("gh release create") :])
+        for forbidden in ("gh release edit", "--draft=false", "--latest", "softprops/action-gh-release"):
+            self.assertNotIn(forbidden, workflow)
+        # The job that builds and runs what was fetched cannot write to the repository.
+        build_job = workflow[workflow.index("  build:") : workflow.index("  draft:")]
+        self.assertNotIn("contents: write", build_job)
+
+    def test_the_workflow_installs_under_a_profile_with_a_space_and_swedish_letters(self) -> None:
+        self.assertIn("'Åsa Öberg'", self.read(".github", "workflows", "installer.yml"))
 
 
 if __name__ == "__main__":
