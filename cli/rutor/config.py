@@ -36,16 +36,56 @@ def read_token() -> str | None:
     return text or None
 
 
-def write_token(token: str) -> None:
-    path = token_path()
+def _write_secret(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # O_CREAT honours umask, so a second chmod pins the mode at 0600.
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(descriptor, token.encode("utf-8"))
+        os.write(descriptor, text.encode("utf-8"))
     finally:
         os.close(descriptor)
     os.chmod(path, 0o600)
+
+
+def write_token(token: str) -> None:
+    _write_secret(token_path(), token)
+
+
+# The contributor's own Cesium ion token. The renderer reads it from this variable. A person
+# who uses the app page pastes it there once instead, and it is kept beside the login.
+CESIUM_TOKEN_ENV = "CESIUM_ION_TOKEN"
+
+
+def cesium_token_path() -> Path:
+    return home() / "cesium-token"
+
+
+def read_cesium_token() -> str | None:
+    path = cesium_token_path()
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8").strip()
+    return text or None
+
+
+def write_cesium_token(token: str) -> None:
+    token = token.strip()
+    if not token:
+        raise bad_input("the Cesium token is empty; nothing was saved")
+    _write_secret(cesium_token_path(), token)
+
+
+def cesium_env() -> dict[str, str]:
+    """What to add to a child's environment so that it can read the Cesium token.
+
+    Nothing when the person has set the variable themselves: the child inherits it, and theirs
+    wins. Otherwise the token the app page stored, if there is one. This process's own
+    environment is never changed, so the token reaches only the commands that are handed it.
+    """
+    if os.environ.get(CESIUM_TOKEN_ENV, "").strip():
+        return {}
+    stored = read_cesium_token()
+    return {CESIUM_TOKEN_ENV: stored} if stored else {}
 
 
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
