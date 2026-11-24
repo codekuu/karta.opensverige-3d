@@ -43,8 +43,15 @@ const ORD = {
     waiting: "Fem av dina rutor väntar på granskning. Vänta tills en är granskad.",
     lock_left: "En tidigare ruta är fortfarande låst. Försök igen om en stund.",
   },
+  hamtning: {
+    disk: "Disken blev full. Gör plats och tryck igen.",
+    network: "Nätet svarade inte. Tryck igen så fortsätter hämtningen.",
+    changed: "Appen behöver uppdateras. Hämta den nya versionen.",
+    failed: "Något gick fel med hämtningen. Kopiera felrapporten.",
+  },
   svar: {
-    busy: "En ruta ritas redan.",
+    busy: "Datorn är upptagen. Vänta tills det är klart.",
+    not_an_app: "Den här installationen hämtar inget själv.",
     no_cell: "Välj en ruta först.",
     not_ready: "Något saknas i ett tidigare steg. Gå tillbaka och titta.",
     terms: "Säg ja till villkoren först.",
@@ -67,6 +74,13 @@ const VERKTYG = {
 
 const NAMN = ["Klarar datorn det?", "Villkoren", "Logga in", "Cesium-konto", "Ritverktyget", "Välj ruta", "Rita", "Klart"];
 const FASER = ["claim", "render", "redraw", "upload"];
+// The four things the app fetches in step 5, in the order it fetches them.
+const HAMTAR = {
+  stack: "Hämtar PyTorch",
+  node: "Hämtar Node",
+  renderer: "Hämtar kartverktyget",
+  model: "Hämtar ritmodellen",
+};
 
 // The three places the page sends a person to. They are links the person presses. The page
 // itself loads nothing from them.
@@ -128,7 +142,7 @@ function gar(s) {
 }
 
 function duger(s) {
-  const delar = ["machine", "tools", "terms", "login", "cesium", "price", "sheet", "job", "version"];
+  const delar = ["machine", "tools", "terms", "login", "cesium", "price", "sheet", "job", "install", "version"];
   return s !== null && typeof s === "object" && delar.every((del) => s[del] !== null && typeof s[del] === "object");
 }
 
@@ -377,7 +391,76 @@ function steg4(s) {
   text("nyckel-fel", fel);
 }
 
+function gb(antal) {
+  // Swedish writes the decimal with a comma.
+  return (Math.round(antal * 10) / 10).toFixed(1).replace(".", ",");
+}
+
+function hamtning(s) {
+  // Step 5 in an app install: the app fetches the tools itself, and says how far it is.
+  const t = s.tools;
+  const i = s.install;
+  const klart = t.ready === true;
+  const gar = Object.prototype.hasOwnProperty.call(HAMTAR, i.phase);
+  const stannat = !klart && !gar && i.phase === "stopped";
+  const fel = !klart && !gar && i.phase === "failed";
+  // Fetched to the end, and a tool is still missing: the fetch cannot put that right alone.
+  const trasigt = !klart && !gar && i.phase === "done";
+  const allt = typeof i.total_gb === "number" && i.total_gb > 0 ? i.total_gb : 0;
+  const hamtat = typeof i.done_gb === "number" ? Math.min(Math.max(i.done_gb, 0), allt) : 0;
+  const hela = Math.max(1, Math.ceil(allt));
+
+  text("rubrik-5", klart ? "Ritverktyget" : gar ? "Ritverktyget hämtas" : "Hämta ritverktyget");
+  if (klart) text("verktyg-ingress", "Allt som behövs finns på datorn.");
+  else if (gar) text("verktyg-ingress", "Det tar en stund. Datorn går att använda under tiden.");
+  else text("verktyg-ingress", hela + " GB, en gång. Det tar en stund.");
+
+  visa("hamta-gar", gar);
+  visa("hamta-rad", gar);
+  if (gar) {
+    const andel = allt > 0 ? Math.round((hamtat / allt) * 100) : 0;
+    el("hamta-matare").style.width = andel + "%";
+    el("hamta-stapel").setAttribute("aria-valuenow", String(andel));
+    text("hamta-fas", HAMTAR[i.phase]);
+    text("hamta-siffror", gb(hamtat) + " av " + hela + " GB");
+  }
+
+  // What is already on the disk is said, so that nobody thinks a second press starts over.
+  const borjat = !klart && !gar && !fel && !trasigt && hamtat >= 0.1;
+  visa("hamta-besked", stannat || borjat);
+  if (stannat) text("hamta-besked", "Hämtningen stannade. Tryck igen så fortsätter den.");
+  else if (borjat) text("hamta-besked", gb(hamtat) + " av " + hela + " GB finns redan på datorn.");
+
+  const felrad = stegFel || (fel ? ord("hamtning", i.problem) : trasigt ? "Verktygen hämtades men svarar inte. Kopiera felrapporten." : "");
+  visa("hamta-fel", Boolean(felrad));
+  text("hamta-fel", felrad);
+  visa("verktyg-saknas", false);
+  visa("verktyg-hjalp", false);
+  visa("verktyg-modell", false);
+
+  // An app that has to be replaced is not helped by another try.
+  const igen = !klart && !gar && !(fel && i.problem === "changed");
+  visa("hamta", igen);
+  el("hamta").disabled = upptagen;
+  text("hamta", stannat || borjat ? "Fortsätt hämta →" : fel || trasigt ? "Försök igen →" : "Hämta →");
+  visa("hamta-avbryt", gar);
+  el("hamta-avbryt").disabled = upptagen;
+  const rapport = fel || trasigt;
+  visa("hamta-kopiera", rapport);
+  visa("hamta-rapport-rad", rapport && rapportVisad);
+  visa("hamta-rapport", rapport && rapportVisad && Boolean(el("hamta-rapport").value));
+  visa("verktyg-vidare", klart);
+}
+
 function steg5(s) {
+  if (s.install.app === true) {
+    hamtning(s);
+    return;
+  }
+  // An install made by hand: the page says what is missing and installs nothing.
+  for (const id of ["hamta-gar", "hamta-rad", "hamta-besked", "hamta-fel", "hamta", "hamta-avbryt", "hamta-kopiera", "hamta-rapport-rad", "hamta-rapport"]) {
+    visa(id, false);
+  }
   const t = s.tools;
   const saknas = Array.isArray(t.missing) ? t.missing : [];
   text("verktyg-ingress", t.ready ? "Allt som behövs finns på datorn." : "Det här saknas på datorn.");
@@ -762,22 +845,28 @@ function koppla() {
     vantaVisad = true;
     rita();
   });
-  el("slut-kopiera").addEventListener("click", async () => {
-    let rapport = "";
-    try {
-      const svar = await fetch("api/report", { cache: "no-store" });
-      rapport = svar.ok ? await svar.text() : "";
-    } catch (fel) {
-      rapport = "";
-    }
-    const gick = rapport !== "" && (await kopiera(rapport));
-    // When the browser will not copy, the report is shown so that the person can.
-    el("slut-rapport").value = gick ? "" : rapport;
-    rapportVisad = true;
-    text("slut-kopiera", gick ? "Kopierad" : "Kopiera felrapport");
-    window.setTimeout(() => text("slut-kopiera", "Kopiera felrapport"), 2500);
-    rita();
-  });
+  // The same report from both places a thing can fail: the drawing and the fetch.
+  for (const [knapp, ruta] of [["slut-kopiera", "slut-rapport"], ["hamta-kopiera", "hamta-rapport"]]) {
+    el(knapp).addEventListener("click", async () => {
+      let rapport = "";
+      try {
+        const svar = await fetch("api/report", { cache: "no-store" });
+        rapport = svar.ok ? await svar.text() : "";
+      } catch (fel) {
+        rapport = "";
+      }
+      const gick = rapport !== "" && (await kopiera(rapport));
+      // When the browser will not copy, the report is shown so that the person can.
+      el(ruta).value = gick ? "" : rapport;
+      rapportVisad = true;
+      text(knapp, gick ? "Kopierad" : "Kopiera felrapport");
+      window.setTimeout(() => text(knapp, "Kopiera felrapport"), 2500);
+      rita();
+    });
+  }
+
+  el("hamta").addEventListener("click", () => gor("api/install", {}, "svar"));
+  el("hamta-avbryt").addEventListener("click", () => gor("api/install/stop", {}, "svar"));
 }
 
 koppla();

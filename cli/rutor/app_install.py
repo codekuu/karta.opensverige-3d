@@ -340,6 +340,12 @@ def _own_python(app: Path) -> bool:
         return False
 
 
+def is_app() -> bool:
+    """Whether tools may be fetched here: an app install, run by the Python that came with it."""
+    app = config.app_dir()
+    return app is not None and _own_python(app)
+
+
 def _tree_bytes(folder: Path) -> int:
     """The size of everything in a folder. A file that goes away while it is counted is skipped."""
     total = 0
@@ -453,7 +459,7 @@ class Installer:
     def run(self, redo: Iterable[str] = ()) -> None:
         """Do the phases whose result is missing, in order. `redo` names phases to do regardless."""
         app = config.app_dir()
-        if app is None or not _own_python(app):
+        if app is None or not is_app():
             # Nothing is ever installed into a clone or into the person's own Python.
             raise Refusal(409, "tools are fetched only into an app install", "not_an_app")
         again = [name for name in redo if name in PHASES]

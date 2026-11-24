@@ -111,8 +111,23 @@
           <p id="verktyg-ingress"></p>
           <ul class="saknas" id="verktyg-saknas" hidden></ul>
           <p id="verktyg-hjalp" hidden>Installera dem enligt projektets README. Sidan tittar igen var trettionde sekund.</p>
+          <div class="hamtning" id="hamta-gar" hidden>
+            <div class="matare stor" id="hamta-stapel" role="progressbar" aria-labelledby="hamta-fas" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="hamta-matare"></i></div>
+            <div class="hamtrad">
+              <span class="fas" id="hamta-fas"></span>
+              <span class="varde" id="hamta-siffror"></span>
+            </div>
+          </div>
+          <p class="liten" id="hamta-rad" hidden>Låt fliken vara öppen. Hämtningen stannar om du stänger den.</p>
+          <p class="besked" id="hamta-besked" hidden></p>
+          <p class="besked nejruta" id="hamta-fel" role="alert" hidden></p>
+          <p class="liten" id="hamta-rapport-rad" hidden>Klistra in rapporten i ett nytt ärende på projektets GitHub. Adressen är <span class="ruta-id">github.com/opensverige/karta.opensverige-3d</span>.</p>
+          <textarea class="rapport" id="hamta-rapport" readonly aria-label="Felrapport" hidden></textarea>
           <p class="besked" id="verktyg-modell" hidden>Första ritningen hämtar 20 GB. Det görs en gång.</p>
           <div class="knappar">
+            <button class="knapp" type="button" id="hamta" hidden>Hämta →</button>
+            <button class="knapp tyst" type="button" id="hamta-avbryt" hidden>Avbryt</button>
+            <button class="knapp tyst" type="button" id="hamta-kopiera" hidden>Kopiera felrapport</button>
             <button class="knapp" type="button" id="verktyg-vidare" data-till="6" hidden>Fortsätt →</button>
           </div>
         </section>

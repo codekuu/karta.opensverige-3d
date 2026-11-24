@@ -172,6 +172,20 @@ h2:focus { outline: none; }
 .saknas { display: flex; flex-direction: column; border-top: 1px solid var(--line); max-width: 560px; }
 .saknas li { padding: 11px 0; border-bottom: 1px solid var(--line); color: var(--rust); font-weight: 500; }
 
+/* The fetch: one bar for all four downloads, what is being fetched now and how far it is. */
+
+.hamtning { display: flex; flex-direction: column; gap: 10px; max-width: 560px; }
+.matare.stor { height: 10px; border-radius: 5px; }
+.matare.stor i { width: 0; border-radius: 5px; }
+.hamtrad { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between; align-items: baseline; }
+.hamtrad .fas { font-weight: 500; }
+.hamtrad .fas::after {
+  content: "\25D0"; display: inline-block; margin-left: 8px; color: var(--moss);
+  animation: snurr 1.6s linear infinite;
+}
+.hamtrad .varde { font-family: var(--mono); font-size: 13px; color: var(--ink-soft); }
+.banderoll a { color: inherit; font-weight: 700; }
+
 /* ---- step 6: the cells */
 
 .karta {

@@ -30,7 +30,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rutor import __version__, api, app_jobs, commands, config, login, pipeline
+from rutor import __version__, api, app_install, app_jobs, commands, config, login, pipeline
 from rutor.errors import RutorError, bad_input, environment, network
 from rutor.localpage import LocalPage, Refusal, Reply, json_reply
 from rutor.renderer import google
@@ -677,6 +677,16 @@ class Builder:
         with self._lock:
             self._seen = self._clock()
 
+    def away(self) -> bool:
+        """Whether the page has asked for nothing for so long that it has gone."""
+        with self._lock:
+            return self._clock() - self._seen > GONE_SECONDS
+
+    def busy(self) -> bool:
+        """Whether a cell is being built, or its lock is still being given back."""
+        with self._lock:
+            return self._busy()
+
     def tick(self) -> None:
         """Stop a job whose page has not asked for anything for a long time."""
         with self._lock:
@@ -907,6 +917,15 @@ _BLANK_MACHINE: dict[str, object] = {
     "warning": "",
 }
 _BLANK_TOOLS: dict[str, object] = {"ready": False, "model_cached": False, "missing": []}
+# Which phase of the fetch brings a tool. A tool that is still missing after a fetch has
+# its phase done again: tools() is the judge of what is there, not the fetch.
+_PHASE_OF_TOOL = {
+    "torch": "stack",
+    "bitsandbytes": "stack",
+    "render": "stack",
+    "node": "node",
+    "google_renderer": "renderer",
+}
 _BLANK_PRICE: dict[str, object] = {"decision": "unknown", "after": ""}
 _BLANK_CESIUM: dict[str, object] = {"set": False, "ok": False, "problem": ""}
 # Until GitHub has answered there is no news, and that is also the answer when it cannot.
@@ -1001,9 +1020,17 @@ class _Known:
     outside it, because a check can take a while and must not stall the page.
     """
 
-    def __init__(self, builder: Builder, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        builder: Builder,
+        clock: Callable[[], float] = time.monotonic,
+        installing: Callable[[], bool] | None = None,
+    ) -> None:
         self._builder = builder
         self._clock = clock
+        # While the tools are fetched nothing is worked out either: asking about the tools
+        # starts a child that imports PyTorch, and it would hold files pip is writing.
+        self._installing = installing
         self._lock = threading.Lock()
         self._machine: tuple[dict[str, object], float] | None = None
         self._tools: tuple[str, dict[str, object], float] | None = None
@@ -1015,6 +1042,11 @@ class _Known:
         """The person pasted a token. The next state asks Cesium again."""
         with self._lock:
             self._cesium = None
+
+    def forget_tools(self) -> None:
+        """A fetch has ended. The next state asks which tools are there now."""
+        with self._lock:
+            self._tools = None
 
     def parts(self) -> dict[str, object]:
         sheet = self.sheet()
@@ -1129,6 +1161,8 @@ class _Known:
         return found
 
     def _running(self) -> bool:
+        if self._installing is not None and self._installing():
+            return True
         phase = self._builder.job_state().get("phase")
         return isinstance(phase, str) and phase in _RUNNING
 
@@ -1244,7 +1278,12 @@ def _scrub(text: str) -> str:
     return text
 
 
-def _report(machine_info: dict[str, object], builder: Builder) -> str:
+def _report(
+    machine_info: dict[str, object],
+    builder: Builder,
+    install: dict[str, object] | None = None,
+    install_lines: list[str] | None = None,
+) -> str:
     card = machine_info.get("card")
     card_gb = machine_info.get("card_gb")
     if isinstance(card, str) and card and isinstance(card_gb, int) and not isinstance(card_gb, bool):
@@ -1270,15 +1309,26 @@ def _report(machine_info: dict[str, object], builder: Builder) -> str:
     problem_text = problem if isinstance(problem, str) and problem else "none"
     held = "yes" if job.get("held") is True else "no"
     lines = [f"  {line}" for line in builder.job_lines()]
+    driver = machine_info.get("driver")
+    driver_line = f"driver: {driver}" if isinstance(driver, str) and driver else "driver: unknown"
+    installed = config.app_install()
+    # A clone has no installer version. Its code is named by the rutor line above.
+    app_line = f"app: {api.one_line(installed['version'], 20)}" if installed is not None else "app: none"
+    fetch = install or {}
+    fetch_phase = fetch.get("phase")
+    fetch_problem = fetch.get("problem")
+    fetch_lines = [f"  {line}" for line in install_lines or []]
     # The host name is left out on purpose: a report is pasted into an issue.
     text = "\n".join(
         [
             "Pixelbygget app report",
             f"rutor: {__version__}",
+            app_line,
             f"pipeline: {pipeline.PIPELINE}",
             f"system: {platform.system()} {platform.release()} {platform.machine()}",
             f"python: {platform.python_version()}",
             card_line,
+            driver_line,
             memory_line,
             f"disk: {free_gb} GB free",
             cell_line,
@@ -1287,6 +1337,10 @@ def _report(machine_info: dict[str, object], builder: Builder) -> str:
             f"held: {held}",
             "lines:",
             *lines,
+            f"install: {fetch_phase if isinstance(fetch_phase, str) and fetch_phase else 'idle'}",
+            f"install problem: {fetch_problem if isinstance(fetch_problem, str) and fetch_problem else 'none'}",
+            "install lines:",
+            *fetch_lines,
         ]
     )
     return _scrub(text)
@@ -1295,9 +1349,23 @@ def _report(machine_info: dict[str, object], builder: Builder) -> str:
 class AppServer:
     """The build page behind the shell every page on this machine has: see `localpage`."""
 
-    def __init__(self, builder: Builder | None = None, releases: ReleaseFetch | None = None) -> None:
+    def __init__(
+        self,
+        builder: Builder | None = None,
+        releases: ReleaseFetch | None = None,
+        installer: app_install.Installer | None = None,
+    ) -> None:
         self._builder = builder if builder is not None else Builder()
-        self._known = _Known(self._builder)
+        self._installer = (
+            installer
+            if installer is not None
+            else app_install.Installer(app_jobs.start_process, app_install.fetch_url, commands._free_gb)
+        )
+        # A cell and a fetch never run together. Whichever is started looks, under this
+        # lock, that the other is not running.
+        self._start_lock = threading.Lock()
+        self._install_thread: threading.Thread | None = None
+        self._known = _Known(self._builder, installing=self._installing)
         self._page = LocalPage("app", self._get, self._post)
         self.key = self._page.key
         self.port = self._page.port
@@ -1344,6 +1412,10 @@ class AppServer:
         while not self._timer_stop.wait(TICK_SECONDS):
             try:
                 self._builder.tick()
+                if self._installing() and self._builder.away():
+                    # A closed tab stops a fetch as it stops a job. What has arrived stays,
+                    # and the next press goes on from there.
+                    self._installer.stop()
             except Exception as exc:
                 print(f"app: {type(exc).__name__} in tick", file=sys.stderr)
 
@@ -1366,6 +1438,11 @@ class AppServer:
             timer.join(timeout=130)
         # No new request gets in, and then anything the page started is stopped.
         self._page.stop()
+        self._installer.stop()
+        with self._start_lock:
+            fetching = self._install_thread
+        if fetching is not None and fetching is not threading.current_thread():
+            fetching.join(timeout=30)
         self._builder.shutdown()
 
     def _get(self, rest: str) -> Reply | None:
@@ -1377,7 +1454,7 @@ class AppServer:
         if rest == "api/grid":
             return json_reply(200, self._grid())
         if rest == "api/report":
-            text = _report(self._known.machine(), self._builder)
+            text = _report(self._known.machine(), self._builder, self._installer.state(), self._installer.lines())
             return Reply(200, "text/plain; charset=utf-8", text.encode("utf-8"))
         return None
 
@@ -1394,7 +1471,19 @@ class AppServer:
             return json_reply(200, self._cell(raw))
         if rest == "api/build":
             _body(raw)
-            self._builder.build()
+            with self._start_lock:
+                if self._installing():
+                    raise Refusal(409, "the tools are being fetched", "busy")
+                self._builder.build()
+            return json_reply(200, {"ok": True})
+        if rest == "api/install":
+            _body(raw)
+            self._install()
+            return json_reply(200, {"ok": True})
+        if rest == "api/install/stop":
+            _body(raw)
+            # The child is told to end, and the page reads how it went in the state.
+            self._installer.stop()
             return json_reply(200, {"ok": True})
         if rest == "api/stop":
             _body(raw)
@@ -1421,8 +1510,48 @@ class AppServer:
             "sheet": sheet,
             "cell": self._builder.chosen(),
             "job": self._builder.job_state(),
+            "install": {**self._installer.state(), "app": app_install.is_app()},
             "version": {**version(sheet), "app": app},
         }
+
+    def _installing(self) -> bool:
+        thread = self._install_thread
+        return thread is not None and thread.is_alive()
+
+    def _install(self) -> None:
+        """Start fetching the tools, on a thread of its own."""
+        if not app_install.is_app():
+            # An install made by hand is the person's own. The page installs nothing into it.
+            raise Refusal(409, "tools are fetched only into an app install", "not_an_app")
+        with self._start_lock:
+            if self._installing() or self._builder.busy():
+                raise Refusal(409, "this machine is busy with a cell or a fetch", "busy")
+            # Asked now and not from memory, like a build: nothing large is fetched to a
+            # machine that cannot draw, or before the terms are accepted.
+            if not machine()["ok"] or not self._builder.terms_accepted():
+                raise Refusal(409, "the machine check and the terms come first", "not_ready")
+            missing = tools(_kind_of(self._known.sheet())).get("missing")
+            redo: list[str] = []
+            for name in missing if isinstance(missing, list) else []:
+                phase = _PHASE_OF_TOOL.get(name) if isinstance(name, str) else None
+                if phase is not None and phase not in redo:
+                    redo.append(phase)
+            # Starting counts as the page being here.
+            self._builder.seen()
+            thread = threading.Thread(target=self._run_install, args=(tuple(redo),), daemon=True)
+            self._install_thread = thread
+            thread.start()
+
+    def _run_install(self, redo: tuple[str, ...]) -> None:
+        try:
+            self._installer.run(redo=redo)
+        except Refusal:
+            # Nothing was started. The state says so.
+            pass
+        except Exception as exc:  # noqa: BLE001 - the last stop on this thread
+            print(f"app: {type(exc).__name__} while fetching the tools", file=sys.stderr)
+        finally:
+            self._known.forget_tools()
 
     def _grid(self) -> dict[str, object]:
         sheet = self._known.sheet()

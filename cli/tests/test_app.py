@@ -1603,6 +1603,41 @@ _SHEET_CELLS: list[tuple[int, int, str, str | None]] = [
 ]
 
 
+class FakeInstaller:
+    """Stands in for app_install.Installer: records what the page asked of it."""
+
+    def __init__(self) -> None:
+        self.runs: list[tuple[str, ...]] = []
+        self.stops = 0
+        self.answer: dict[str, object] = {"phase": "idle", "done_gb": 0.0, "total_gb": 15.9, "problem": ""}
+        self.said: list[str] = []
+        # A run returns at once unless the test holds it here.
+        self.go = threading.Event()
+        self.go.set()
+        self._running = threading.Event()
+
+    def run(self, redo: tuple[str, ...] = ()) -> None:
+        self.runs.append(tuple(redo))
+        self._running.set()
+        try:
+            self.go.wait(timeout=30.0)
+        finally:
+            self._running.clear()
+
+    def stop(self) -> None:
+        self.stops += 1
+        self.go.set()
+
+    def running(self) -> bool:
+        return self._running.is_set()
+
+    def state(self) -> dict[str, object]:
+        return dict(self.answer)
+
+    def lines(self) -> list[str]:
+        return list(self.said)
+
+
 class AppServerTests(_OwnHome):
     """The page over real HTTP, against a service on this machine and a scripted child."""
 
@@ -1635,11 +1670,37 @@ class AppServerTests(_OwnHome):
             self.addCleanup(patcher.stop)
         self.fake = FakeStart()
         self.builder = app.Builder(self.fake)
-        self.server = app.AppServer(self.builder)
+        self.installer = FakeInstaller()
+        self.server = app.AppServer(self.builder, releases=list, installer=self.installer)
         self.addCleanup(self.server.stop)
         self.server.start()
         self.port = self.server.port
         self.base = f"/{self.server.key}"
+
+    def _app_install(self) -> None:
+        """From here on this is an app install: the folder the installer made."""
+        for target, value in (
+            ("rutor.config.app_dir", Path(self.tmp.name) / "Åsa Öberg" / "Pixelbygget"),
+            ("rutor.config.app_install", {"version": "0.1.0", "lock_sha256": "ab" * 32}),
+            ("rutor.app_install.is_app", True),
+        ):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _install(self, expect: int = 200) -> dict[str, object]:
+        status, _headers, body = self.call("POST", f"{self.base}/api/install", {})
+        self.assertEqual(status, expect, body)
+        parsed = json.loads(body)
+        self.assertIsInstance(parsed, dict)
+        return parsed
+
+    def _hold_install(self) -> None:
+        """An install that is under way until the test lets it go or stops it."""
+        self.installer.go.clear()
+        self.addCleanup(self.installer.go.set)
+        self._install()
+        wait_until(self.installer.running)
 
     def _put_sheet(self, cells: list[tuple[int, int, str, str | None]]) -> None:
         sheet: dict[str, object] = {
@@ -1716,7 +1777,7 @@ class AppServerTests(_OwnHome):
         found = self._state()
         self.assertEqual(
             set(found),
-            {"machine", "tools", "terms", "login", "cesium", "price", "sheet", "cell", "job", "version"},
+            {"machine", "tools", "terms", "login", "cesium", "price", "sheet", "cell", "job", "install", "version"},
         )
         terms = found["terms"]
         self.assertIsInstance(terms, dict)
@@ -1747,6 +1808,7 @@ class AppServerTests(_OwnHome):
             ("POST", f"{self.base}/api/cell", {"next": True}),
             ("POST", f"{self.base}/api/build", {}),
             ("POST", f"{self.base}/api/stop", {}),
+            ("POST", f"{self.base}/api/install/stop", {}),
         )
         for method, path, body in pages:
             status, headers, payload = self.call(method, path, body)
@@ -1922,6 +1984,134 @@ class AppServerTests(_OwnHome):
         self.assertNotIn(b"test-token", body)
         self.assertNotIn(b"a.b.c", body)
 
+    def test_nothing_is_fetched_before_the_machine_and_the_terms_say_yes(self) -> None:
+        self._app_install()
+        self.machine_mock.return_value = {**_MACHINE, "ok": False, "problem": "small_card"}
+        self.assertEqual(self._install(expect=409).get("code"), "not_ready")
+        self.machine_mock.return_value = dict(_MACHINE)
+        with patch.object(self.builder, "terms_accepted", return_value=False):
+            self.assertEqual(self._install(expect=409).get("code"), "not_ready")
+        self.assertEqual(self.installer.runs, [])
+        # With both, it starts.
+        self._install()
+        wait_until(lambda: self.installer.runs == [()])
+
+    def test_an_install_and_a_cell_never_run_together(self) -> None:
+        self._app_install()
+        self.fake.script("claim", [], hold=True)
+        self.call("POST", f"{self.base}/api/cell", {"next": True})
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual(status, 200, body)
+        wait_until(lambda: self.builder.job_state()["phase"] == "claim")
+        self.assertEqual(self._install(expect=409).get("code"), "busy")
+        self.assertEqual(self.installer.runs, [])
+        self.call("POST", f"{self.base}/api/stop", {})
+        wait_until(lambda: self.builder.job_state()["phase"] == "stopped" and not self.builder.busy())
+        # And the other way round: nothing is built, and no second fetch starts, while one runs.
+        self._hold_install()
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual((status, json.loads(body).get("code")), (409, "busy"))
+        self.assertEqual(self._install(expect=409).get("code"), "busy")
+        self.assertEqual(len(self.installer.runs), 1)
+        self.assertEqual(self.builder.job_state()["phase"], "stopped")
+
+    def test_a_hand_made_install_gets_no_button(self) -> None:
+        install = self._state()["install"]
+        self.assertIsInstance(install, dict)
+        self.assertIs(install["app"], False)
+        self.assertEqual(self._install(expect=409).get("code"), "not_an_app")
+        self.assertEqual(self.installer.runs, [])
+
+    def test_the_state_carries_the_progress(self) -> None:
+        self._app_install()
+        self.installer.answer = {"phase": "model", "done_gb": 12.2, "total_gb": 20.0, "problem": ""}
+        self.assertEqual(
+            self._state()["install"],
+            {"phase": "model", "done_gb": 12.2, "total_gb": 20.0, "problem": "", "app": True},
+        )
+
+    def test_the_phase_of_a_tool_that_is_still_missing_is_done_again(self) -> None:
+        self._app_install()
+        missing = {"ready": False, "model_cached": False, "missing": ["torch", "bitsandbytes", "google_renderer", "odd"]}
+        with patch("rutor.app.tools", return_value=missing):
+            self._install()
+            wait_until(lambda: bool(self.installer.runs))
+        self.assertEqual(self.installer.runs, [("stack", "renderer")])
+
+    def test_the_tools_are_not_asked_about_while_they_are_fetched(self) -> None:
+        # Asking starts a child that imports PyTorch. Under pip that child would hold files
+        # pip is writing. When the fetch has ended they are asked about at once.
+        self._app_install()
+        with patch("rutor.app.tools", return_value={"ready": False, "model_cached": False, "missing": ["torch"]}) as asked:
+            self._state()
+            self._hold_install()
+            before = asked.call_count
+            for _ in range(3):
+                self.server._known._tools = None
+                self.assertEqual(self._state()["tools"], {"ready": False, "model_cached": False, "missing": []})
+            self.assertEqual(asked.call_count, before)
+            asked.return_value = dict(_TOOLS)
+            self.installer.go.set()
+            wait_until(lambda: self._state()["tools"] == _TOOLS)
+
+    def test_stopping_the_fetch_answers_at_once(self) -> None:
+        self._app_install()
+        self._hold_install()
+        status, _headers, body = self.call("POST", f"{self.base}/api/install/stop", {})
+        self.assertEqual((status, json.loads(body)), (200, {"ok": True}))
+        self.assertEqual(self.installer.stops, 1)
+        # A stop with nothing running is not a fault.
+        wait_until(lambda: not self.installer.running())
+        status, _headers, _body = self.call("POST", f"{self.base}/api/install/stop", {})
+        self.assertEqual(status, 200)
+
+    def test_closing_the_page_stops_the_fetch(self) -> None:
+        self._app_install()
+        self._hold_install()
+        self.server.stop()
+        self.assertEqual(self.installer.stops, 1)
+        self.assertFalse(self.installer.running())
+
+    def test_a_page_that_stops_asking_ends_the_fetch(self) -> None:
+        now = [1000.0]
+        installer = FakeInstaller()
+        builder = app.Builder(FakeStart(), clock=lambda: now[0])
+        with patch("rutor.app.TICK_SECONDS", 0.02):
+            server = app.AppServer(builder, releases=list, installer=installer)
+            self.addCleanup(server.stop)
+            self.addCleanup(installer.go.set)
+            server.start()
+            self._app_install()
+            installer.go.clear()
+            connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=10)
+            connection.request("POST", f"/{server.key}/api/install", body=b"{}", headers={"Content-Type": "application/json"})
+            self.assertEqual(connection.getresponse().status, 200)
+            connection.close()
+            wait_until(installer.running)
+            # A hidden tab asks once a minute. That is not a page that has gone.
+            now[0] += 100.0
+            time.sleep(0.1)
+            self.assertEqual(installer.stops, 0)
+            now[0] += app.GONE_SECONDS
+            wait_until(lambda: installer.stops == 1)
+
+    def test_the_report_says_how_the_fetch_went(self) -> None:
+        self._app_install()
+        home = str(Path.home())
+        self.installer.answer = {"phase": "failed", "done_gb": 3.1, "total_gb": 15.9, "problem": "network"}
+        self.installer.said = ["Collecting torch", f"ERROR: could not write {home}/AppData/x"]
+        self.machine_mock.return_value = {**_MACHINE, "driver": "616.56"}
+        status, _headers, body = self.call("GET", f"{self.base}/api/report")
+        self.assertEqual(status, 200, body)
+        text = body.decode("utf-8")
+        self.assertIn("driver: 616.56", text)
+        self.assertIn("app: 0.1.0", text)
+        self.assertIn("install: failed", text)
+        self.assertIn("install problem: network", text)
+        self.assertIn("  Collecting torch", text)
+        self.assertIn("~/AppData/x", text)
+        self.assertNotIn(home, text)
+
     def test_a_report_is_written_when_the_system_will_not_name_the_user(self) -> None:
         # getpass raises KeyError on some Pythons and OSError on others when no name is known.
         for fault in (KeyError("uid"), OSError("no name")):
@@ -2081,6 +2271,32 @@ class PageFilesTests(unittest.TestCase):
         for word in words:
             self.assertRegex(script, rf"\b{word}: \"", word)
         self.assertIn("Något gick fel. Försök igen.", script)
+
+    def test_step_five_has_a_bar_and_a_button(self) -> None:
+        page = self.read("index.html")
+        for wanted in ('id="hamta"', 'id="hamta-matare"', 'id="hamta-avbryt"', 'role="progressbar"'):
+            self.assertIn(wanted, page)
+        self.assertIn(">Hämta →<", page)
+        self.assertIn(">Avbryt<", page)
+
+    def test_the_fetch_is_said_in_swedish(self) -> None:
+        script = self.read("app.js")
+        for sentence in (
+            "Hämtar PyTorch",
+            "Hämtar Node",
+            "Hämtar kartverktyget",
+            "Hämtar ritmodellen",
+            "Appen behöver uppdateras. Hämta den nya versionen.",
+        ):
+            self.assertIn(sentence, script)
+        # Each word the install job can end with has a sentence of its own.
+        block = script[script.index("  hamtning: {") : script.index("}", script.index("  hamtning: {"))]
+        for word in ("disk", "network", "changed", "failed"):
+            self.assertRegex(block, rf"\b{word}: \"", word)
+        for word in ("not_an_app",):
+            self.assertRegex(script, rf"\b{word}: \"", word)
+        # The size is the manifest's, not a number written into the page.
+        self.assertNotIn("25 GB", script)
 
     def test_the_page_can_say_a_newer_app_is_out(self) -> None:
         page = self.read("index.html")
