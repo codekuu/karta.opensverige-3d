@@ -4,17 +4,24 @@ The checks below only read. They say whether this machine can draw, which tools
 are missing, whether the Cesium token works, what the terms are, what the
 electricity price advises and whether this copy of the pipeline is current.
 The page owns the sentences. These functions return short words.
+
+Below them, `Builder` holds the state of the person's eight steps and runs the
+CLI as a child of this process: first the terms, then the GitHub login.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
+import threading
+import time
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 
-from rutor import api, commands, config, login, pipeline, se3_price
+from rutor import api, app_jobs, commands, config, login, pipeline, se3_price
 from rutor.errors import RutorError
+from rutor.localpage import Refusal
 from rutor.renderer import google
 
 
@@ -204,3 +211,164 @@ def version(sheet: dict[str, object]) -> dict[str, object]:
     mine = pipeline.PIPELINE
     # Nothing said means this copy is current: the service did not ask for another.
     return {"mine": mine, "wanted": wanted, "current": wanted == "" or wanted == mine}
+
+
+# ---- the eight steps
+
+
+# What a child prints is data. These are the only shapes the page keeps. A code and a
+# login name are printed again in the page and put in a URL, so anything else is dropped.
+_CODE_SHAPE = re.compile(r"[A-Za-z0-9-]{1,20}")
+_NAME_SHAPE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
+
+
+class Builder:
+    """The state of the page's steps, and the children it runs for the person.
+
+    The GitHub login token is never held here. When the page asks the service who the
+    person is, it reads the token from the file at that moment, hands it over and lets it
+    go, so no answer, log line or exception from here can carry it.
+
+    One lock guards all the state. Nothing that can take time is done while it is held: a
+    child start, a network ask and a thread join all happen outside it.
+    """
+
+    def __init__(
+        self,
+        start: app_jobs.Start = app_jobs.start_rutor,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._start = start
+        # Kept for the steps that time a child, which a later task adds.
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._terms = False
+        self._login = ""
+        self._code = ""
+        self._url = ""
+        self._waiting = False
+        self._problem = ""
+        self._looked = False
+        # Set once the page is closing. Nothing is started after that.
+        self._closed = False
+        # The login child, only while it is being read. A child that has ended is never
+        # stopped: stopping signals its process group, and that number may be reused.
+        self._run: app_jobs.Run | None = None
+        self._thread: threading.Thread | None = None
+
+    def accept_terms(self) -> None:
+        with self._lock:
+            self._terms = True
+
+    def terms_accepted(self) -> bool:
+        self._remember_stored_login()
+        with self._lock:
+            # A stored login exists only because the terms were accepted when it was made.
+            return self._terms or bool(self._login)
+
+    def start_login(self) -> None:
+        self._remember_stored_login()
+        with self._lock:
+            if not (self._terms or self._login):
+                raise Refusal(409, "accept the terms first", "terms")
+            # A second press while the code is on screen must not start a second child.
+            if self._waiting or self._closed:
+                return
+            self._code = ""
+            self._url = ""
+            self._problem = ""
+            self._waiting = True
+        try:
+            run = self._start(["login", "--accept-terms"], {})
+        except OSError:
+            # The child could not start, which is a login that ended before it began.
+            with self._lock:
+                self._waiting = False
+                self._problem = "expired"
+            return
+        # The login can last minutes, so the page reads it on its own thread and returns.
+        thread = threading.Thread(target=self._read_login, args=(run,), daemon=True)
+        with self._lock:
+            closed = self._closed
+            if not closed:
+                self._run = run
+            self._thread = thread
+        if closed:
+            # The page closed while the child was starting. It is not left behind.
+            run.stop()
+        thread.start()
+
+    def _read_login(self, run: app_jobs.Run) -> None:
+        name = ""
+        exit_code = 1
+        try:
+            for line in run.lines():
+                # The child prints the ten terms first, and other lines are not the page's.
+                if line.kind == "code" and _CODE_SHAPE.fullmatch(line.text):
+                    with self._lock:
+                        self._code = line.text
+                elif line.kind == "url" and line.text == login.DEVICE_URL:
+                    # Only GitHub's own address is passed on, so no other page is offered.
+                    with self._lock:
+                        self._url = line.text
+                elif line.kind == "logged in" and _NAME_SHAPE.fullmatch(line.text):
+                    name = line.text
+                    with self._lock:
+                        self._login = name
+            exit_code = run.wait()
+        except Exception as exc:  # noqa: BLE001 - the last stop on this thread
+            # The page must not wait for ever on a reader that broke. The kind of fault goes
+            # to the terminal, never its message: this process holds the login.
+            print(f"app: {type(exc).__name__} while reading the login", file=sys.stderr)
+        with self._lock:
+            self._run = None
+            self._waiting = False
+            self._code = ""
+            self._url = ""
+            if name:
+                self._problem = ""
+            else:
+                # 4 is the CLI's network code; any other end is a code nobody approved.
+                self._problem = "network" if exit_code == 4 else "expired"
+
+    def login_state(self) -> dict[str, object]:
+        self._remember_stored_login()
+        with self._lock:
+            return {
+                "login": self._login,
+                "code": self._code,
+                "url": self._url,
+                "waiting": self._waiting,
+                "problem": self._problem,
+            }
+
+    def _remember_stored_login(self) -> None:
+        """Ask the service, on the first look only, who a stored token belongs to."""
+        with self._lock:
+            if self._looked:
+                return
+            self._looked = True
+        token = config.read_token()
+        if not token:
+            return
+        try:
+            _status, me = api.get("/v1/me", token=token)
+        except RutorError:
+            # As far as the page knows, nobody is logged in. It says nothing more.
+            return
+        name = me.get("login") if isinstance(me, dict) else None
+        if isinstance(name, str) and _NAME_SHAPE.fullmatch(name):
+            with self._lock:
+                # A name a login child has just read is fresher than the stored token's.
+                if not self._login:
+                    self._login = name
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._closed = True
+            run = self._run
+            thread = self._thread
+        if run is not None:
+            run.stop()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=15)
