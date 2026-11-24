@@ -20,7 +20,7 @@ npx wrangler@4.163.0 kv namespace create GH
 
 Put the printed `database_id` and KV `id` into `wrangler.jsonc`. Then set the admin: your GitHub id (`gh api user --jq .id`) as `ADMIN_GITHUB_ID` in `wrangler.jsonc` or under Settings → Variables.
 
-The CLI needs a GitHub OAuth App named "Pixelbygget" under the organisation with "Enable Device Flow" ticked; its client id is `GITHUB_CLIENT_ID` in `cli/rutor/config.py`, not here.
+The CLI needs a GitHub OAuth App named "Pixelbygget" under the organisation with "Enable Device Flow" ticked; its client id is `GITHUB_CLIENT_ID` in `cli/rutor/config.py`, and the same value is the variable `GITHUB_CLIENT_ID` in `wrangler.jsonc` (a test in `cli/tests` holds them together).
 
 ## Deploy
 
