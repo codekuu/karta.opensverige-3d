@@ -4,6 +4,25 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-24
 
+### A cell built from a page
+`rutor app` serves a page on the builder's own machine that runs claim, render, redraw and upload as child processes. The first cell built from it was stockholm-norr 82_24, on mogadishu (Windows, RTX 5070, 32 GB) on 2026-11-24.
+- **Rita to waiting for review took about 2 min 45 s.** The render took 13 seconds, the redraw about 2 min 20 s, the claim and the upload the rest. No command was typed after `rutor app`.
+- **The redraw holds 12.6 GiB of ordinary memory at its peak.** That is the redraw child's peak working set. It had asked the system for 22.8 GiB. Free memory on the machine fell from 17.2 GB to 4.6 GB, and the card peaked at 11.2 GB. The render's Chrome held about 1.2 GB for its 13 seconds.
+- **So the page warns below 17 GB and does not refuse.** 13 GB for the redraw and 4 for everything else. A machine with 16 GB has not been tried, so a no would be a guess.
+- **The page's own process is 50 MB.** PyTorch and bitsandbytes are asked about in a child that ends. Imported in the page's process they would have stayed in memory beside the redraw for as long as the page was open, and a reinstalled PyTorch would not have been seen until a restart.
+- **Windows has no time zone database.** `ZoneInfo("Europe/Stockholm")` fails there unless the tzdata package is installed, so the price check could never be loaded on that machine, and once the page loaded it at start every `rutor` command crashed. Found by the first test run on Windows. The price check now knows Swedish time by its rule (last Sunday of March to last Sunday of October, compared with the database every half hour of 2026 and 2027), and nothing about the price is loaded before a price is asked for.
+- **Avbryt during the render left nothing behind.** `taskkill /T /F` on the render took Node and nine Chrome processes with it within six seconds. The card was back at 800 MiB, `rutor status` said `locks: 0`, and the cell (75_20) was free on the service.
+- **A child that is stopped on Windows exits 1.** That is also `rutor`'s code for bad input. So the exit of a stopped claim says nothing about whether the service gave the lock, and a stopped claim is released once in case it did.
+- **`rutor claim` reads the Cesium token itself,** before it locks. The page hands a pasted token to claim and render, and to no other command.
+- **A token pasted into the page wins over `CESIUM_ION_TOKEN`.** Otherwise a variable that has gone stale could never be put right from the page.
+- **A lock is remembered with its cell.** A lock that could not be given back is asked back by its own name before another cell is claimed. A new builder may hold one cell, so the next claim would be refused with nothing on the page to say why.
+- **A hidden tab asks once a minute.** Chrome and Edge slow the timers of a tab that has been hidden for five minutes. The page counts as gone after 150 seconds without a request, not 30, or switching tab would stop the job.
+- **An SSH session that ends does not end `rutor app` on Windows.** The process stayed after the connection was closed and had to be ended with `taskkill`. "Nothing left running" is checked in the process list, not assumed.
+- **The progress line shows whatever the redraw prints,** a PyTorch warning and the loading bars included, as one line of text. It is honest and not pretty.
+- **Three older tests assume a machine that cannot draw.** `test_preflight_lines`, `test_preflight_checks_render_libraries_not_chrome` and `test_redraw_writes_png_and_manifest` in `tests/test_render.py` expect no PyTorch and no card, and fail on mogadishu. The other 373 pass there.
+- **Not settled: a closed tab against a short job.** A cell like this one takes about 2 min 45 s and the page counts as gone after 2 min 30 s. A tab closed just after Rita therefore mostly lets the cell finish and go in. Stopping at once when the tab closes would also stop a job on a reload.
+- **Not tried:** a machine with 16 GB; closing the tab for real during a job (the chain from timer to release is tested with a fake child); the first run's 20 GB download from the page; a person who has never used a terminal.
+
 ### The token is asked about before a cell is locked
 The first real cell was locked for 48 hours with a token Cesium ion refused, because the check only looked for a value. `rutor preflight --sheet` and `rutor claim` now ask Cesium ion.
 - **One request tells a good token from a bad one.** `GET https://api.cesium.com/v1/assets/2275207/endpoint` with the token as a Bearer header answers 200 for a working token and 401 `INVALID_TOKEN` for a made-up one. Both were tried against Cesium ion itself, the working one on the builder's own machine with only the status printed.
