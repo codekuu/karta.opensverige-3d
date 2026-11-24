@@ -67,6 +67,12 @@ UPLOAD_MAX = 8 * 1024 * 1024
 TILE_MAX = 1024 * 1024
 TILES_KEPT = 200
 NO_MAP_SECONDS = 60.0
+# The tile service's list of editions: which sheets have had cells put into them, and the number
+# of the edition that is live. It is small, and it is read again this often, so that a cell
+# published while the page is open shows among its neighbours.
+EDITIONS_MAX = 4 * 1024 * 1024
+EDITION_SECONDS = 60.0
+EDITION_LARGEST = 999_999
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
@@ -109,6 +115,21 @@ def parse_dzi(raw: bytes) -> Dzi | None:
     if not (0 < int(width) <= 1 << 24 and 0 < int(height) <= 1 << 24):
         return None
     return Dzi(int(width), int(height))
+
+
+def edition_of(raw: bytes, sheet: str) -> int:
+    """The live edition of a sheet in the tile service's editions file, or 0 for the base map.
+
+    A sheet's tiles never change under their address. When a volunteer's cell is put into the
+    map the sheet gets a new edition, and its tiles are asked for as <sheet>@<edition>_files/...
+    Anything the file says that is not a plain positive number means the base.
+    """
+    try:
+        sheets = json.loads(raw.decode("utf-8")).get("sheets")
+        rev = sheets.get(sheet).get("rev")
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return 0
+    return rev if isinstance(rev, int) and not isinstance(rev, bool) and 0 < rev <= EDITION_LARGEST else 0
 
 
 def cell_tile(dzi: Dzi, col: int, row: int) -> tuple[int, int, int] | None:
@@ -247,7 +268,8 @@ class _Review:
         self._token = token
         self._lock = threading.Lock()
         self._maps: dict[str, tuple[Dzi | None, float]] = {}
-        self._tiles: dict[tuple[str, int, int], bytes] = {}
+        self._editions: dict[str, tuple[int, float]] = {}
+        self._tiles: dict[tuple[str, int, int, int], bytes] = {}
 
     def queue(self) -> dict[str, object]:
         lists: dict[str, object] = {}
@@ -313,23 +335,48 @@ class _Review:
             self._maps[sheet] = (dzi, time.monotonic())
         return dzi
 
+    def _edition(self, sheet: str) -> int:
+        """The sheet's live edition, asked about at most once a minute. 0 is the base map."""
+        with self._lock:
+            known = self._editions.get(sheet)
+        if known is not None and time.monotonic() - known[1] < EDITION_SECONDS:
+            return known[0]
+        try:
+            status, raw = api.fetch_public(f"{config.tiles_url()}/karta-utgava.json", _FROM_THIS_MACHINE, EDITIONS_MAX)
+            edition = edition_of(raw, sheet) if status == 200 else 0
+        except RutorError:
+            # Without an answer the last known edition stands. The tile itself says if the service is down.
+            edition = known[0] if known is not None else 0
+        with self._lock:
+            self._editions[sheet] = (edition, time.monotonic())
+        return edition
+
     def tile(self, sheet: str, col: int, row: int) -> bytes:
-        """Today's map over one cell."""
+        """Today's map over one cell: the base, or the live edition when cells have been put in."""
+        edition = self._edition(sheet)
         dzi = self._map(sheet)
         place = cell_tile(dzi, col, row) if dzi is not None else None
         if place is None:
             raise _Answer(404, "the map has no picture there")
-        key = (sheet, col, row)
+        key = (sheet, edition, col, row)
         with self._lock:
             kept = self._tiles.get(key)
         if kept is not None:
             return kept
         level, x, y = place
-        status, data = api.fetch_public(f"{config.tiles_url()}/{sheet}_files/{level}/{x}_{y}.webp", _FROM_THIS_MACHINE, TILE_MAX)
+        name = f"{sheet}@{edition}" if edition else sheet
+        status, data = api.fetch_public(f"{config.tiles_url()}/{name}_files/{level}/{x}_{y}.webp", _FROM_THIS_MACHINE, TILE_MAX)
+        stand_in = status == 404 and edition > 0
+        if stand_in:
+            # The editions file can be ahead of the tiles for a moment after a publication. The
+            # base is shown meanwhile, and not kept, so the edition's own tile is asked for again.
+            status, data = api.fetch_public(f"{config.tiles_url()}/{sheet}_files/{level}/{x}_{y}.webp", _FROM_THIS_MACHINE, TILE_MAX)
         if status == 404:
             raise _Answer(404, "the map has no picture there")
         if status != 200 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
             raise _Answer(502, "the tile service did not answer with a picture")
+        if stand_in:
+            return data
         with self._lock:
             # Tiles never change under their address, so they are kept; the oldest go first.
             while len(self._tiles) >= TILES_KEPT:

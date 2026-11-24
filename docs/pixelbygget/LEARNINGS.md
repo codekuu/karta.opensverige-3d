@@ -4,6 +4,32 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-23
 
+### The first volunteer cell is on the map
+stockholm-norr 74_20 went from approved to visible on karta.opensverige.se on 2026-11-23, as edition 1 of the sheet.
+- **One cell is 51 uploads and 34 seconds.** The source picture, 46 tiles over 19 levels, the edge picture, the island picture, the sheet's list and the switch. Sixteen of the tiles are at full scale.
+- **The site needed no change.** It read the new addresses out of karta.json, which the tile service cached for its five minutes before the cell showed.
+- **Everything else answered as before.** A tile nobody changed came back byte for byte the base's, and the two other cities were not touched.
+- **The build page and the review page showed the base picture,** not the edition, so the lit cell was dark there. Both now read the live edition from the tile service's own `karta-utgava.json`, not from the service's revision: the tile service is what knows which addresses exist.
+
+### The base map is drawn further out than the city shows
+Found while building the step that puts an approved cell into the map, tried on stockholm-norr 74_20 without publishing anything.
+- **The edge picture hides real pictures.** The city fades out at its edge picture (8 pixels per cell, alpha), and its half-way line lies up to a cell and a half inside what the tiles hold. Of 40 cells with only a faint alpha, 25 were drawn all over and none was empty. Of 40 empty-alpha cells next to them, 20 held a picture too. Drawn ground ends on a 512 px grid, half a cell.
+- **So a free cell is often half drawn already.** 74_20 was offered as missing, and its lower half is in the tiles, hidden. The rule for "missing" reads the edge picture, not the tiles.
+- **A new cell would have been an island.** Opening the edge over the cell alone leaves a see-through band between the cell and the city, because the cells between them count as on the map and are never offered. The publishing step opens hidden, drawn ground between a new cell and the city, at most two cells wide, and never opens over empty ground.
+- **The margin has two jobs.** Against drawn ground it fades in over its 256 px, as the review page shows. Over empty ground it is kept whole, so that the cell's edge has a picture to fade out over. Empty ground is told from drawn by being flat and dark; a block next to a drawn one needs 16 px of its rim left out, since the compression spills over.
+- **The city's edge is a blur of 3.1 edge pixels,** 400 px on the map, measured on Stockholm. A new cell shows whole to its own edge and is gone where its margin ends.
+- **Tiles are cached for a year,** so a changed tile cannot keep its address. A sheet gets an edition number in the address, changed tiles lie beside the base, and the base is never written. Taking every cell away gives back the map exactly.
+- **An address with an edition has to give the same picture every time.** The first build kept one copy of each changed tile and let every edition read it. An independent review showed what that meant from the second edition on: a run that stopped half way had already changed what visitors saw, and a cell withdrawn after that stayed in caches for a year. Changed tiles are now written once per edition, and a list per sheet says which edition each tile belongs to. Nothing a run uploads can be seen before the list is written.
+- **The same review found a cell could slip in after a rejection.** A cell rejected while a run was under way was published and never taken out, because a rejected cell is free again and stands in no queue. The run now asks once more right before the switch, and takes out any cell on the map that the service no longer counts as lit or approved.
+- **A picture comparison that compared nothing.** `ImageChops.difference(a, b).getbbox()` on RGBA pictures looks at alpha only, so the tests for "same picture" passed whatever the colours were. A deliberate fault in the paste order showed it. They compare bytes now.
+
+### The first cell went the whole way, from a fresh clone to the review page
+A Windows PC with an RTX 5070 (12 GB) was driven over SSH, the way an agent would: a fresh clone of `main`, the light install, `rutor preflight --machine`, the model stack, `npm ci`, the login by device code, `rutor claim stockholm-norr --next`, render, redraw, upload. The cell (74_20) came up on the review page among its neighbours, with the check at `ok`. Nothing in the chain had to be worked around.
+- **A wrong Cesium token locked the cell before anyone knew.** The token had been pasted twice into the variable: 583 characters and four dots where a token has two. `rutor preflight --sheet` and `rutor claim` said `cesium token ok`, because they only look for a value. Cesium ion answered 401 at `rutor render`, with the cell already held for 48 hours. The check should ask Cesium ion before a lock is taken.
+- **A variable set with `setx` reaches a new SSH session at once.** No restart of the SSH service was needed. A program that was already open still has to be reopened, as the instructions say.
+- **The times were short.** The redraw was done within three minutes of the render, with the model weights already on the disk. The render was not timed; it ended well inside the 15 minutes the instructions allow.
+- **The water came out darker than the map's.** The new cell's sea is navy where the three drawn neighbours have a lighter blue, so the cell's edge shows in open water. The land joins without a visible seam. The reviewer decides; nothing was changed.
+
 ### Two fresh agents followed the instructions, and the login never reached them
 After the change to "draw what is missing", two agents that knew nothing of the project were sent in: one ran the instructions for real on a Mac, one traced a Windows PC with a 12 GB card on paper against the code.
 - **`rutor login` printed its code into a buffer.** Through a pipe, which is how an agent runs a command, Python holds output back until the program ends. The login prints a code and then waits for a person to approve it, so the code was never shown and the wait never ended. `rutor` now writes every line when it is printed, as UTF-8, and the login says that it is waiting.

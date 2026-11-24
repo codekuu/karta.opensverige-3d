@@ -489,6 +489,61 @@ class ReviewServerTests(unittest.TestCase):
         self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")
         self.assertEqual(len([r for r in self.tiles.requests if r["path"].endswith("64_58.webp")]), 1)
 
+    # ---- editions: cells that have been put into the map since the base was drawn
+
+    def _editions(self, sheets: dict[str, object]) -> None:
+        self.tiles.files["/v1/karta-utgava.json"] = json.dumps({"sheets": sheets}).encode("utf-8")
+
+    def test_the_map_is_shown_in_the_edition_that_is_live(self) -> None:
+        self._editions({"goteborg-norr": {"rev": 3, "island": "oar/x-u3.webp", "edge": "oar/x-kant-u3.png", "cells": []}})
+        self.tiles.files["/v1/goteborg-norr_files/17/64_58.webp"] = WEBP
+        self.tiles.files["/v1/goteborg-norr@3_files/17/64_58.webp"] = WEBP + b"edition 3"
+        status, _headers, body = self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")
+        self.assertEqual((status, body), (200, WEBP + b"edition 3"))
+        asked = [r for r in self.tiles.requests if r["path"].endswith("karta-utgava.json")]
+        self.assertEqual(asked[0].get("referer"), "http://127.0.0.1/")
+        self.assertNotIn("authorization", asked[0])
+
+    def test_a_sheet_without_an_edition_is_shown_as_the_base(self) -> None:
+        self._editions({"stockholm-norr": {"rev": 3}})
+        self.tiles.files["/v1/goteborg-norr_files/17/64_58.webp"] = WEBP
+        status, _headers, body = self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")
+        self.assertEqual((status, body), (200, WEBP))
+        self.assertEqual([r["path"] for r in self.tiles.requests if "@" in r["path"]], [])
+
+    def test_a_new_edition_is_picked_up_while_the_page_is_open(self) -> None:
+        self.tiles.files["/v1/goteborg-norr_files/17/64_58.webp"] = WEBP
+        self.tiles.files["/v1/goteborg-norr@1_files/17/64_58.webp"] = WEBP + b"edition 1"
+        with patch.object(review, "EDITION_SECONDS", 0):
+            self.assertEqual(self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")[2], WEBP)
+            self._editions({"goteborg-norr": {"rev": 1}})
+            self.assertEqual(self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")[2], WEBP + b"edition 1")
+
+    def test_the_edition_is_not_asked_about_for_every_tile(self) -> None:
+        self._editions({"goteborg-norr": {"rev": 1}})
+        for cell in ("64_58", "65_58", "64_59"):
+            self.tiles.files[f"/v1/goteborg-norr@1_files/17/{cell}.webp"] = WEBP
+            self.call("GET", f"{self.base}/img/map/goteborg-norr/{cell}.webp")
+        self.assertEqual(len([r for r in self.tiles.requests if r["path"].endswith("karta-utgava.json")]), 1)
+
+    def test_an_edition_whose_tile_is_missing_falls_back_to_the_base(self) -> None:
+        self._editions({"goteborg-norr": {"rev": 2}})
+        self.tiles.files["/v1/goteborg-norr_files/17/64_58.webp"] = WEBP
+        status, _headers, body = self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")
+        self.assertEqual((status, body), (200, WEBP))
+        # The stand-in is not kept: when the edition's own tile is there, it is the one shown.
+        self.tiles.files["/v1/goteborg-norr@2_files/17/64_58.webp"] = WEBP + b"edition 2"
+        self.assertEqual(self.call("GET", f"{self.base}/img/map/goteborg-norr/64_58.webp")[2], WEBP + b"edition 2")
+
+    def test_an_editions_file_with_odd_content_means_the_base(self) -> None:
+        for raw in (b"<html>Not for this site</html>", b"[]", b'{"sheets": []}', b'{"sheets": {"goteborg-norr": {"rev": "3"}}}',
+                    b'{"sheets": {"goteborg-norr": {"rev": true}}}', b'{"sheets": {"goteborg-norr": {"rev": -1}}}',
+                    b'{"sheets": {"goteborg-norr": {"rev": 1.5}}}', b'{"sheets": {"goteborg-norr": {"rev": 10000000}}}',
+                    b'{"sheets": {"goteborg-norr": 3}}', b"\xff\xfe"):
+            self.assertEqual(review.edition_of(raw, "goteborg-norr"), 0, raw)
+        self.assertEqual(review.edition_of(b'{"sheets": {"goteborg-norr": {"rev": 12}}}', "goteborg-norr"), 12)
+        self.assertEqual(review.edition_of(b'{"sheets": {"goteborg-norr": {"rev": 12}}}', "stockholm-norr"), 0)
+
     def test_no_tile_outside_the_map_or_of_another_kind(self) -> None:
         status, _headers, _body = self.call("GET", f"{self.base}/img/map/goteborg-norr/130_0.webp")
         self.assertEqual(status, 404)
