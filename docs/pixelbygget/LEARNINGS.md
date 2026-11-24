@@ -5,7 +5,7 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 ## 2026-11-24
 
 ### A cell built from a page
-`rutor app` serves a page on the builder's own machine that runs claim, render, redraw and upload as child processes. The first cell built from it was stockholm-norr 82_24, on mogadishu (Windows, RTX 5070, 32 GB) on 2026-11-24.
+`rutor app` serves a page on the builder's own machine that runs claim, render, redraw and upload as child processes. The first cell built from it was stockholm-norr 82_24, on the test PC (Windows, RTX 5070, 32 GB) on 2026-11-24.
 - **Rita to waiting for review took about 2 min 45 s.** The render took 13 seconds, the redraw about 2 min 20 s, the claim and the upload the rest. No command was typed after `rutor app`.
 - **The redraw holds 12.6 GiB of ordinary memory at its peak.** That is the redraw child's peak working set. It had asked the system for 22.8 GiB. Free memory on the machine fell from 17.2 GB to 4.6 GB, and the card peaked at 11.2 GB. The render's Chrome held about 1.2 GB for its 13 seconds.
 - **So the page warns below 17 GB and does not refuse.** 13 GB for the redraw and 4 for everything else. A machine with 16 GB has not been tried, so a no would be a guess.
@@ -19,7 +19,7 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 - **A hidden tab asks once a minute.** Chrome and Edge slow the timers of a tab that has been hidden for five minutes. The page counts as gone after 150 seconds without a request, not 30, or switching tab would stop the job.
 - **An SSH session that ends does not end `rutor app` on Windows.** The process stayed after the connection was closed and had to be ended with `taskkill`. "Nothing left running" is checked in the process list, not assumed.
 - **The progress line shows whatever the redraw prints,** a PyTorch warning and the loading bars included, as one line of text. It is honest and not pretty.
-- **Three older tests assume a machine that cannot draw.** `test_preflight_lines`, `test_preflight_checks_render_libraries_not_chrome` and `test_redraw_writes_png_and_manifest` in `tests/test_render.py` expect no PyTorch and no card, and fail on mogadishu. The other 373 pass there.
+- **Three older tests assume a machine that cannot draw.** `test_preflight_lines`, `test_preflight_checks_render_libraries_not_chrome` and `test_redraw_writes_png_and_manifest` in `tests/test_render.py` expect no PyTorch and no card, and fail on the test PC. The other 373 pass there.
 - **Not settled: a closed tab against a short job.** A cell like this one takes about 2 min 45 s and the page counts as gone after 2 min 30 s. A tab closed just after Rita therefore mostly lets the cell finish and go in. Stopping at once when the tab closes would also stop a job on a reload.
 - **Not tried:** a machine with 16 GB; closing the tab for real during a job (the chain from timer to release is tested with a fake child); the first run's 20 GB download from the page; a person who has never used a terminal.
 

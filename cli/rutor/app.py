@@ -102,7 +102,7 @@ def _ram_gb() -> int | None:
     return None
 
 
-# Measured on mogadishu on 2026-11-24, on the first cell built from the page: the redraw
+# Measured on the test PC on 2026-11-24, on the first cell built from the page: the redraw
 # child held 12.6 GiB of memory at its peak (and had asked the system for 22.8 GiB). Under
 # that plus a margin for the system and the browser the page warns. It does not refuse:
 # the only machine tried has 32 GB, so what 16 GB does is not known.
