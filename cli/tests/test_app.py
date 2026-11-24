@@ -327,11 +327,12 @@ class ChecksTests(_OwnHome):
 class FakeRun:
     """A child that says what the test scripted, and ends when the test lets it."""
 
-    def __init__(self, lines: list[str], code: int = 0, hold: bool = False) -> None:
+    def __init__(self, lines: list[str], code: int = 0, hold: bool = False, again: bool = False) -> None:
         self._first = list(lines)
         self._later: list[str] = []
         self._code = code
         self._hold = hold
+        self._again = again
         self._lock = threading.Lock()
         self._released = threading.Event()
         self._ended = threading.Event()
@@ -350,6 +351,12 @@ class FakeRun:
             self._later.clear()
         for text in later:
             yield app_jobs.split(text)
+        if self._again and not self.stopped:
+            # One line is not enough to judge: the child waits again, so the test can look
+            # at what it said before it ends and let the page move on.
+            self._released.clear()
+            while not self._released.is_set() and not self.stopped:
+                time.sleep(0.01)
         self._ended.set()
 
     def say(self, *texts: str) -> None:
@@ -377,21 +384,28 @@ class FakeStart:
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], dict[str, str]]] = []
         self.runs: list[FakeRun] = []
-        self._scripts: dict[str, list[tuple[list[str], int, bool]]] = {}
+        self._scripts: dict[str, list[tuple[list[str], int, bool, bool]]] = {}
+        # Called with the argv as a child starts, on the thread that starts it: a test uses
+        # it to make something else happen at exactly that moment.
+        self.on_start: Callable[[list[str]], None] | None = None
 
-    def script(self, command: str, lines: list[str], code: int = 0, hold: bool = False) -> None:
-        self._scripts.setdefault(command, []).append((list(lines), code, hold))
+    def script(
+        self, command: str, lines: list[str], code: int = 0, hold: bool = False, again: bool = False
+    ) -> None:
+        self._scripts.setdefault(command, []).append((list(lines), code, hold, again))
 
     def __call__(self, argv: list[str], extra_env: Mapping[str, str]) -> FakeRun:
         self.calls.append((list(argv), dict(extra_env)))
         queued = self._scripts.get(argv[0]) if argv else None
         if queued:
-            lines, code, hold = queued.pop(0)
+            lines, code, hold, again = queued.pop(0)
         else:
             # No script left means a child with nothing to say that ends at once.
-            lines, code, hold = [], 0, False
-        run = FakeRun(lines, code=code, hold=hold)
+            lines, code, hold, again = [], 0, False, False
+        run = FakeRun(lines, code=code, hold=hold, again=again)
         self.runs.append(run)
+        if self.on_start is not None:
+            self.on_start(list(argv))
         return run
 
 
@@ -675,6 +689,521 @@ class LoginTests(_OwnHome):
         self.assertEqual((state["problem"], state["code"]), ("expired", ""))
         # One line for the terminal: the kind of fault, never its message.
         self.assertEqual(seen.getvalue(), "app: RuntimeError while reading the login\n")
+
+
+class JobTests(_OwnHome):
+    """The one job: a cell claimed, drawn, checked and uploaded, and how it ends."""
+
+    SHEET = "stockholm-norr"
+    CELL = "74_20"
+
+    def _builder(self, *, log_in: bool = True) -> tuple[app.Builder, FakeStart]:
+        """A builder whose machine, tools and token are ready, with a fake clock."""
+        fake = FakeStart()
+        for name, answer in (
+            ("rutor.app.machine", {"ok": True, "problem": ""}),
+            ("rutor.app.tools", {"ready": True, "missing": []}),
+            ("rutor.app.cesium", {"set": True, "ok": True, "problem": ""}),
+        ):
+            patcher = patch(name, return_value=answer)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.now = 0.0
+        builder = app.Builder(fake, clock=lambda: self.now)
+        self.addCleanup(builder.shutdown)
+        if log_in:
+            fake.script("login", ["logged in: klang"])
+            builder.accept_terms()
+            builder.start_login()
+            wait_until(lambda: builder.login_state()["login"] == "klang")
+        return builder, fake
+
+    def _script_ok(self, fake: FakeStart, upload_url: str | None = None) -> None:
+        """The four commands saying what the CLI says when a cell goes well."""
+        sheet, cell = self.SHEET, self.CELL
+        address = upload_url or f"{config.MAP_URL}#{sheet}/{cell}"
+        fake.script(
+            "claim",
+            [f"claimed: {sheet} {cell} expires 2026-11-25T12:00", f"url: {config.MAP_URL}#{sheet}/{cell}"],
+        )
+        fake.script("render", [f"rendered: work/{sheet}/{cell}.src.png"])
+        fake.script("redraw", ["encode window 1/4", "check: ok", f"redrawn: work/{sheet}/{cell}.png"])
+        fake.script("upload", [f"uploaded: {sheet} {cell} state vantar", f"url: {address}"])
+
+    def _started(self, fake: FakeStart) -> list[str]:
+        return [argv[0] for argv, _env in fake.calls]
+
+    def _state(self, builder: app.Builder) -> dict[str, object]:
+        return builder.job_state()
+
+    def test_the_four_commands_run_in_order_for_the_chosen_cell(self) -> None:
+        builder, fake = self._builder()
+        self._script_ok(fake)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "done")
+        self.assertEqual(
+            [argv for argv, _env in fake.calls][1:],
+            [
+                ["claim", self.SHEET, self.CELL],
+                ["render", self.SHEET, self.CELL],
+                ["redraw", self.SHEET, self.CELL],
+                ["upload", self.SHEET, self.CELL],
+            ],
+        )
+        self.assertEqual(
+            self._state(builder),
+            {
+                "phase": "done",
+                "detail": "",
+                "problem": "",
+                "url": f"{config.MAP_URL}#{self.SHEET}/{self.CELL}",
+                "sheet": self.SHEET,
+                "col": 74,
+                "row": 20,
+                "held": False,
+            },
+        )
+
+    def test_choosing_a_cell_takes_no_lock(self) -> None:
+        builder, fake = self._builder()
+        builder.choose(self.SHEET, 74, 20)
+        self.assertEqual(self._started(fake), ["login"])
+        self.assertEqual(
+            self._state(builder),
+            {
+                "phase": "idle",
+                "detail": "",
+                "problem": "",
+                "url": "",
+                "sheet": self.SHEET,
+                "col": 74,
+                "row": 20,
+                "held": False,
+            },
+        )
+        self.assertEqual(builder.chosen(), {"sheet": self.SHEET, "col": 74, "row": 20})
+
+    def test_a_cell_someone_else_took_stops_there(self) -> None:
+        builder, fake = self._builder()
+        fake.script(
+            "claim",
+            ["error: refused: taken: Someone else holds that cell. Pick another."],
+            code=2,
+        )
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "failed")
+        builder.stop()
+        state = self._state(builder)
+        self.assertEqual((state["problem"], state["held"]), ("taken", False))
+        # Nothing else was taken on the page's own: no render, and no lock to give back.
+        self.assertEqual(self._started(fake), ["login", "claim"])
+        self.assertEqual(builder.chosen(), {"sheet": self.SHEET, "col": 74, "row": 20})
+
+    def test_another_refusal_is_not_called_taken(self) -> None:
+        builder, fake = self._builder()
+        fake.script(
+            "claim",
+            ["error: refused: too_many_locks: Five of your cells are waiting already."],
+            code=2,
+        )
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "failed")
+        builder.stop()
+        self.assertEqual(self._state(builder)["problem"], "refused")
+
+    def test_a_failed_render_gives_the_lock_back(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", ["note: the tile set did not answer"], code=4)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["held"] is False and self._state(builder)["phase"] == "failed")
+        builder.stop()
+        self.assertEqual(self._state(builder)["problem"], "network")
+        self.assertEqual(fake.calls[-1][0], ["release", self.SHEET, self.CELL])
+        self.assertNotIn("redraw", self._started(fake))
+
+    def test_a_cell_that_fails_the_check_is_not_uploaded(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [f"rendered: work/{self.SHEET}/{self.CELL}.src.png"])
+        fake.script("redraw", ["check: seam"], code=5)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["held"] is False and self._state(builder)["phase"] == "failed")
+        builder.stop()
+        self.assertEqual(self._state(builder)["problem"], "check")
+        started = self._started(fake)
+        self.assertNotIn("upload", started)
+        self.assertEqual(started[-1], "release")
+        self.assertIn("check: seam", builder.job_lines())
+
+    def test_an_exit_nobody_planned_for_is_failed(self) -> None:
+        for code, problem in ((1, "failed"), (3, "machine")):
+            with self.subTest(code=code):
+                builder, fake = self._builder()
+                fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+                fake.script("render", [], code=code)
+                builder.choose(self.SHEET, 74, 20)
+                builder.build()
+                wait_until(lambda builder=builder: self._state(builder)["phase"] == "failed")
+                builder.stop()
+                self.assertEqual(self._state(builder)["problem"], problem)
+
+    def test_a_second_rita_is_refused_while_one_runs(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [], hold=True)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "render")
+        with self.assertRaises(Refusal) as caught:
+            builder.build()
+        self.assertEqual((caught.exception.status, caught.exception.code), (409, "busy"))
+        self.assertEqual(self._started(fake).count("claim"), 1)
+
+    def test_stop_ends_the_child_and_releases(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [f"rendered: work/{self.SHEET}/{self.CELL}.src.png"])
+        fake.script("redraw", ["encode window 1/4"], hold=True)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "redraw")
+        redraw = fake.runs[-1]
+        builder.stop()
+        self.assertTrue(redraw.stopped)
+        self.assertEqual(fake.calls[-1][0], ["release", self.SHEET, self.CELL])
+        state = self._state(builder)
+        self.assertEqual((state["phase"], state["problem"], state["held"]), ("stopped", "", False))
+
+    def test_an_uploaded_cell_is_not_released_by_stop(self) -> None:
+        builder, fake = self._builder()
+        self._script_ok(fake)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "done")
+        builder.stop()
+        self.assertNotIn("release", self._started(fake))
+        self.assertFalse(any(run.stopped for run in fake.runs))
+
+    def test_a_page_that_went_away_stops_the_job(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [], hold=True)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "render")
+        self.now += app.GONE_SECONDS + 1
+        builder.tick()
+        self.assertEqual(self._state(builder)["phase"], "stopped")
+        self.assertEqual(fake.calls[-1][0], ["release", self.SHEET, self.CELL])
+
+    def test_a_page_that_is_still_there_keeps_the_job(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [], hold=True)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "render")
+        # A visible tab asks on every tick.
+        for _round in range(10):
+            self.now += 60
+            builder.seen()
+            builder.tick()
+        self.assertEqual(self._state(builder)["phase"], "render")
+        # A hidden tab asks once a minute: its timers are behind, but it has not gone.
+        for _round in range(10):
+            self.now += 61
+            builder.tick()
+            builder.seen()
+        self.assertEqual(self._state(builder)["phase"], "render")
+        self.assertFalse(fake.runs[-1].stopped)
+
+    def test_the_token_reaches_the_claim_and_the_render_and_no_other_command(self) -> None:
+        # "a.b.c" is shaped like a Cesium ion token. It opens nothing.
+        config.write_cesium_token(CESIUM)
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [f"rendered: work/{self.SHEET}/{self.CELL}.src.png"])
+        fake.script("redraw", ["check: seam"], code=5)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["held"] is False and self._state(builder)["phase"] == "failed")
+        builder.stop()
+        self.assertEqual(fake.calls[-1][0], ["release", self.SHEET, self.CELL])
+
+        # And a full job, so the upload is seen too.
+        self._script_ok(fake)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "done")
+
+        for argv, env in fake.calls:
+            with self.subTest(command=argv[0]):
+                if argv[0] in ("claim", "render"):
+                    self.assertEqual(env, {config.CESIUM_TOKEN_ENV: CESIUM})
+                else:
+                    self.assertEqual(env, {})
+        self.assertNotIn(config.CESIUM_TOKEN_ENV, os.environ)
+
+    def test_progress_is_text_from_the_child_cut_to_one_line(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [f"rendered: work/{self.SHEET}/{self.CELL}.src.png"])
+        fake.script("redraw", ["encode window 2/4"], code=5, hold=True, again=True)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["detail"] == "encode window 2/4")
+        redraw = fake.runs[-1]
+        redraw.say("<b>x</b>" * 1000)
+        redraw.release()
+        wait_until(lambda: self._state(builder)["detail"] != "encode window 2/4")
+        detail = self._state(builder)["detail"]
+        self.assertIsInstance(detail, str)
+        self.assertTrue(detail)
+        self.assertLessEqual(len(str(detail)), 200)
+        self.assertNotIn("\n", str(detail))
+        # Let the child end, so the job gives its lock back and its thread is done.
+        redraw.release()
+        wait_until(lambda: self._state(builder)["phase"] == "failed")
+
+    def test_nothing_is_built_on_a_machine_that_is_not_ready(self) -> None:
+        cases = (
+            ("machine", {"ok": False, "problem": "mac"}),
+            ("tools", {"ready": False, "missing": ["torch"]}),
+            ("cesium", {"set": True, "ok": False, "problem": "refused"}),
+        )
+        for name, answer in cases:
+            with self.subTest(not_ready=name):
+                builder, fake = self._builder()
+                builder.choose(self.SHEET, 74, 20)
+                patcher = patch(f"rutor.app.{name}", return_value=answer)
+                patcher.start()
+                try:
+                    with self.assertRaises(Refusal) as caught:
+                        builder.build()
+                finally:
+                    patcher.stop()
+                self.assertEqual((caught.exception.status, caught.exception.code), (409, "not_ready"))
+                self.assertEqual(self._started(fake), ["login"])
+        with self.subTest(not_ready="login"):
+            builder, fake = self._builder(log_in=False)
+            builder.choose(self.SHEET, 74, 20)
+            with self.assertRaises(Refusal) as caught:
+                builder.build()
+            self.assertEqual(caught.exception.code, "not_ready")
+            self.assertEqual(fake.calls, [])
+        # Open data has no Cesium token to ask about, so it must not be asked.
+        with self.subTest(not_ready="open data"):
+            builder, fake = self._builder()
+            self._script_ok(fake)
+            builder.choose("goteborg-norr", 12, 3)
+            patcher = patch("rutor.app.cesium", side_effect=AssertionError("cesium was asked"))
+            patcher.start()
+            try:
+                builder.build()
+            finally:
+                patcher.stop()
+            wait_until(lambda: self._state(builder)["phase"] == "done")
+
+    def test_rita_with_no_cell_is_refused(self) -> None:
+        builder, fake = self._builder()
+        with self.assertRaises(Refusal) as caught:
+            builder.build()
+        self.assertEqual((caught.exception.status, caught.exception.code), (409, "no_cell"))
+        self.assertEqual(self._started(fake), ["login"])
+
+    def test_a_release_that_fails_is_tried_once_more_and_then_left(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [], code=4)
+        fake.script("release", [], code=4)
+        fake.script("release", [], code=4)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._started(fake).count("release") == 2)
+        builder.stop()
+        self.assertEqual(self._started(fake).count("release"), 2)
+        state = self._state(builder)
+        self.assertEqual((state["phase"], state["problem"], state["held"]), ("failed", "network", True))
+
+        # A first release that fails and a second that works give the lock back.
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [], code=4)
+        fake.script("release", [], code=4)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["held"] is False and self._state(builder)["phase"] == "failed")
+        builder.stop()
+        self.assertEqual(self._started(fake).count("release"), 2)
+
+    def test_a_cell_cannot_be_chosen_while_one_is_built(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [], hold=True)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "render")
+        with self.assertRaises(Refusal) as caught:
+            builder.choose(self.SHEET, 75, 20)
+        self.assertEqual((caught.exception.status, caught.exception.code), (409, "busy"))
+        self.assertEqual((self._state(builder)["col"], self._state(builder)["row"]), (74, 20))
+
+    def test_choosing_again_after_a_job_starts_afresh(self) -> None:
+        builder, fake = self._builder()
+        self._script_ok(fake)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "done")
+        builder.choose(self.SHEET, 75, 21)
+        self.assertEqual(
+            self._state(builder),
+            {
+                "phase": "idle",
+                "detail": "",
+                "problem": "",
+                "url": "",
+                "sheet": self.SHEET,
+                "col": 75,
+                "row": 21,
+                "held": False,
+            },
+        )
+
+    def test_an_address_that_is_not_the_maps_own_is_dropped(self) -> None:
+        for address in ("https://evil.test/x", f"{config.MAP_URL}.evil.test/#x"):
+            with self.subTest(address=address):
+                builder, fake = self._builder()
+                self._script_ok(fake, upload_url=address)
+                builder.choose(self.SHEET, 74, 20)
+                builder.build()
+                wait_until(lambda builder=builder: self._state(builder)["phase"] == "done")
+                self.assertEqual(self._state(builder)["url"], "")
+
+    def test_shutdown_stops_the_job_too(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+        fake.script("render", [], hold=True)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "render")
+        render = fake.runs[-1]
+        builder.shutdown()
+        self.assertTrue(render.stopped)
+        self.assertEqual(fake.calls[-1][0], ["release", self.SHEET, self.CELL])
+        self.assertEqual(self._state(builder)["phase"], "stopped")
+
+    def _claimed(self, fake: FakeStart) -> None:
+        fake.script("claim", [f"claimed: {self.SHEET} {self.CELL} expires 2026-11-25T12:00"])
+
+    def test_a_stop_that_comes_as_a_child_starts_still_stops_it(self) -> None:
+        # Between "start the render" and "the render is the child being read" there is a
+        # moment when a stop finds no child. The render must not then run for fifteen minutes.
+        builder, fake = self._builder()
+        self._claimed(fake)
+        fake.script("render", ["note: this takes a while"], hold=True)
+
+        def as_the_render_starts(argv: list[str]) -> None:
+            if argv[0] == "render":
+                builder.stop()
+
+        fake.on_start = as_the_render_starts
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "stopped" and self._state(builder)["held"] is False)
+        render = fake.runs[self._started(fake).index("render")]
+        self.assertTrue(render.stopped)
+        self.assertEqual(fake.calls[-1][0], ["release", self.SHEET, self.CELL])
+        self.assertNotIn("redraw", self._started(fake))
+
+    def test_a_stop_after_the_cell_was_taken_in_does_not_call_it_stopped(self) -> None:
+        builder, fake = self._builder()
+        self._claimed(fake)
+        fake.script("render", ["rendered: x"])
+        fake.script("redraw", ["check: ok"])
+        address = f"{config.MAP_URL}#{self.SHEET}/{self.CELL}"
+        fake.script("upload", [f"uploaded: {self.SHEET} {self.CELL} state vantar", f"url: {address}"], hold=True)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["url"] == address)
+        builder.stop()
+        state = self._state(builder)
+        # The service has the cell. Saying "stopped, nothing was sent" would be untrue.
+        self.assertEqual((state["phase"], state["held"], state["url"]), ("done", False, address))
+        self.assertNotIn("release", self._started(fake))
+
+    def test_a_cell_cannot_be_chosen_while_a_lock_is_being_given_back(self) -> None:
+        builder, fake = self._builder()
+        self._claimed(fake)
+        fake.script("render", [], code=4)
+        fake.script("release", [], hold=True)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._started(fake)[-1] == "release")
+        with self.assertRaises(Refusal) as caught:
+            builder.choose(self.SHEET, 1, 1)
+        self.assertEqual(caught.exception.code, "busy")
+        self.assertEqual(builder.chosen(), {"sheet": self.SHEET, "col": 74, "row": 20})
+        fake.runs[-1].release()
+        wait_until(lambda: self._state(builder)["held"] is False)
+        builder.stop()
+        builder.choose(self.SHEET, 1, 1)
+        self.assertEqual(builder.chosen(), {"sheet": self.SHEET, "col": 1, "row": 1})
+
+    def test_the_cell_that_is_built_is_the_one_that_was_checked(self) -> None:
+        builder, fake = self._builder()
+        builder.choose(self.SHEET, 74, 20)
+
+        def another_tab_chooses_meanwhile() -> dict[str, object]:
+            builder.choose(self.SHEET, 1, 1)
+            return {"ok": True, "problem": ""}
+
+        with patch("rutor.app.machine", side_effect=another_tab_chooses_meanwhile):
+            with self.assertRaises(Refusal) as caught:
+                builder.build()
+        self.assertEqual(caught.exception.code, "busy")
+        self.assertEqual(self._started(fake), ["login"])
+        self.assertEqual(self._state(builder)["phase"], "idle")
+
+    def test_a_claim_that_was_cut_off_is_released_in_case_it_went_through(self) -> None:
+        # A claim that is stopped after the service said yes and before it printed so would
+        # leave a lock nobody knows of for two days. One release is tried, whatever it says.
+        builder, fake = self._builder()
+        fake.script("claim", [], hold=True)
+        fake.script("release", ["error: refused: not_yours: That cell is not yours."], code=2)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._started(fake)[-1] == "claim")
+        builder.stop()
+        state = self._state(builder)
+        self.assertEqual((state["phase"], state["held"]), ("stopped", False))
+        self.assertEqual(self._started(fake), ["login", "claim", "release"])
+
+    def test_a_claim_the_network_cut_is_released_in_case_it_went_through(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", ["error: could not reach the service (timed out)"], code=4)
+        fake.script("release", [f"released: {self.SHEET} {self.CELL}"])
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._started(fake)[-1] == "release")
+        builder.stop()
+        state = self._state(builder)
+        self.assertEqual((state["phase"], state["problem"], state["held"]), ("failed", "network", False))
+        self.assertEqual(self._started(fake).count("release"), 1)
+
+    def test_a_claim_that_this_machine_refused_took_no_lock(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", ["error: this machine cannot render stockholm-norr yet: CESIUM_ION_TOKEN is not set"], code=3)
+        builder.choose(self.SHEET, 74, 20)
+        builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "failed")
+        builder.stop()
+        self.assertEqual(self._state(builder)["problem"], "machine")
+        self.assertEqual(self._started(fake), ["login", "claim"])
 
 
 if __name__ == "__main__":

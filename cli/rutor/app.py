@@ -6,7 +6,8 @@ electricity price advises and whether this copy of the pipeline is current.
 The page owns the sentences. These functions return short words.
 
 Below them, `Builder` holds the state of the person's eight steps and runs the
-CLI as a child of this process: first the terms, then the GitHub login.
+CLI as a child of this process: first the terms, then the GitHub login, then the
+claim, drawing, check and upload of one cell.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from rutor import api, app_jobs, commands, config, login, pipeline, se3_price
 from rutor.errors import RutorError
 from rutor.localpage import Refusal
 from rutor.renderer import google
+from rutor.renderer.sources import SHEET_KINDS
 
 
 # ---- what the page knows before a job
@@ -221,6 +223,29 @@ def version(sheet: dict[str, object]) -> dict[str, object]:
 _CODE_SHAPE = re.compile(r"[A-Za-z0-9-]{1,20}")
 _NAME_SHAPE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 
+# A browser lets a hidden tab run its timers only about once a minute, so a page that has
+# asked nothing for half a minute may be a tab nobody has touched. Two and a half minutes
+# without a request is a page that has gone, not one that is asleep.
+GONE_SECONDS = 150.0
+
+# Enough lines to see how a drawing went, without a render's whole log in memory.
+LINES_KEPT = 20
+
+# The phases in which a job is out and the page must not start another.
+_RUNNING = frozenset({"claim", "render", "redraw", "upload"})
+
+# The token goes to the two commands that read it and to no other: claim asks the sheet's
+# source before it locks a cell on a Google sheet, and render starts the Google renderer.
+_TOKEN_COMMANDS = frozenset({"claim", "render"})
+
+# What a command's exit means to the page. 2 is also how a refusal ends, which the claim
+# itself says with its last error line.
+_PROBLEM_BY_EXIT = {2: "refused", 3: "machine", 4: "network", 5: "check"}
+
+# How a claim ends when it is certain that no lock was given: the input was wrong (1), the
+# service refused (2), or this machine was not ready and the service was never asked (3).
+_NO_LOCK_EXITS = frozenset({1, 2, 3})
+
 
 class Builder:
     """The state of the page's steps, and the children it runs for the person.
@@ -239,7 +264,7 @@ class Builder:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._start = start
-        # Kept for the steps that time a child, which a later task adds.
+        # The page's own clock: what build() counts as "seen", and when a page has gone.
         self._clock = clock
         self._lock = threading.Lock()
         self._terms = False
@@ -255,6 +280,24 @@ class Builder:
         # stopped: stopping signals its process group, and that number may be reused.
         self._run: app_jobs.Run | None = None
         self._thread: threading.Thread | None = None
+        # The job: the cell the page chose, what its commands have said, and the child
+        # that is being read right now. A finished child is dropped from `_job_run`.
+        self._sheet = ""
+        self._col = 0
+        self._row = 0
+        self._phase = "idle"
+        self._detail = ""
+        self._job_problem = ""
+        self._job_url = ""
+        self._held = False
+        self._stop_asked = False
+        # A claim that ended without saying whether the service gave the lock.
+        self._unsure = False
+        self._releasing = False
+        self._lines: list[str] = []
+        self._seen = clock()
+        self._job_run: app_jobs.Run | None = None
+        self._job_thread: threading.Thread | None = None
 
     def accept_terms(self) -> None:
         with self._lock:
@@ -363,6 +406,252 @@ class Builder:
                 if not self._login:
                     self._login = name
 
+    # ---- the job: one cell, claimed, drawn and uploaded
+
+    def choose(self, sheet: str, col: int, row: int) -> None:
+        """Note the cell the person picked. This takes no lock and starts nothing."""
+        with self._lock:
+            if self._busy():
+                raise Refusal(409, "a cell is being built", "busy")
+            self._sheet = sheet
+            self._col = col
+            self._row = row
+            self._phase = "idle"
+            self._detail = ""
+            self._job_problem = ""
+            self._job_url = ""
+
+    def chosen(self) -> dict[str, object] | None:
+        with self._lock:
+            if not self._sheet:
+                return None
+            return {"sheet": self._sheet, "col": self._col, "row": self._row}
+
+    def build(self) -> None:
+        """Start the job for the chosen cell, on its own thread."""
+        with self._lock:
+            if self._closed:
+                raise Refusal(409, "the page is closing", "busy")
+            if self._busy():
+                raise Refusal(409, "a cell is being built", "busy")
+            sheet, col, row = self._sheet, self._col, self._row
+        if not sheet:
+            raise Refusal(409, "choose a cell first", "no_cell")
+        # The machine, the tools, the login and the token are asked here: they read the
+        # disk and, for a stored login, the service. None of that happens under the lock.
+        kind = SHEET_KINDS.get(sheet, "")
+        if not machine()["ok"]:
+            raise Refusal(409, "this machine cannot draw a cell yet", "not_ready")
+        if not tools(kind)["ready"]:
+            raise Refusal(409, "a tool this build needs is missing", "not_ready")
+        if not self.login_state()["login"]:
+            raise Refusal(409, "log in before building", "not_ready")
+        if kind == "google" and not cesium()["ok"]:
+            raise Refusal(409, "the Cesium token does not work", "not_ready")
+        with self._lock:
+            # The page may have closed, or another tab pressed Rita, meanwhile.
+            if self._closed:
+                raise Refusal(409, "the page is closing", "busy")
+            if self._busy() or (self._sheet, self._col, self._row) != (sheet, col, row):
+                # Another tab chose another cell while this one was being checked.
+                raise Refusal(409, "a cell is being built", "busy")
+            # Starting counts as the page being here, and a new job starts a new report.
+            self._seen = self._clock()
+            self._stop_asked = False
+            self._unsure = False
+            self._phase = "claim"
+            self._detail = ""
+            self._job_problem = ""
+            self._job_url = ""
+            self._lines = []
+            thread = threading.Thread(target=self._run_job, args=(sheet, col, row), daemon=True)
+            self._job_thread = thread
+        thread.start()
+
+    def stop(self) -> None:
+        """End the job and give its lock back. Returns once the lock is out."""
+        with self._lock:
+            running = self._phase in _RUNNING
+            if running:
+                self._stop_asked = True
+                run = self._job_run
+            else:
+                run = None
+            thread = self._job_thread
+        if run is not None:
+            # Only the child being read is stopped. A finished one is not touched.
+            run.stop()
+        if thread is not None and thread is not threading.current_thread():
+            # So that when stop() returns, the release has been tried and the report is
+            # final. The timeout keeps a child that will not die from hanging the page.
+            thread.join(timeout=120)
+
+    def seen(self) -> None:
+        with self._lock:
+            self._seen = self._clock()
+
+    def tick(self) -> None:
+        """Stop a job whose page has not asked for anything for a long time."""
+        with self._lock:
+            gone = self._phase in _RUNNING and self._clock() - self._seen > GONE_SECONDS
+        if gone:
+            # A closed tab is not a stopped job: the lock is given back the same way.
+            self.stop()
+
+    def job_state(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "phase": self._phase,
+                "detail": self._detail,
+                "problem": self._job_problem,
+                "url": self._job_url,
+                "sheet": self._sheet,
+                "col": self._col,
+                "row": self._row,
+                "held": self._held,
+            }
+
+    def job_lines(self) -> list[str]:
+        with self._lock:
+            return list(self._lines)
+
+    def _busy(self) -> bool:
+        # A lock that is being given back is still out, so nothing new may start. Callers
+        # hold the lock.
+        return self._phase in _RUNNING or self._releasing
+
+    def _run_job(self, sheet: str, col: int, row: int) -> None:
+        cell = f"{col}_{row}"
+        try:
+            problem = self._run_commands(sheet, cell)
+        except Exception as exc:  # noqa: BLE001 - the last stop on this thread
+            # The page must not wait for ever on a job that broke. The kind of fault goes
+            # to the terminal, never its message: a child's output may be in it.
+            print(f"app: {type(exc).__name__} while building", file=sys.stderr)
+            problem = "failed"
+        with self._lock:
+            if problem == "":
+                # The service has the cell. A stop that came after that changes nothing.
+                self._phase = "done"
+                self._job_problem = ""
+            elif self._stop_asked:
+                self._phase = "stopped"
+                self._job_problem = ""
+            else:
+                self._phase = "failed"
+                self._job_problem = problem
+            # No command runs now, so there is no progress line left to show.
+            self._detail = ""
+            held = self._held
+            unsure = self._unsure and not held
+            # A lock that is still out is given back before another job may start.
+            self._releasing = held or unsure
+        if held or unsure:
+            try:
+                # A lock that is known is asked back twice. One that only may exist is asked
+                # back once, and what the service answers is not held against the page.
+                self._release(sheet, cell, tries=2 if held else 1)
+            except Exception as exc:  # noqa: BLE001 - the page still has to learn it ended
+                print(f"app: {type(exc).__name__} while releasing", file=sys.stderr)
+            finally:
+                with self._lock:
+                    self._releasing = False
+
+    def _run_commands(self, sheet: str, cell: str) -> str:
+        """Run the four commands for one cell. "" when the upload went out, else the problem."""
+        for command in ("claim", "render", "redraw", "upload"):
+            with self._lock:
+                if self._stop_asked:
+                    # The loop ends here; the job thread reports it as stopped.
+                    return "stopped"
+                self._phase = command
+                self._detail = ""
+            env = config.cesium_env() if command in _TOKEN_COMMANDS else {}
+            try:
+                run = self._start([command, sheet, cell], env)
+            except OSError:
+                # A child that cannot start is a command that never ran.
+                return "failed"
+            last_error = ""
+            taken_in = False
+            with self._lock:
+                self._job_run = run
+                stop_now = self._stop_asked
+            if stop_now:
+                # The stop came while the child was starting and found nothing to stop.
+                run.stop()
+            try:
+                for line in run.lines():
+                    self._keep(line, detail=True)
+                    if command == "claim" and line.kind == "claimed":
+                        with self._lock:
+                            self._held = True
+                    elif command == "upload" and line.kind == "uploaded":
+                        # The service has the cell from here on, and the lock is spent.
+                        taken_in = True
+                        with self._lock:
+                            self._held = False
+                    elif command == "upload" and line.kind == "url":
+                        # Only the map's own address is handed to the page.
+                        if line.text.startswith(f"{config.MAP_URL}#"):
+                            with self._lock:
+                                self._job_url = line.text
+                    if line.kind == "error":
+                        # The CLI says why it refused in its last error line.
+                        last_error = line.text
+                exit_code = run.wait()
+            except Exception:
+                # A child whose output breaks is still up, and a render holds the card.
+                run.stop()
+                raise
+            finally:
+                with self._lock:
+                    if self._job_run is run:
+                        self._job_run = None
+            if exit_code == 0 or taken_in:
+                with self._lock:
+                    if command == "claim":
+                        self._held = True
+                    elif command == "upload":
+                        # The cell waits for review on the map; no lock is out any more.
+                        self._held = False
+                continue
+            if command == "claim" and exit_code not in _NO_LOCK_EXITS:
+                # Stopped, cut off by the network or broken: the service may have given the
+                # lock without the claim living to say so.
+                with self._lock:
+                    self._unsure = True
+            if exit_code == 2 and last_error.startswith("refused: taken"):
+                return "taken"
+            return _PROBLEM_BY_EXIT.get(exit_code, "failed")
+        return ""
+
+    def _release(self, sheet: str, cell: str, tries: int) -> None:
+        """Give the lock back, twice at most: the service ends an abandoned lock by itself."""
+        for _attempt in range(tries):
+            try:
+                run = self._start(["release", sheet, cell], {})
+            except OSError:
+                continue
+            # A release child is never stopped: it ends at once, and its group number may
+            # already belong to somebody else's program. It is read so nothing is left.
+            for line in run.lines():
+                self._keep(line, detail=False)
+            if run.wait() == 0:
+                with self._lock:
+                    self._held = False
+                return
+
+    def _keep(self, line: app_jobs.Line, *, detail: bool) -> None:
+        """Keep the line for the report, and a progress line for the page."""
+        shown = f"{line.kind}: {line.text}" if line.kind else line.text
+        with self._lock:
+            self._lines.append(shown)
+            if len(self._lines) > LINES_KEPT:
+                del self._lines[: len(self._lines) - LINES_KEPT]
+            if detail and not line.kind:
+                self._detail = line.text
+
     def shutdown(self) -> None:
         with self._lock:
             self._closed = True
@@ -372,3 +661,5 @@ class Builder:
             run.stop()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=15)
+        # A job that is drawing is stopped the way the page stops it, lock and all.
+        self.stop()
