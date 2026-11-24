@@ -114,10 +114,12 @@ class ChecksTests(_OwnHome):
         free: float = 257.4,
         cached: bool = False,
         platform: str = "linux",
+        driver: str = "616.56",
     ) -> dict[str, object]:
         with (
             patch("rutor.app._platform", return_value=platform),
             patch("rutor.commands._nvidia_cards", return_value=cards),
+            patch("rutor.commands._nvidia_driver", return_value=driver),
             patch("rutor.commands._free_gb", return_value=free),
             patch("rutor.commands._model_is_cached", return_value=cached),
         ):
@@ -206,6 +208,57 @@ class ChecksTests(_OwnHome):
         with patch("rutor.app._ram_gb", return_value=8):
             found = self._machine([("GeForce GTX 1060", 6144)])
         self.assertEqual((found["ok"], found["problem"], found["warning"]), (False, "small_card", ""))
+
+    def test_a_driver_older_than_the_wheels_need_is_a_no(self) -> None:
+        # NVIDIA's own number for Windows, from the CUDA 12.8 release notes.
+        self.assertEqual(commands.DRIVER_MIN, (528, 33))
+        major, minor = commands.DRIVER_MIN
+        for old in (f"{major}.{minor - 1}", f"{major - 1}.99", "472.12"):
+            with self.subTest(driver=old):
+                found = self._machine([("GeForce RTX 3060", 12288)], platform="win32", driver=old)
+                self.assertEqual((found["ok"], found["problem"], found["driver"]), (False, "old_driver", old))
+                # The card itself is fine, and it is still named.
+                self.assertEqual(found["card"], "GeForce RTX 3060")
+
+    def test_the_driver_that_works_today_is_a_yes(self) -> None:
+        for good in ("616.56", "528.33", "528.34", "1000.1"):
+            with self.subTest(driver=good):
+                found = self._machine([("GeForce RTX 5070", 12227)], platform="win32", driver=good)
+                self.assertEqual((found["ok"], found["problem"], found["driver"]), (True, "", good))
+
+    def test_a_driver_that_cannot_be_read_does_not_block(self) -> None:
+        found = self._machine([("GeForce RTX 5070", 12227)], platform="win32", driver="")
+        self.assertEqual((found["ok"], found["problem"], found["driver"]), (True, "", ""))
+        # Neither does one that is not a number: a no is said only when it is certain.
+        for odd in ("N/A", "[Not Supported]", "616", "x.y"):
+            with self.subTest(driver=odd):
+                found = self._machine([("GeForce RTX 5070", 12227)], platform="win32", driver=odd)
+                self.assertTrue(found["ok"])
+
+    def test_a_small_card_is_said_before_its_driver(self) -> None:
+        found = self._machine([("GeForce GTX 1060", 6144)], platform="win32", driver="472.12")
+        self.assertEqual(found["problem"], "small_card")
+
+    def test_the_number_is_for_windows_and_judges_no_other_system(self) -> None:
+        # Linux drivers have their own numbering and their own minimum. The app is not
+        # installed there, so nothing is refused by a number that is not about it.
+        found = self._machine([("GeForce RTX 3060", 12288)], platform="linux", driver="525.60.13")
+        self.assertEqual((found["ok"], found["problem"], found["driver"]), (True, "", "525.60.13"))
+
+    def test_a_driver_version_from_outside_is_one_short_line(self) -> None:
+        found = self._machine([("GeForce RTX 5070", 12227)], platform="win32", driver="<b>9</b>\n" * 40)
+        self.assertLessEqual(len(str(found["driver"])), 20)
+        self.assertNotIn("\n", str(found["driver"]))
+
+    def test_the_driver_is_asked_of_nvidia_smi(self) -> None:
+        done = Mock(stdout="616.56\n616.56\n", returncode=0)
+        with patch("shutil.which", return_value="/x/nvidia-smi"), patch("subprocess.run", return_value=done) as run:
+            self.assertEqual(commands._nvidia_driver(), "616.56")
+        self.assertEqual(run.call_args.args[0], ["/x/nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"])
+        with patch("shutil.which", return_value=None):
+            self.assertEqual(commands._nvidia_driver(), "")
+        with patch("shutil.which", return_value="/x/nvidia-smi"), patch("subprocess.run", side_effect=OSError("gone")):
+            self.assertEqual(commands._nvidia_driver(), "")
 
     def test_missing_tools_are_named(self) -> None:
         with (
@@ -1886,7 +1939,7 @@ class PageFilesTests(unittest.TestCase):
     def test_every_problem_word_has_a_swedish_sentence(self) -> None:
         script = self.read("app.js")
         words = (
-            "mac", "no_card", "small_card", "disk",
+            "mac", "no_card", "small_card", "disk", "old_driver",
             "missing", "refused", "twice", "no_access", "unreachable", "broken",
             "expired", "network",
             "taken", "machine", "check", "failed", "locks", "waiting", "lock_left",

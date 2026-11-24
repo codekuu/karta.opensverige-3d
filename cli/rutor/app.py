@@ -115,6 +115,7 @@ def machine() -> dict[str, object]:
     free = commands._free_gb()
     card = ""
     card_gb = 0
+    driver = ""
     problem = ""
     # A Mac has no NVIDIA driver to ask, and the redraw cannot run here.
     if _platform() == "darwin":
@@ -128,8 +129,12 @@ def machine() -> dict[str, object]:
             # The name comes from the driver. It is shown, so it is one short line.
             card = api.one_line(name, 60)
             card_gb = round(mib / 1024)
+            driver = api.one_line(commands._nvidia_driver(), 20)
             if mib < commands.GPU_MIN_MIB:
                 problem = "small_card"
+            elif _platform() == "win32" and commands.driver_too_old(driver):
+                # Said here, before anything is fetched: PyTorch would fail on it much later.
+                problem = "old_driver"
             elif free < needed:
                 problem = "disk"
     ram = _ram_gb()
@@ -139,6 +144,7 @@ def machine() -> dict[str, object]:
         "ok": problem == "",
         "card": card,
         "card_gb": card_gb,
+        "driver": driver,
         "free_gb": int(free),
         "needed_gb": needed,
         "ram_gb": ram,
@@ -778,6 +784,7 @@ _BLANK_MACHINE: dict[str, object] = {
     "ok": False,
     "card": "",
     "card_gb": 0,
+    "driver": "",
     "free_gb": 0,
     "needed_gb": 0,
     "ram_gb": None,

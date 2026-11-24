@@ -243,6 +243,44 @@ def _nvidia_cards() -> list[tuple[str, int]]:
     return cards
 
 
+# The lowest NVIDIA driver for Windows that can run the CUDA 12 libraries inside the cu128
+# wheels of PyTorch: "CUDA 12.x >= 528.33" in the table "CUDA Toolkit and Minimum Required
+# Driver Version for CUDA Minor Version Compatibility" of NVIDIA's CUDA 12.8 release notes,
+# https://docs.nvidia.com/cuda/archive/12.8.0/cuda-toolkit-release-notes/index.html
+# (read 2026-11-24). The same notes name 570.65 as the driver CUDA 12.8 ships with; a
+# driver between the two runs what was built for 12.x, so it is not refused. Linux drivers
+# are numbered differently (525.60.13 there), and this number is not used for them.
+DRIVER_MIN: tuple[int, int] = (528, 33)
+
+
+def _nvidia_driver() -> str:
+    """The driver version nvidia-smi reports, or "" when it does not answer."""
+    tool = shutil.which("nvidia-smi")
+    if tool is None:
+        return ""
+    try:
+        done = subprocess.run(
+            [tool, "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    # One line for each card, all with the same driver.
+    lines = [line.strip() for line in done.stdout.splitlines() if line.strip()]
+    return lines[0] if lines else ""
+
+
+def driver_too_old(version: str) -> bool:
+    """Whether a Windows driver version is certainly below DRIVER_MIN. Unreadable is not old."""
+    parts = version.strip().split(".")
+    if len(parts) < 2 or not (parts[0].isascii() and parts[0].isdigit() and parts[1].isascii() and parts[1].isdigit()):
+        return False
+    return (int(parts[0]), int(parts[1])) < DRIVER_MIN
+
+
 def _gpu_missing() -> str | None:
     if sys.platform == "darwin":
         return "this is a Mac, and the redraw needs an NVIDIA card. Do not claim a cell here."

@@ -13,6 +13,7 @@ const ORD = {
     mac: "Det här är en Mac. Ritandet kräver ett NVIDIA-kort.",
     no_card: "Inget NVIDIA-kort hittades. Det krävs ett med 12 GB.",
     small_card: "Grafikkortet har för lite minne. Det krävs 12 GB.",
+    old_driver: "Grafikkortets drivrutin är för gammal. Uppdatera den hos NVIDIA.",
     disk: "Disken är för full. Gör plats och kom tillbaka.",
   },
   varning: {
@@ -254,9 +255,15 @@ function steg1(s) {
   const m = s.machine;
   visa("dator-tittar", false);
   visa("dator-rader", true);
-  const kortFel = m.problem === "mac" || m.problem === "no_card" || m.problem === "small_card";
+  const gammal = m.problem === "old_driver";
+  const kortFel = m.problem === "mac" || m.problem === "no_card" || m.problem === "small_card" || gammal;
   const kort = el("dator-kort");
-  text("dator-kort", m.card ? m.card + " · " + m.card_gb + " GB" + (kortFel ? "" : " ✓") : "Inget NVIDIA-kort");
+  // An old driver is named with its number, so the person can see it change after an update.
+  const drivrutin = gammal && m.driver ? " · drivrutin " + m.driver : "";
+  text(
+    "dator-kort",
+    m.card ? m.card + " · " + m.card_gb + " GB" + drivrutin + (kortFel ? "" : " ✓") : "Inget NVIDIA-kort",
+  );
   kort.classList.toggle("nej", kortFel);
   kort.classList.toggle("ok", !kortFel);
   const disk = el("dator-disk");
