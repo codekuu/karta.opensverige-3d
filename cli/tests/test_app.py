@@ -2986,6 +2986,8 @@ class PageFilesTests(unittest.TestCase):
         self.assertIn('!["taken", "daily", "old_app"].includes(j.problem)', script)
         # A cell that waits is said to wait, and where it shows.
         self.assertIn("Tills dess syns den som Väntar.", page)
+        # And is thanked: every cell is welcome, also one that is not perfect.
+        self.assertIn("Tack. Varje ruta hjälper, och den behöver inte vara perfekt.", page)
 
     def test_step_six_takes_a_cell_by_its_code_from_the_map(self) -> None:
         page = self.read("index.html")
