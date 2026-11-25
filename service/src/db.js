@@ -25,7 +25,8 @@
 /**
  * @typedef {{ DB: D1Database, INKORG: R2Bucket, GH: KVNamespace,
  *   TAKT: { limit(options: { key: string }): Promise<{ success: boolean }> },
- *   ADMIN_GITHUB_ID: string, PIXELBYGGET_STANGD: string, ALLOWED_ORIGINS: string }} Env
+ *   ADMIN_GITHUB_ID: string, PIXELBYGGET_STANGD: string, ALLOWED_ORIGINS: string,
+ *   PIPELINE_NOW: string }} Env
  */
 
 /**

@@ -4,6 +4,7 @@
 import { requireAdmin } from './auth.js';
 import { logEvent } from './cells.js';
 import { error, json } from './db.js';
+import { cellAt, gridRow, nearestCell, sheetAt } from './tiling.js';
 
 const BATCH = 500;
 const SHEET_FIELDS = [
@@ -201,4 +202,71 @@ export async function gridRoute(request, env, ctx, params) {
   const grid = await getGrid(env.DB, params.sheet);
   if (!grid) return error(404, 'no_sheet', `No sheet named ${params.sheet}.`);
   return json(200, grid, GRID_CACHE);
+}
+
+/**
+ * The state of a cell as the grid shows it. A cell with no row is free on a sheet of the
+ * tiling, whose cells are made when they are first taken, and not offered on a hand-made one.
+ * @param {D1Database} db
+ * @param {import('./db.js').Sheet} sheet
+ * @param {number} col
+ * @param {number} row
+ * @returns {Promise<string>}
+ */
+async function shownState(db, sheet, col, row) {
+  const cell = await db.prepare('SELECT state, removed_at FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet.id, col, row).first();
+  if (!cell) return sheet.made === 'grid' ? 'fri' : 'ute';
+  return cell.removed_at && cell.state === 'fri' ? 'last' : cell.state;
+}
+
+/**
+ * The sheet and cell a point on the earth belongs to, or null outside Sweden. A point inside
+ * a hand-made sheet's picture belongs to that sheet: what is drawn is not gridded again.
+ * Anywhere else the tiling decides, and the sheet may be one nobody has made yet
+ * (exists false). Reads only.
+ * @param {D1Database} db
+ * @param {string} pipeline the pipeline a new sheet would be drawn with
+ * @param {number} lat
+ * @param {number} lon
+ * @returns {Promise<{ sheet: import('./db.js').Sheet & { exists: boolean }, col: number, row: number, state: string } | null>}
+ */
+export async function placeAt(db, pipeline, lat, lon) {
+  const { results: hand } = await db.prepare("SELECT * FROM sheets WHERE made = 'hand' ORDER BY queue_order, id").all();
+  for (const sheet of hand) {
+    const cell = cellAt(sheet, lat, lon);
+    if (cell) return { sheet: { ...sheet, exists: true }, ...cell, state: await shownState(db, sheet, cell.col, cell.row) };
+  }
+  const tile = sheetAt(lat, lon);
+  if (!tile) return null;
+  const stored = await db.prepare('SELECT * FROM sheets WHERE id = ?').bind(tile.id).first();
+  const sheet = stored || gridRow(tile, pipeline);
+  const cell = nearestCell(sheet, lat, lon);
+  return { sheet: { ...sheet, exists: Boolean(stored) }, ...cell, state: stored ? await shownState(db, sheet, cell.col, cell.row) : 'fri' };
+}
+
+const DEGREES = /^-?\d{1,3}(\.\d{1,9})?$/;
+
+/**
+ * One coordinate out of a query: plain decimal degrees, given once.
+ * @param {URLSearchParams} query
+ * @param {string} name
+ * @param {number} limit
+ * @returns {number | null}
+ */
+function degrees(query, name, limit) {
+  const all = query.getAll(name);
+  if (all.length !== 1 || !DEGREES.test(all[0])) return null;
+  const value = Number(all[0]);
+  return Math.abs(value) <= limit ? value : null;
+}
+
+/** GET /v1/place?lat=..&lon=.. */
+export async function placeRoute(request, env) {
+  const query = new URL(request.url).searchParams;
+  const lat = degrees(query, 'lat', 90);
+  const lon = degrees(query, 'lon', 180);
+  if (lat === null || lon === null) return error(400, 'bad_query', 'Send lat and lon as decimal degrees, like ?lat=56.0465&lon=12.6945.');
+  const place = await placeAt(env.DB, env.PIPELINE_NOW, lat, lon);
+  if (!place) return error(404, 'outside', 'That point lies outside Sweden.');
+  return json(200, place, GRID_CACHE);
 }

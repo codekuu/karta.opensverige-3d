@@ -72,6 +72,7 @@ All under `/v1`. Errors are `{ "error": "<code>", "message": "..." }`.
 | GET | `/sheets` | anyone | sheets with `done` and `total` |
 | GET | `/cities` | anyone | sheets grouped by city |
 | GET | `/grid/{sheet}` | anyone | sheet and cells `[col, row, state, login, updated]`; 404 `no_sheet`. A live cell the admin took down is shown as `last` until its tiles are blanked: it cannot be claimed |
+| GET | `/place?lat=..&lon=..` | anyone | `{sheet, col, row, state}`: the sheet and cell a point on the earth belongs to. A point inside a hand-made sheet's picture belongs to that sheet. Anywhere else in Sweden the tiling decides, and `sheet.exists` is false until someone has claimed a cell there; a cell with no row is `fri`. 404 `outside` outside Sweden, 400 `bad_query`. Writes nothing |
 | GET | `/me` | user | login, counts, locks |
 | POST | `/claim` `{sheet, col, row}` | user | 201 `expires_at`; 409 `taken` `being_removed`, 403 `sheet_closed` `too_many_locks` `too_many_waiting` (five uploads of a builder who is not trusted already wait for review), 422 `outside`. A lock past its expiry can be taken |
 | POST | `/release` `{sheet, col, row}` | user | 200; 403 `not_yours`, 409 `already_uploaded` |

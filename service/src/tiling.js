@@ -17,6 +17,7 @@ export const LAT_STEP = 0.15;
 export const LON_STEP = 0.25;
 export const CELL_METERS = 256;
 export const CELL_GROUND_NORTH = 256 * Math.SQRT2;
+const CELL_PIXELS = 1024;
 /** A box around Sweden. It holds some of the neighbours too: every cell is reviewed anyway. */
 export const SWEDEN = { latMin: 55.2, latMax: 69.1, lonMin: 10.9, lonMax: 24.2 };
 
@@ -94,15 +95,15 @@ function ecef(latDeg, lonDeg, height) {
 }
 
 /**
- * The cell of a sheet that shows a point on the ground, or null when the point is outside the
- * picture. The ground is taken to lie at the sheet's ground height (0 when it has none).
- * Row 0 is the top of the picture, the north.
- * @param {{ origin_lat: number, origin_lon: number, x_meters: number, y_meters: number, cols: number, rows: number, ground_height?: number }} sheet
+ * Where a point on the ground lands in a sheet's picture, counted in cells from the top left.
+ * It may lie outside the picture. The ground is taken to lie at the sheet's ground height
+ * (0 when it has none).
+ * @param {{ origin_lat: number, origin_lon: number, x_meters: number, y_meters: number, ground_height?: number }} sheet
  * @param {number} lat
  * @param {number} lon
- * @returns {{ col: number, row: number } | null}
+ * @returns {{ col: number, row: number }}
  */
-export function cellAt(sheet, lat, lon) {
+function pictureCell(sheet, lat, lon) {
   const height = Number.isFinite(sheet.ground_height) ? sheet.ground_height : 0;
   const la = (sheet.origin_lat * Math.PI) / 180;
   const lo = (sheet.origin_lon * Math.PI) / 180;
@@ -116,8 +117,67 @@ export function cellAt(sheet, lat, lon) {
   // The camera looks north and 45 degrees down: its up is half north, half up.
   const x = dot(east);
   const y = (dot(north) + dot(up)) * Math.SQRT1_2;
-  const col = Math.floor((x - sheet.x_meters) / CELL_METERS);
-  const row = Math.floor((sheet.y_meters - y) / CELL_METERS);
+  return { col: Math.floor((x - sheet.x_meters) / CELL_METERS), row: Math.floor((sheet.y_meters - y) / CELL_METERS) };
+}
+
+/**
+ * The cell of a sheet that shows a point on the ground, or null when the point is outside the
+ * picture. Row 0 is the top of the picture, the north.
+ * @param {{ origin_lat: number, origin_lon: number, x_meters: number, y_meters: number, cols: number, rows: number, ground_height?: number }} sheet
+ * @param {number} lat
+ * @param {number} lon
+ * @returns {{ col: number, row: number } | null}
+ */
+export function cellAt(sheet, lat, lon) {
+  const { col, row } = pictureCell(sheet, lat, lon);
   if (!(col >= 0 && row >= 0 && col < sheet.cols && row < sheet.rows)) return null;
   return { col, row };
+}
+
+/**
+ * The cell of a sheet nearest a point: cellAt, but a point just outside the picture gets the
+ * cell at the edge. A box of the tiling is a hair wider at its south edge than its picture,
+ * and every point of the box must still get a cell.
+ * @param {{ origin_lat: number, origin_lon: number, x_meters: number, y_meters: number, cols: number, rows: number, ground_height?: number }} sheet
+ * @param {number} lat
+ * @param {number} lon
+ * @returns {{ col: number, row: number }}
+ */
+export function nearestCell(sheet, lat, lon) {
+  const { col, row } = pictureCell(sheet, lat, lon);
+  return { col: Math.min(Math.max(col, 0), sheet.cols - 1), row: Math.min(Math.max(row, 0), sheet.rows - 1) };
+}
+
+/**
+ * The whole row of a sheet of the tiling, as the table holds it. The origin is on the
+ * ellipsoid and the camera looks 45 degrees down, so ground at a height lands height / sqrt(2)
+ * further up the picture: the picture's top moves by as much, and the box stays in the middle
+ * of the picture whatever the height. Before the row is made nobody has asked for the height;
+ * 0 with the matching top puts the grid at the same place on the ground.
+ * @param {Tile} tile
+ * @param {string} pipeline
+ * @param {number} [groundHeight] metres above the ellipsoid
+ * @returns {import('./db.js').Sheet}
+ */
+export function gridRow(tile, pipeline, groundHeight = 0) {
+  const [, n, e] = GRID_ID.exec(tile.id);
+  return {
+    id: tile.id,
+    city: 'se',
+    name: `N ${n.slice(0, 2)},${n.slice(2)} E ${e.slice(0, 2)},${e.slice(2)}`,
+    cols: tile.cols,
+    rows: tile.rows,
+    origin_lat: tile.origin_lat,
+    origin_lon: tile.origin_lon,
+    x_meters: tile.x_meters,
+    y_meters: tile.y_meters + groundHeight * Math.SQRT1_2,
+    ground_height: groundHeight,
+    dzi_levels: Math.ceil(Math.log2(Math.max(tile.cols, tile.rows) * CELL_PIXELS)) + 1,
+    pipeline,
+    state: 'open',
+    queue_order: 100,
+    rev: 0,
+    kind: 'google',
+    made: 'grid',
+  };
 }

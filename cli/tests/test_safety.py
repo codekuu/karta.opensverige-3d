@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from rutor import api, commands, config
+from rutor import api, commands, config, pipeline
 from rutor.__main__ import main
 from rutor.errors import RutorError
 from tests.fake_service import FakeService
@@ -205,6 +205,14 @@ class OwnLoginsOnlyTests(unittest.TestCase):
         deployed = (Path(__file__).resolve().parents[2] / "service" / "wrangler.jsonc").read_text(encoding="utf-8")
         found = re.findall(r'^\s*"GITHUB_CLIENT_ID":\s*"([^"]*)"', deployed, flags=re.MULTILINE)
         self.assertEqual(found, [config.GITHUB_CLIENT_ID])
+
+    def test_a_sheet_the_service_makes_is_drawn_with_the_pipeline_the_cli_ships(self) -> None:
+        # The service makes a sheet's row on the first claim there and writes its pipeline from
+        # this variable. An upload is refused unless the manifest names the sheet's pipeline, so
+        # a variable that falls behind the CLI would refuse every cell on every new sheet.
+        deployed = (Path(__file__).resolve().parents[2] / "service" / "wrangler.jsonc").read_text(encoding="utf-8")
+        found = re.findall(r'^\s*"PIPELINE_NOW":\s*"([^"]*)"', deployed, flags=re.MULTILINE)
+        self.assertEqual(found, [pipeline.PIPELINE])
 
 
 class MachineTests(_Env):
