@@ -78,7 +78,8 @@ def _exchange(
         raise network(f"could not reach the service ({exc.reason})") from exc
     # A read timeout is a TimeoutError, not a URLError, so it needs its own
     # clause; a dropped connection and a broken HTTP stream are the same story.
-    except (TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+    # So is a TLS fault or any other socket error: all of them are OSError.
+    except (OSError, http.client.HTTPException) as exc:
         raise network(f"could not reach the service ({exc.__class__.__name__}: {exc})") from exc
 
 
@@ -99,6 +100,10 @@ def _refuse(status: int, parsed: object) -> None:
         found = parsed.get("message")
         if isinstance(found, str):
             message = one_line(found)
+    # "Try again later" is not a no. The service is busy, down, or asked too often, and an
+    # agent that is told "refused" stops where it should wait.
+    if status >= 500 or (status == 429 and code == "rate_limited"):
+        raise network(f"the service cannot answer right now ({code}); try again in a minute")
     raise refused(f"refused: {code}: {message}")
 
 

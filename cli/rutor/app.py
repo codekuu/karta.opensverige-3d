@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 import threading
+import urllib.parse
 import time
 import traceback
 import urllib.error
@@ -425,12 +426,74 @@ _TOKEN_COMMANDS = frozenset({"claim", "render"})
 # itself says with its last error line.
 _PROBLEM_BY_EXIT = {2: "refused", 3: "machine", 4: "network", 5: "check"}
 
-# How a claim ends when it is certain that no lock was given: the input was wrong (1), the
-# service refused (2), or this machine was not ready and the service was never asked (3).
-_NO_LOCK_EXITS = frozenset({1, 2, 3})
+# How a claim ends when it is certain that no lock was given: the service refused (2), or
+# this machine was not ready and the service was never asked (3). Bad input (1) is certain
+# too, but only when the command said so itself: a command that crashed also ends with 1.
+_NO_LOCK_EXITS = frozenset({2, 3})
 
 # Refusals of a claim that the page has a sentence of its own for, by the service's word.
 _CLAIM_REFUSALS = (("taken", "taken"), ("too_many_locks", "locks"), ("too_many_waiting", "waiting"))
+
+# What a release is told when there is no lock of ours to give back. The first means the
+# service has the picture: the upload went in although its answer never came.
+_UPLOADED_ALREADY = "refused: already_uploaded"
+_NO_LOCK_OF_OURS = ("refused: not_yours", "refused: no_cell", _UPLOADED_ALREADY)
+
+# Failures the page has a sentence of its own for, by a word in the command's last error
+# line. A person who is told to try again tries again, so "try again" is said only when
+# trying again can help.
+_SAID_WHY = (
+    ("refused: daily_limit", "daily"),
+    ("refused: wrong_pipeline", "old_app"),
+    ("quota is used up", "quota"),
+    ("refused the token", "token"),
+    ("did not let this token", "token"),
+)
+
+# How long a stop waits for an upload to end by itself before the upload is ended too.
+UPLOAD_GRACE_SECONDS = 45.0
+
+# A stored login the service could not be asked about is asked about again, this often.
+LOGIN_RETRY_SECONDS = 30.0
+
+
+def my_locks() -> list[tuple[str, str]]:
+    """The cells the logged-in person holds a lock on, as (sheet, cell). None when unknown."""
+    token = config.read_token()
+    if not token:
+        return []
+    try:
+        _status, me = api.get("/v1/me", token=token)
+    except RutorError:
+        return []
+    rows = me.get("locks") if isinstance(me, dict) else None
+    found: list[tuple[str, str]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        sheet, col, lock_row = row.get("sheet"), row.get("col"), row.get("row")
+        # What the service says becomes a command's arguments, so it is checked like input.
+        if (
+            isinstance(sheet, str)
+            and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,60}", sheet)
+            and isinstance(col, int)
+            and isinstance(lock_row, int)
+            and not isinstance(col, bool)
+            and not isinstance(lock_row, bool)
+            and 0 <= col < 100_000
+            and 0 <= lock_row < 100_000
+        ):
+            found.append((sheet, f"{col}_{lock_row}"))
+    return found
+
+
+def refuse_old_pipeline(sheet: dict[str, object]) -> None:
+    """Refuse to draw for a sheet that wants another pipeline than this copy has.
+
+    The service refuses such a cell at upload, which is after the whole drawing.
+    """
+    if version(sheet)["current"] is not True:
+        raise Refusal(409, "this copy is too old for the sheet", "old_app")
 
 
 class Builder:
@@ -460,6 +523,8 @@ class Builder:
         self._waiting = False
         self._problem = ""
         self._looked = False
+        # When the service was last asked about a stored login and did not answer.
+        self._asked_at: float | None = None
         # Set once the page is closing. Nothing is started after that.
         self._closed = False
         # The login child, only while it is being read. A child that has ended is never
@@ -559,8 +624,10 @@ class Builder:
             if name:
                 self._problem = ""
             else:
-                # 4 is the CLI's network code; any other end is a code nobody approved.
-                self._problem = "network" if exit_code == 4 else "expired"
+                # 4 is the CLI's network code, and 2 is a no: the person pressed cancel at
+                # GitHub, or the service would not have them. Any other end is a code nobody
+                # approved in time.
+                self._problem = {4: "network", 2: "denied"}.get(exit_code, "expired")
 
     def login_state(self) -> dict[str, object]:
         self._remember_stored_login()
@@ -574,19 +641,31 @@ class Builder:
             }
 
     def _remember_stored_login(self) -> None:
-        """Ask the service, on the first look only, who a stored token belongs to."""
+        """Ask the service who a stored token belongs to, until it has answered once."""
         with self._lock:
             if self._looked:
                 return
-            self._looked = True
+            now = self._clock()
+            if self._asked_at is not None and now - self._asked_at < LOGIN_RETRY_SECONDS:
+                return
+            self._asked_at = now
         token = config.read_token()
         if not token:
+            with self._lock:
+                self._looked = True
             return
         try:
             _status, me = api.get("/v1/me", token=token)
-        except RutorError:
-            # As far as the page knows, nobody is logged in. It says nothing more.
+        except RutorError as exc:
+            # A refusal is an answer: nobody is logged in. A service that could not be
+            # reached is not, and a person who logged in yesterday is not asked to do it
+            # again because the network was slow at start.
+            if exc.code != 4:
+                with self._lock:
+                    self._looked = True
             return
+        with self._lock:
+            self._looked = True
         name = me.get("login") if isinstance(me, dict) else None
         if isinstance(name, str) and _NAME_SHAPE.fullmatch(name):
             with self._lock:
@@ -664,10 +743,20 @@ class Builder:
             running = self._phase in _RUNNING
             if running:
                 self._stop_asked = True
+                # An upload takes seconds, and ending it halfway leaves a cell that the
+                # service may have and the page does not know about. It is given a while
+                # to finish by itself.
+                uploading = self._phase == "upload"
                 run = self._job_run
             else:
+                uploading = False
                 run = None
             thread = self._job_thread
+        if uploading and thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=UPLOAD_GRACE_SECONDS)
+            with self._lock:
+                # Still the same child, still out: it is ended like any other.
+                run = self._job_run if self._job_run is run else None
         if run is not None:
             # Only the child being read is stopped. A finished one is not touched.
             run.stop()
@@ -748,18 +837,32 @@ class Builder:
             # No command runs now, so there is no progress line left to show.
             self._detail = ""
             # An earlier cell's lock that was just asked back in vain is not asked a third time.
-            held = None if problem == "lock_left" else self._held
-            unsure = self._unsure and held is None and problem != "lock_left"
+            # One found from before is given back when the person presses again, not behind
+            # their back: it may be a cell they are drawing in a terminal.
+            kept = problem in ("lock_left", "old_lock")
+            held = None if kept else self._held
+            unsure = self._unsure and held is None and not kept
             # A lock that is still out is given back before another job may start.
             self._releasing = held is not None or unsure
         if held is not None or unsure:
             try:
                 # A lock that is known is asked back twice. One that only may exist is asked
-                # back once, and what the service answers is not held against the page.
+                # back once.
                 if held is not None:
-                    self._release(held[0], held[1], tries=2)
+                    answer = self._release(held[0], held[1], tries=2)
                 else:
-                    self._release(sheet, cell, tries=1)
+                    answer = self._release(sheet, cell, tries=1)
+                    if answer == "":
+                        # Nobody answered, so the lock may still be out. It is remembered,
+                        # and asked back by its own name before the next cell is claimed.
+                        with self._lock:
+                            self._held = (sheet, cell)
+                if answer == "uploaded" and (held is None or held == (sheet, cell)):
+                    # The service has this cell's picture: the upload went in, and it was
+                    # only its answer that was lost. That is a cell waiting for review.
+                    with self._lock:
+                        self._phase = "done"
+                        self._job_problem = ""
             except Exception as exc:  # noqa: BLE001 - the page still has to learn it ended
                 print(f"app: {type(exc).__name__} while releasing", file=sys.stderr)
             finally:
@@ -835,21 +938,47 @@ class Builder:
                         self._held = None
                 continue
             if command == "claim":
+                # Bad input is said in an error line. A 1 with no such line is a crash.
+                certain = exit_code in _NO_LOCK_EXITS or (exit_code == 1 and last_error != "")
                 with self._lock:
                     # Stopped, cut off by the network or broken: the service may have given
                     # the lock without the claim living to say so. A stopped child's exit
                     # says nothing: a signal gives -15, taskkill on Windows gives 1.
-                    if self._stop_asked or exit_code not in _NO_LOCK_EXITS:
+                    if self._stop_asked or not certain:
                         self._unsure = True
                 if exit_code == 2:
                     for said, word in _CLAIM_REFUSALS:
                         if last_error.startswith(f"refused: {said}"):
+                            if word == "locks" and self._adopt_lock():
+                                return "old_lock"
                             return word
+            for said, word in _SAID_WHY:
+                if said in last_error:
+                    return word
             return _PROBLEM_BY_EXIT.get(exit_code, "failed")
         return ""
 
-    def _release(self, sheet: str, cell: str, tries: int) -> None:
-        """Give the lock back, twice at most: the service ends an abandoned lock by itself."""
+    def _adopt_lock(self) -> bool:
+        """Find the lock that stands in the way of a claim, so that it can be given back.
+
+        A lock outlives the app that took it: the machine restarted, or the app was ended,
+        in the middle of a cell. The page then holds a lock it does not know about, a new
+        builder may hold one, and nothing on the page could release it for two days.
+        """
+        locks = my_locks()
+        if not locks:
+            return False
+        with self._lock:
+            if self._held is None:
+                self._held = locks[0]
+        return True
+
+    def _release(self, sheet: str, cell: str, tries: int) -> str:
+        """Give the lock back, twice at most: the service ends an abandoned lock by itself.
+
+        Returns "released", "uploaded" (the service has the cell's picture, so there is no
+        lock), "none" (the service says the lock is not ours) or "" when nobody answered.
+        """
         for _attempt in range(tries):
             try:
                 run = self._start(["release", sheet, cell], {})
@@ -857,13 +986,23 @@ class Builder:
                 continue
             # A release child is never stopped: it ends at once, and its group number may
             # already belong to somebody else's program. It is read so nothing is left.
+            last_error = ""
             for line in run.lines():
                 self._keep(line, detail=False)
-            if run.wait() == 0:
+                if line.kind == "error":
+                    last_error = line.text
+            code = run.wait()
+            # The service's own no is an answer too: asking again would get the same one,
+            # and a lock that is not ours must not stop every cell after this one.
+            gone = code == 2 and last_error.startswith(_NO_LOCK_OF_OURS)
+            if code == 0 or gone:
                 with self._lock:
                     if self._held == (sheet, cell):
                         self._held = None
-                return
+                if code == 0:
+                    return "released"
+                return "uploaded" if last_error.startswith(_UPLOADED_ALREADY) else "none"
+        return ""
 
     def _keep(self, line: app_jobs.Line, *, detail: bool) -> None:
         """Keep the line for the report, and a progress line for the page."""
@@ -1283,9 +1422,21 @@ def _scrub(text: str) -> str:
     except (OSError, KeyError, ImportError):
         # Which of these a system without a user name raises depends on the Python.
         pass
+    # The same folder written as an address: file:///C:/Users/Ebba%20Ek/...
+    for spelled in {urllib.parse.quote(home.as_posix()), urllib.parse.quote(str(home))}:
+        if spelled and spelled != "/":
+            text = text.replace(spelled, "~")
+    for name in list(names):
+        names.add(urllib.parse.quote(name))
+    # Windows also writes a long or spaced folder name short: C:\Users\EBBAEK~1\...
+    text = re.sub(r"(?i)(\busers[\\/])[^\\/\s\"']*~\d+", r"\1user", text)
     text = _replace_names(text, names)
     for secret in _secrets():
         text = text.replace(secret, "[removed]")
+        if len(secret) >= 24:
+            # A line is cut to a length before it is kept, so a token may stand there
+            # without its end. Its beginning is enough to know it by.
+            text = re.sub(re.escape(secret[:16]) + r"[A-Za-z0-9._~+/=-]*…?", "[removed]", text)
     return text
 
 
@@ -1537,6 +1688,8 @@ class AppServer:
                     # The tools may answer while the model is half fetched. The redraw
                     # would then fetch the rest in silence, under a locked cell.
                     raise Refusal(409, "the drawing tools are not all fetched", "not_ready")
+                sheet = self._known.sheet()
+                refuse_old_pipeline(sheet if isinstance(sheet, dict) else {})
                 self._builder.build()
             return json_reply(200, {"ok": True})
         if rest == "api/install":

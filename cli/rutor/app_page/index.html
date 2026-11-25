@@ -17,11 +17,11 @@
       <span class="adress">Körs på din dator · 127.0.0.1</span>
       <p class="syfte">Din dator ritar en ruta av Sveriges pixelkarta. <a id="syfte-lank" target="_blank" rel="noopener noreferrer">Se den på techembassy.se →</a></p>
     </header>
-    <p class="banderoll" id="gammal" hidden>Appen är gammal. Hämta den nya versionen.</p>
+    <p class="banderoll" id="gammal" hidden>Appen är för gammal för kartbladet. <a id="gammal-lank" target="_blank" rel="noopener noreferrer">Hämta den nya versionen →</a></p>
     <p class="banderoll" id="nyversion" hidden>Det finns en ny version. <a id="nyversion-lank" href="" target="_blank" rel="noopener noreferrer">Hämta den →</a></p>
     <p class="banderoll" id="tappad" role="alert" hidden>Sidan når inte appen. Starta appen igen.</p>
 
-    <div class="mobilsteg" aria-hidden="true">
+    <div class="mobilsteg">
       <span id="mobilrad">Steg 1 av 8</span>
       <div class="matare"><i id="mobilmatare"></i></div>
     </div>
@@ -62,7 +62,14 @@
 
         <section class="steg" id="steg-2" aria-labelledby="rubrik-2" hidden>
           <h2 id="rubrik-2" tabindex="-1">Det här säger du ja till</h2>
-          <p>Tio korta rader. Alla visas, inget är gömt bakom en länk.</p>
+          <p>Det viktigaste, kort:</p>
+          <ul class="kort">
+            <li>Frivilligt och obetalt, på din egen dator och egen risk.</li>
+            <li>Ditt GitHub-namn visas öppet på rutorna du ritar.</li>
+            <li>Ritmodellen får bara användas utan vinstsyfte.</li>
+            <li>Stockholm ritas från Googles 3D-kartor, genom ditt eget Cesium-konto. Googles regler tillåter inte det. Du väljer själv.</li>
+          </ul>
+          <p>Här är alla tio raderna. Den engelska texten är den som gäller.</p>
           <ol class="villkor" id="villkor" lang="en"></ol>
           <label class="kryss"><input type="checkbox" id="villkor-ja"> <span>Jag har läst och säger ja</span></label>
           <p class="besked nejruta" id="villkor-fel" role="alert" hidden></p>
@@ -73,7 +80,7 @@
 
         <section class="steg" id="steg-3" aria-labelledby="rubrik-3" hidden>
           <h2 id="rubrik-3" tabindex="-1">Logga in med GitHub</h2>
-          <p id="inlogg-ingress">Öppna GitHub och skriv in koden. Appen ber inte om några rättigheter.</p>
+          <p id="inlogg-ingress">Du behöver ett gratiskonto på GitHub. Öppna GitHub och skriv in koden. Appen ber inte om några rättigheter.</p>
           <div class="kod" id="inlogg-kod" hidden></div>
           <p class="puls" id="inlogg-vantar" hidden>Väntar på att du godkänner koden</p>
           <p class="besked" id="inlogg-klar" hidden></p>
@@ -91,7 +98,7 @@
           <p id="nyckel-ingress">Kartbilden över Stockholm hämtas genom ditt gratiskonto. Appen skapar aldrig kontot åt dig.</p>
           <ol class="tre" id="nyckel-tre">
             <li><span>Skapa ett gratiskonto på <a id="nyckel-lank" target="_blank" rel="noopener noreferrer">ion.cesium.com</a>.</span></li>
-            <li><span>Skapa en nyckel där, med förvalda inställningar.</span></li>
+            <li><span>Öppna Access Tokens där. Skapa en nyckel (token) med förvalda inställningar.</span></li>
             <li><span>Klistra in nyckeln här. Den sparas bara på den här datorn.</span></li>
           </ol>
           <div class="falt" id="nyckel-falt">
@@ -125,7 +132,7 @@
           <p class="besked nejruta" id="hamta-fel" role="alert" hidden></p>
           <p class="liten" id="hamta-rapport-rad" hidden>Klistra in rapporten i ett nytt ärende på projektets GitHub. Adressen är <span class="ruta-id">github.com/opensverige/karta.opensverige-3d</span>.</p>
           <textarea class="rapport" id="hamta-rapport" readonly aria-label="Felrapport" hidden></textarea>
-          <p class="besked" id="verktyg-modell" hidden>Första ritningen hämtar 20 GB. Det görs en gång.</p>
+          <p class="besked" id="verktyg-modell" hidden>Första ritningen hämtar 12 GB. Det görs en gång.</p>
           <div class="knappar">
             <button class="knapp" type="button" id="hamta" hidden>Hämta →</button>
             <button class="knapp tyst" type="button" id="hamta-avbryt" hidden>Avbryt</button>
@@ -136,7 +143,7 @@
 
         <section class="steg" id="steg-6" aria-labelledby="rubrik-6" hidden>
           <h2 id="rubrik-6" tabindex="-1">Välj en ruta</h2>
-          <p id="ruta-ingress">Lediga rutor saknas på kartan. Ta nästa, eller klicka på en.</p>
+          <p id="ruta-ingress">En ledig ruta är mark som kartan inte har ritat än. Ta nästa, eller klicka på en.</p>
           <div class="karta" id="ruta-karta" hidden>
             <canvas id="rutnat" width="520" height="300" role="img" aria-label="Karta över rutorna. Knappen Ta nästa lediga väljer åt dig."></canvas>
           </div>
@@ -155,10 +162,10 @@
         </section>
 
         <section class="steg" id="steg-7" aria-labelledby="rubrik-7" hidden>
-          <h2 id="rubrik-7" tabindex="-1">Får datorn rita i ungefär 20 minuter?</h2>
+          <h2 id="rubrik-7" tabindex="-1">Får datorn rita en stund?</h2>
 
           <div id="rita-fraga" class="steg-del">
-            <p>Fläkten kan låta. Spel går segt under tiden.</p>
+            <p>Oftast går det på några minuter. Fläkten kan låta. Spel går segt under tiden.</p>
             <ul class="rader">
               <li><span>Ruta</span><span class="varde" id="rita-ruta"></span></li>
               <li><span>Elpris just nu, SE3</span><span class="varde" id="rita-pris"></span></li>
@@ -168,7 +175,7 @@
           </div>
 
           <div id="rita-gar" class="steg-del" hidden>
-            <p>Stäng inte fliken. Då stannar ritandet och kortet blir ledigt.</p>
+            <p>Låt fliken vara öppen och datorn vaken. Du kan byta flik under tiden. Stänger du fliken stannar ritandet.</p>
             <ul class="faser" id="faser">
               <li data-fas="claim"><span class="namn">Låser rutan</span><span class="tid">några sekunder</span></li>
               <li data-fas="render"><span class="namn">Hämtar kartbilden</span><span class="tid">upp till 15 min</span></li>
@@ -193,12 +200,12 @@
             <button class="knapp" type="button" id="slut-annan" data-till="6" hidden>Välj en annan ruta →</button>
             <button class="knapp tyst" type="button" id="slut-kopiera" hidden>Kopiera felrapport</button>
           </div>
-          <p class="liten" id="rita-rad">Väntar du är det bara ett råd. Inget startar av sig självt.</p>
+          <p class="liten" id="rita-rad">Priset är bara ett råd. Inget startar av sig självt.</p>
         </section>
 
         <section class="steg" id="steg-8" aria-labelledby="rubrik-8" hidden>
           <h2 id="rubrik-8" tabindex="-1">Din ruta väntar på granskning</h2>
-          <p>En människa tittar på den innan den tänds på kartan.</p>
+          <p>En människa tittar på den innan den tänds på kartan. Tills dess syns den som Väntar. Den kan också få nej, och då blir rutan ledig igen.</p>
           <ul class="rader">
             <li><span>Ruta</span><span class="varde ok" id="klart-ruta"></span></li>
           </ul>

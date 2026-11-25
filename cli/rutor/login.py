@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import sys
 import time
@@ -14,7 +15,7 @@ from collections.abc import Callable
 from rutor import __version__
 from rutor.api import get
 from rutor.config import github_client_id, write_token
-from rutor.errors import bad_input, environment, network, refused
+from rutor.errors import RutorError, bad_input, environment, network, refused
 
 DEVICE_CODE_URL = "https://github.com/login/device/code"
 ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -62,6 +63,9 @@ def github_http(url: str, form: dict[str, str]) -> dict[str, object]:
             exc.close()
     except urllib.error.URLError as exc:
         raise network(f"could not reach GitHub ({exc.reason})") from exc
+    # A read timeout or a broken connection is not a URLError.
+    except (OSError, http.client.HTTPException) as exc:
+        raise network(f"could not reach GitHub ({exc.__class__.__name__})") from exc
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -73,6 +77,10 @@ def github_http(url: str, form: dict[str, str]) -> dict[str, object]:
         if isinstance(key, str):
             body[key] = value
     return body
+
+
+# How many questions in a row may go unanswered while a person approves their code.
+NETWORK_MISSES = 5
 
 
 def start_device_flow(client_id: str, http: Http | None = None) -> dict[str, object]:
@@ -89,15 +97,26 @@ def poll_for_token(
 ) -> str:
     call = http or github_http
     current = interval
+    misses = 0
     while True:
-        body = call(
-            ACCESS_TOKEN_URL,
-            {
-                "client_id": client_id,
-                "device_code": device_code,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            },
-        )
+        try:
+            body = call(
+                ACCESS_TOKEN_URL,
+                {
+                    "client_id": client_id,
+                    "device_code": device_code,
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                },
+            )
+        except RutorError as exc:
+            # The person may be typing the code at GitHub right now. One question that got
+            # no answer must not throw their code away: it is asked again a few times.
+            misses += 1
+            if exc.code != 4 or misses > NETWORK_MISSES:
+                raise
+            sleep(float(current))
+            continue
+        misses = 0
         token = body.get("access_token")
         if isinstance(token, str) and token:
             return token
@@ -123,7 +142,7 @@ def _accepted(args: argparse.Namespace) -> None:
         return
     if not sys.stdin.isatty():
         raise bad_input("Pass --accept-terms to accept the terms and log in.")
-    answer = input("accept: ")
+    answer = input("accept? (yes/no): ")
     if answer.strip().lower() not in {"y", "yes", "ja"}:
         raise bad_input("The terms were not accepted.")
 

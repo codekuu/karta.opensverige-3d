@@ -676,8 +676,9 @@ class LoginTests(_OwnHome):
         self.assertTrue(builder.terms_accepted())
 
     def test_a_code_nobody_approved_is_said_so(self) -> None:
-        # 4 is the CLI's network code; anything else that is not a login is an expired code.
-        for code, problem in ((4, "network"), (3, "expired"), (2, "expired")):
+        # 4 is the CLI's network code and 2 a no from GitHub or the service; anything else
+        # that is not a login is an expired code.
+        for code, problem in ((4, "network"), (3, "expired"), (2, "denied")):
             with self.subTest(code=code):
                 fake = FakeStart()
                 fake.script("login", ["code: ABCD-1234", f"url: {login.DEVICE_URL}"], code=code)
@@ -1310,7 +1311,9 @@ class JobTests(_OwnHome):
         builder.choose(self.SHEET, 74, 20)
         builder.build()
         wait_until(lambda: self._state(builder)["url"] == address)
-        builder.stop()
+        # An upload that does not end by itself is ended after a while, like any child.
+        with patch("rutor.app.UPLOAD_GRACE_SECONDS", 0.05):
+            builder.stop()
         state = self._state(builder)
         # The service has the cell. Saying "stopped, nothing was sent" would be untrue.
         self.assertEqual((state["phase"], state["held"], state["url"]), ("done", False, address))
@@ -2709,12 +2712,36 @@ class PageFilesTests(unittest.TestCase):
             "missing", "refused", "twice", "no_access", "unreachable", "broken",
             "expired", "network",
             "taken", "machine", "check", "failed", "locks", "waiting", "lock_left",
+            "daily", "old_app", "quota", "token", "old_lock", "denied",
             "memory",
             "busy", "no_cell", "not_ready", "terms", "none_free",
         )
         for word in words:
             self.assertRegex(script, rf"\b{word}: \"", word)
         self.assertIn("Något gick fel. Försök igen.", script)
+
+    def test_the_page_says_what_a_reader_takes_it_to_say(self) -> None:
+        page = self.read("index.html")
+        script = self.read("app.js")
+        # "Lediga rutor saknas på kartan" reads as "no cell is free", above a map of free ones.
+        self.assertNotIn("Lediga rutor saknas", page)
+        # The model is 12 GB. The page said 20.
+        self.assertNotIn("20 GB", page)
+        self.assertNotIn("20 GB", script)
+        # The terms are in English, so what a person most needs to know is said in Swedish
+        # too: unpaid and at their own risk, their name is shown, and the choice about Google.
+        for said in ("Frivilligt och obetalt", "Ditt GitHub-namn visas öppet", "Googles regler tillåter inte det", "Den engelska texten är den som gäller"):
+            self.assertIn(said, page)
+        # A fetch whose bytes did not match can be tried again: the bad file is gone.
+        self.assertNotIn('i.problem === "changed"', script)
+        # A cell that waits is said to wait, and where it shows.
+        self.assertIn("Tills dess syns den som Väntar.", page)
+
+    def test_a_step_the_page_moved_to_by_itself_gets_the_focus(self) -> None:
+        script = self.read("app.js")
+        self.assertIn("if (visat !== fokuserat)", script)
+        # And the step line of the narrow layout is not hidden from a screen reader.
+        self.assertNotIn('class="mobilsteg" aria-hidden', self.read("index.html"))
 
     def test_step_five_has_a_bar_and_a_button(self) -> None:
         page = self.read("index.html")
@@ -2735,7 +2762,6 @@ class PageFilesTests(unittest.TestCase):
             "Hämtar Node",
             "Hämtar kartverktyget",
             "Hämtar ritmodellen",
-            "Appen behöver uppdateras. Hämta den nya versionen.",
         ):
             self.assertIn(sentence, script)
         # Each word the install job can end with has a sentence of its own.

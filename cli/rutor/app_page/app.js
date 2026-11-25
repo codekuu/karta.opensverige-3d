@@ -29,6 +29,7 @@ const ORD = {
   },
   inlogg: {
     expired: "Koden godkändes inte i tid. Hämta en ny.",
+    denied: "Inloggningen blev inte godkänd. Hämta en ny kod.",
     network: "Nätet svarade inte. Försök igen.",
     terms: "Säg ja till villkoren först.",
   },
@@ -42,11 +43,16 @@ const ORD = {
     locks: "Du har redan en låst ruta. Den släpps inom två dygn.",
     waiting: "Fem av dina rutor väntar på granskning. Vänta tills en är granskad.",
     lock_left: "En tidigare ruta är fortfarande låst. Försök igen om en stund.",
+    old_lock: "Du har en låst ruta sedan förut. Tryck Försök igen, så släpps den.",
+    daily: "Du har skickat in 20 rutor i dag. Fortsätt i morgon.",
+    old_app: "Appen är för gammal för kartbladet. Hämta den nya versionen.",
+    quota: "Ditt Cesium-konto har nått sin gräns för nu. Försök igen i morgon.",
+    token: "Cesium tog inte emot nyckeln. Byt nyckel i steg 4.",
   },
   hamtning: {
     disk: "Disken blev full. Gör plats och tryck igen.",
     network: "Nätet svarade inte. Tryck igen så fortsätter hämtningen.",
-    changed: "Appen behöver uppdateras. Hämta den nya versionen.",
+    changed: "Det som hämtades stämde inte. Försök igen. Hjälper det inte behöver appen uppdateras.",
     failed: "Något gick fel med hämtningen. Kopiera felrapporten.",
   },
   svar: {
@@ -54,6 +60,7 @@ const ORD = {
     not_an_app: "Den här installationen hämtar inget själv.",
     no_cell: "Välj en ruta först.",
     not_ready: "Något saknas i ett tidigare steg. Gå tillbaka och titta.",
+    old_app: "Appen är för gammal för kartbladet. Hämta den nya versionen.",
     terms: "Säg ja till villkoren först.",
     none_free: "Inga rutor är lediga just nu. Titta in senare.",
     taken: "Rutan är inte ledig längre. Välj en annan.",
@@ -119,6 +126,8 @@ let stegFel = "";
 let vantaVisad = false;
 let rapportVisad = false;
 let upptagen = false;
+// The step whose heading last got the focus, so that a step the page moves to by itself gets it too.
+let fokuserat = 0;
 
 // ---- small helpers
 
@@ -226,7 +235,6 @@ function ga(till) {
   visat = mal;
   stegFel = "";
   rita();
-  el("rubrik-" + visat).focus();
 }
 
 // ---- drawing the page from what the app says
@@ -265,6 +273,7 @@ function rita() {
   forraFas = fas;
 
   visa("gammal", s.version.current === false);
+  el("gammal-lank").setAttribute("href", NY_VERSION);
 
   // Only a release page under the app's own name is ever a link here, whatever GitHub said.
   const nyApp = s.version.app;
@@ -296,6 +305,13 @@ function rita() {
 
   for (let n = 1; n <= 8; n += 1) visa("steg-" + n, n === visat);
   STEG[visat - 1](s);
+  // A new step starts at its heading, whoever moved there: the person, or the page when a
+  // drawing started or ended. The button that was pressed is hidden by then, and a keyboard
+  // or a screen reader would otherwise be left nowhere. Not on the first drawing of the page.
+  if (visat !== fokuserat) {
+    if (fokuserat !== 0) el("rubrik-" + visat).focus();
+    fokuserat = visat;
+  }
 }
 
 function steg1(s) {
@@ -458,8 +474,8 @@ function hamtning(s) {
   visa("verktyg-hjalp", false);
   visa("verktyg-modell", false);
 
-  // An app that has to be replaced is not helped by another try.
-  const igen = !klart && !gar && !(fel && i.problem === "changed");
+  // Every stop can be tried again: a file that did not match is already taken away.
+  const igen = !klart && !gar;
   visa("hamta", igen);
   el("hamta").disabled = upptagen;
   text("hamta", stannat || borjat ? "Fortsätt hämta →" : fel || trasigt ? "Försök igen →" : "Hämta →");
@@ -549,7 +565,7 @@ function steg7(s) {
   visa("slut-kopiera", j.phase === "failed");
 
   if (fraga) {
-    text("rubrik-7", "Får datorn rita i ungefär 20 minuter?");
+    text("rubrik-7", "Får datorn rita en stund?");
     text("rita-ruta", s.cell ? rutnamn(s.cell) : "");
     const pris = el("rita-pris");
     text("rita-pris", dyrt ? "högt just nu" : s.price.decision === "RUN" ? "lågt" : "okänt");
@@ -573,7 +589,7 @@ function steg7(s) {
       rad.classList.toggle("gjord", plats < nu);
       rad.classList.toggle("nu", plats === nu);
     }
-    text("fas-rita-tid", s.tools.model_cached === false ? "20 GB hämtas först" : "ungefär 2 min");
+    text("fas-rita-tid", s.tools.model_cached === false ? "12 GB hämtas först" : "ungefär 2 min");
     text("rita-detalj", j.detail || "");
     return;
   }
@@ -583,7 +599,7 @@ function steg7(s) {
   el("slut-besked").classList.toggle("nejruta", !avbrutet);
   text("slut-besked", stegFel || (avbrutet ? "Ritandet stannade. Kortet är ledigt igen." : ord("jobb", j.problem)));
   // Where the sentence above already says which cell is locked, or that none was, no more is said.
-  const sagt = ["taken", "locks", "waiting", "lock_left"].includes(j.problem);
+  const sagt = ["taken", "locks", "waiting", "lock_left", "old_lock"].includes(j.problem);
   visa("slut-las", !sagt);
   text("slut-las", j.held ? "Rutan är fortfarande låst. Låset släpps av sig självt inom två dygn." : "Rutan är inte låst. Inget skickades in.");
   visa("slut-rapport-rad", rapportVisad);

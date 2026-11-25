@@ -145,6 +145,8 @@ h2:focus { outline: none; }
 
 /* ---- step 2: the terms, as they are written */
 
+/* The four things said in Swedish above the ten lines. */
+.kort { max-width: 640px; list-style: disc; display: flex; flex-direction: column; gap: 8px; padding-left: 1.2em; }
 .villkor { max-width: 640px; display: flex; flex-direction: column; gap: 10px; }
 .villkor li { color: var(--ink-soft); padding-left: 1.7em; text-indent: -1.7em; overflow-wrap: anywhere; }
 .kryss { display: flex; gap: 10px; align-items: center; font-weight: 500; }

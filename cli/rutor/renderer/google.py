@@ -101,7 +101,9 @@ def google_camera(sheet: dict[str, object], col: int, row: int) -> dict[str, obj
 
 def _run(argv: list[str], env: dict[str, str]) -> tuple[int, str, str]:
     try:
-        done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=NODE_TIMEOUT, check=False)
+        # Node writes UTF-8 whatever the console's code page is. Read with that code page, a
+        # letter it lacks in a path broke the reading and hid the render's own error.
+        done = subprocess.run(argv, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=NODE_TIMEOUT, check=False)
     except subprocess.TimeoutExpired as exc:
         raise network(f"the Google render took longer than {NODE_TIMEOUT} s") from exc
     except OSError as exc:
