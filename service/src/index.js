@@ -108,7 +108,9 @@ async function cachedPublic(pathname, env, run) {
   const hit = publicCache.get(pathname);
   if (hit && hit.until > Date.now()) return new Response(hit.body, { status: hit.status, headers: hit.headers });
   const response = await run();
-  if (response.status !== 200) return response;
+  // An answer that says no-store is not kept: the grid of a sheet nobody has made yet. There
+  // are thousands of those ids, and the claim that makes the sheet changes the answer.
+  if (response.status !== 200 || (response.headers.get('Cache-Control') || '').includes('no-store')) return response;
   const body = await response.text();
   const headers = [...response.headers.entries()];
   if (publicCache.size >= PUBLIC_CACHE_MAX) publicCache.delete(publicCache.keys().next().value);

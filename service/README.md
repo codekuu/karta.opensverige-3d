@@ -38,6 +38,8 @@ npx wrangler@4.163.0 deploy
 
 `npx wrangler@4.163.0 deploy --dry-run` builds and lists the bindings without uploading.
 
+The migration comes first, always. The code reads columns the migrations add (`made` and `kind` since `0004`), so code deployed before its migration answers 500 to every claim, on every sheet. A migration applied before its code is safe: the older code does not read the new columns.
+
 ## Test
 
 Node 22 or newer.
@@ -71,10 +73,10 @@ All under `/v1`. Errors are `{ "error": "<code>", "message": "..." }`.
 | GET | `/health` | anyone | 200 |
 | GET | `/sheets` | anyone | sheets with `done` and `total` |
 | GET | `/cities` | anyone | sheets grouped by city |
-| GET | `/grid/{sheet}` | anyone | sheet and cells `[col, row, state, login, updated]`; 404 `no_sheet`. A live cell the admin took down is shown as `last` until its tiles are blanked: it cannot be claimed. A sheet of the tiling lists only the cells that have a row; one nobody has claimed on yet is answered as the tiling computes it, with no cells |
+| GET | `/grid/{sheet}` | anyone | sheet and cells `[col, row, state, login, updated]`; 404 `no_sheet`. A live cell the admin took down is shown as `last` until its tiles are blanked: it cannot be claimed. A sheet of the tiling lists only the cells that have a row; one nobody has claimed on yet is answered as the tiling computes it, with no cells, `exists: false` on the sheet and `Cache-Control: no-store`: its height and picture top are stand-ins, and nothing is drawn from it |
 | GET | `/place?lat=..&lon=..` | anyone | `{sheet, col, row, state}`: the sheet and cell a point on the earth belongs to. A point inside a hand-made sheet's picture belongs to that sheet. Anywhere else in Sweden the tiling decides, and `sheet.exists` is false until someone has claimed a cell there; a cell with no row is `fri`. 404 `outside` outside Sweden, 400 `bad_query`. Writes nothing |
 | GET | `/me` | user | login, counts, locks |
-| POST | `/claim` `{sheet, col, row}` | user | 201 `expires_at`; 404 `no_sheet` `no_cell`, 409 `taken` `being_removed` `other_sheet` (the ground belongs to a hand-made sheet), 403 `sheet_closed` `too_many_locks` `too_many_waiting` (five uploads of a builder who is not trusted already wait for review), 422 `outside`, 503 `no_height` `misconfigured` (a new sheet could not be made; nothing was written). A lock past its expiry can be taken. On a sheet of the tiling the first claim makes the sheet's row and the cell's |
+| POST | `/claim` `{sheet, col, row}`, and `kind` on a sheet of the tiling | user | 201 `expires_at`; 404 `no_sheet` `no_cell`, 426 `update_needed` (a claim on a sheet of the tiling must say the sheet's `kind`: a client from before the tiling says none, and is refused before anything is locked), 409 `taken` `being_removed` `other_sheet` (the ground belongs to a hand-made sheet), 403 `sheet_closed` `too_many_locks` `too_many_waiting` (five uploads of a builder who is not trusted already wait for review), 422 `outside`, 503 `no_height` `misconfigured` (a new sheet could not be made; nothing was written). A lock past its expiry can be taken. On a sheet of the tiling the first claim makes the sheet's row and the cell's |
 | POST | `/release` `{sheet, col, row}` | user | 200; 403 `not_yours`, 409 `already_uploaded` |
 | PUT | `/upload/{sheet}/{col}_{row}` | user | body PNG, header `X-Manifest`; 201 `{state}`; 404 `no_cell`, 403 `not_yours`, 411 `no_length`, 413 `too_big`, 400 `bad_manifest` `short_body`, 422 `not_checked` `wrong_pipeline` `bad_size` `sha_mismatch`, 415 `not_png` `not_plain` (the PNG is not 8-bit RGB, is interlaced, or holds alpha, animation, a gamma, a colour profile or any part but the picture, text, a time, the print size and the sRGB mark), 429 `daily_limit`, 409 `lock_expired` `lock_lost` (the lock ended during the upload; nothing kept). The manifest must have `check: "ok"`; strings are at most 200 characters and unknown keys are dropped |
 | GET | `/inkorg/{sheet}/{col}_{row}.png` · `.json` | admin | the cell's current upload; header `X-Inbox-Key` |

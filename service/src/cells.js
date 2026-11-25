@@ -91,13 +91,17 @@ async function makeGridCell(db, env, user, tile, sheetMissing, col, row, now) {
  * @param {number} row
  * @param {string} now
  * @param {import('./db.js').Env} [env] read only when a sheet of the tiling gets its row
+ * @param {string} [kind] the source the client says it will draw the sheet from
  * @returns {Promise<{ ok: true, expires_at: string } | { ok: false, status: number, code: string, message?: string }>}
  */
-export async function claimCell(db, user, sheet, col, row, now, env = {}) {
-  const sheetRow = await db.prepare('SELECT id, state, made FROM sheets WHERE id = ?').bind(sheet).first();
+export async function claimCell(db, user, sheet, col, row, now, env = {}, kind = undefined) {
+  const sheetRow = await db.prepare('SELECT id, state, made, kind FROM sheets WHERE id = ?').bind(sheet).first();
   // A row made by hand keeps to its own cells, whatever its id looks like.
   const tile = !sheetRow || sheetRow.made === 'grid' ? sheetById(sheet) : null;
   if (!sheetRow && !tile) return { ok: false, status: 404, code: 'no_sheet' };
+  // A client from before the tiling has no source for such a sheet: it would lock the cell
+  // and fail at the render. One that knows the sheet says its source with the claim.
+  if (tile && kind !== (sheetRow ? sheetRow.kind : 'google')) return { ok: false, status: 426, code: 'update_needed' };
   if (sheetRow && sheetRow.state !== 'open') return { ok: false, status: 403, code: 'sheet_closed' };
   const cell = sheetRow ? await db.prepare('SELECT state, removed_at FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first() : null;
   if (!cell && !(tile && col < tile.cols && row < tile.rows)) return { ok: false, status: 404, code: 'no_cell' };
@@ -174,14 +178,16 @@ const MESSAGES = {
   other_sheet: 'That ground belongs to another sheet.',
   no_height: 'The ground height of that place could not be read just now, so its sheet was not made. Try again in a minute.',
   misconfigured: 'The service is not set up to make new sheets yet.',
+  update_needed: 'That sheet needs a newer rutor than this one. Update it, then claim again.',
   not_yours: 'That cell is not yours.',
   already_uploaded: 'That cell is already uploaded and cannot be released.',
 };
 
 /**
- * Reads { sheet, col, row } from a JSON body.
+ * Reads { sheet, col, row } from a JSON body, and `kind` when the client says which source
+ * it will draw the sheet from.
  * @param {Request} request
- * @returns {Promise<{ sheet: string, col: number, row: number } | null>}
+ * @returns {Promise<{ sheet: string, col: number, row: number, kind?: string } | null>}
  */
 export async function readCellBody(request) {
   let body;
@@ -192,16 +198,18 @@ export async function readCellBody(request) {
   }
   if (!body || typeof body.sheet !== 'string' || !/^[a-z0-9-]+$/.test(body.sheet)) return null;
   if (!Number.isInteger(body.col) || !Number.isInteger(body.row) || body.col < 0 || body.row < 0) return null;
-  return { sheet: body.sheet, col: body.col, row: body.row };
+  if (body.kind !== undefined && body.kind !== 'open' && body.kind !== 'google') return null;
+  const cell = { sheet: body.sheet, col: body.col, row: body.row };
+  return body.kind === undefined ? cell : { ...cell, kind: body.kind };
 }
 
 /** POST /v1/claim */
 export const claimRoute = requireUser(async (request, env, ctx, params, now, user) => {
   const body = await readCellBody(request);
-  if (!body) return error(400, 'bad_body', 'Send JSON with sheet, col and row (integers from 0).');
-  const r = await claimCell(env.DB, user, body.sheet, body.col, body.row, now, env);
+  if (!body) return error(400, 'bad_body', 'Send JSON with sheet, col and row (integers from 0), and kind as open or google when you send it.');
+  const r = await claimCell(env.DB, user, body.sheet, body.col, body.row, now, env, body.kind);
   if (!r.ok) return error(r.status, r.code, r.message || MESSAGES[r.code], r.status === 503 ? { 'Retry-After': '60' } : {});
-  return json(201, { ...body, expires_at: r.expires_at });
+  return json(201, { sheet: body.sheet, col: body.col, row: body.row, expires_at: r.expires_at });
 });
 
 /** POST /v1/release */

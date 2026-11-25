@@ -4,6 +4,7 @@ import { env } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setBlock } from '../src/admin.js';
 import { resolveUser } from '../src/auth.js';
+import { clearPublicCache } from '../src/index.js';
 import { claimCell } from '../src/cells.js';
 import { getGrid } from '../src/sheets.js';
 import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser, rowCounts, setCell, stubOutside } from './fixtures.js';
@@ -198,7 +199,7 @@ describe('a claim on a sheet of the tiling', () => {
   it('is refused for an id that has the shape but lies outside Sweden or off the steps, and makes no row', async () => {
     const asked = stubOutside(38);
     for (const id of ['se-n5002-e1262', 'se-n5602-e0512', 'se-n5601-e1263', 'se-n5602-e1263', 'se-n9999-e9999']) {
-      expect(await claimCell(env.DB, klang, id, 0, 0, NOW, env), id).toMatchObject({ ok: false, status: 404, code: 'no_sheet' });
+      expect(await claimCell(env.DB, klang, id, 0, 0, NOW, env, 'google'), id).toMatchObject({ ok: false, status: 404, code: 'no_sheet' });
     }
     expect(await rowCounts()).toEqual({ sheets: 0, cells: 0 });
     expect(asked).toHaveLength(0);
@@ -206,7 +207,7 @@ describe('a claim on a sheet of the tiling', () => {
 
   it('two first claims at the same moment make one sheet, and both cells are claimed', async () => {
     stubOutside(38);
-    const [a, b] = await Promise.all([claimCell(env.DB, klang, HBG, 47, 16, NOW, env), claimCell(env.DB, ebba, HBG, 48, 16, NOW, env)]);
+    const [a, b] = await Promise.all([claimCell(env.DB, klang, HBG, 47, 16, NOW, env, 'google'), claimCell(env.DB, ebba, HBG, 48, 16, NOW, env, 'google')]);
     expect([a.ok, b.ok]).toEqual([true, true]);
     expect(await rowCounts()).toEqual({ sheets: 1, cells: 2 });
     expect((await getCell(HBG, 47, 16)).owner_login).toBe('klang');
@@ -215,7 +216,7 @@ describe('a claim on a sheet of the tiling', () => {
 
   it('two first claims on the same cell at the same moment have one winner', async () => {
     stubOutside(38);
-    const [a, b] = await Promise.all([claimCell(env.DB, klang, HBG, 47, 16, NOW, env), claimCell(env.DB, ebba, HBG, 47, 16, NOW, env)]);
+    const [a, b] = await Promise.all([claimCell(env.DB, klang, HBG, 47, 16, NOW, env, 'google'), claimCell(env.DB, ebba, HBG, 47, 16, NOW, env, 'google')]);
     expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
     expect([a, b].find((r) => !r.ok)).toMatchObject({ status: 409, code: 'taken' });
     expect(await rowCounts()).toEqual({ sheets: 1, cells: 1 });
@@ -224,13 +225,13 @@ describe('a claim on a sheet of the tiling', () => {
   it('is refused for a cell outside the size of the sheet, and makes no row', async () => {
     const asked = stubOutside(38);
     for (const [col, row] of [[61, 0], [0, 47], [9999, 9999]]) {
-      expect(await claimCell(env.DB, klang, HBG, col, row, NOW, env)).toMatchObject({ ok: false, status: 404, code: 'no_cell' });
+      expect(await claimCell(env.DB, klang, HBG, col, row, NOW, env, 'google')).toMatchObject({ ok: false, status: 404, code: 'no_cell' });
     }
     expect(await rowCounts()).toEqual({ sheets: 0, cells: 0 });
     expect(asked).toHaveLength(0);
     // The same when the sheet has its row.
-    expect((await claimCell(env.DB, ebba, HBG, 60, 46, NOW, env)).ok).toBe(true);
-    expect(await claimCell(env.DB, klang, HBG, 61, 46, NOW, env)).toMatchObject({ ok: false, status: 404, code: 'no_cell' });
+    expect((await claimCell(env.DB, ebba, HBG, 60, 46, NOW, env, 'google')).ok).toBe(true);
+    expect(await claimCell(env.DB, klang, HBG, 61, 46, NOW, env, 'google')).toMatchObject({ ok: false, status: 404, code: 'no_cell' });
     expect(await rowCounts()).toEqual({ sheets: 1, cells: 1 });
   });
 
@@ -238,5 +239,90 @@ describe('a claim on a sheet of the tiling', () => {
     await insertSheet({ cols: 2, rows: 1 });
     expect(await claimCell(env.DB, klang, 'goteborg-norr', 1, 0, NOW, env)).toMatchObject({ ok: false, status: 404, code: 'no_cell' });
     expect(await rowCounts()).toEqual({ sheets: 1, cells: 0 });
+  });
+});
+
+describe('the memory of public reads and a sheet nobody has made yet', () => {
+  const HBG = 'se-n5602-e1262';
+  const KEEP = { PUBLIC_CACHE_SECONDS: '60' };
+  const claim = (body) =>
+    call(new Request('https://x/v1/claim', { method: 'POST', headers: { Authorization: 'Bearer t', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), KEEP);
+
+  beforeEach(() => clearPublicCache());
+
+  it('is not shown the sheet as it was before the claim that made it', async () => {
+    // rutor claim reads the grid, claims, and rutor render reads the grid again seconds later.
+    // The picture's top moved with the ground height when the row was made: the renderer must
+    // get the row, not what the tiling computed before there was one.
+    stubOutside(38);
+    const before = await (await call(new Request(`https://x/v1/grid/${HBG}`), KEEP)).json();
+    expect(before.sheet).toMatchObject({ ground_height: 0, y_meters: 6016, exists: false });
+    expect((await claim({ sheet: HBG, col: 47, row: 16, kind: 'google' })).status).toBe(201);
+    const after = await (await call(new Request(`https://x/v1/grid/${HBG}`), KEEP)).json();
+    expect(after.sheet.ground_height).toBe(68);
+    expect(after.sheet.y_meters).toBeCloseTo(6016 + 68 * Math.SQRT1_2, 9);
+    expect(after.sheet.exists).not.toBe(false);
+    expect(after.cells).toHaveLength(1);
+  });
+
+  it('tells every cache between here and the reader not to keep a sheet that has no row', async () => {
+    const computed = await call(new Request(`https://x/v1/grid/${HBG}`), KEEP);
+    expect(computed.headers.get('Cache-Control')).toBe('no-store');
+    await insertSheet({ cols: 1, rows: 1 });
+    const stored = await call(new Request('https://x/v1/grid/goteborg-norr'), KEEP);
+    expect(stored.headers.get('Cache-Control')).toBe('public, max-age=60');
+  });
+
+  it('does not let a stream of sheets nobody has made push a real grid out', async () => {
+    await insertSheet({ cols: 1, rows: 1 });
+    await insertCells('goteborg-norr', 1, 1);
+    const first = await (await call(new Request('https://x/v1/grid/goteborg-norr'), KEEP)).json();
+    expect(first.cells[0][2]).toBe('fri');
+    // The table changes; an answer still kept in memory does not.
+    await setCell('goteborg-norr', 0, 0, { state: 'live' });
+    for (let n = 0; n < 70; n += 1) {
+      const id = `se-n${5602 + 15 * (n % 50)}-e${1262 + 25 * Math.floor(n / 50)}`;
+      expect((await call(new Request(`https://x/v1/grid/${id}`), KEEP)).status, id).toBe(200);
+    }
+    const again = await (await call(new Request('https://x/v1/grid/goteborg-norr'), KEEP)).json();
+    expect(again.cells[0][2]).toBe('fri');
+  });
+});
+
+describe('a client from before the tiling', () => {
+  const HBG = 'se-n5602-e1262';
+  const klang = { github_id: 4242, login: 'klang', first_seen: NOW, approved_count: 0, trusted: 0, blocked: 0 };
+
+  it('is told to update, and locks nothing, on a sheet of the tiling', async () => {
+    // An installed rutor from before this does not know where a new sheet's picture comes
+    // from. It would lock the cell and then fail at the render. A claim there has to say the
+    // source the client will draw from; a client that says none is refused before any row.
+    const asked = stubOutside(38);
+    expect(await claimCell(env.DB, klang, HBG, 47, 16, NOW, env)).toMatchObject({ ok: false, status: 426, code: 'update_needed' });
+    expect(await claimCell(env.DB, klang, HBG, 47, 16, NOW, env, 'open')).toMatchObject({ ok: false, status: 426, code: 'update_needed' });
+    expect(await rowCounts()).toEqual({ sheets: 0, cells: 0 });
+    expect(asked).toHaveLength(0);
+    // The same once the sheet has its row.
+    expect((await claimCell(env.DB, klang, HBG, 47, 16, NOW, env, 'google')).ok).toBe(true);
+    const ebba = { ...klang, github_id: 7, login: 'ebba' };
+    expect(await claimCell(env.DB, ebba, HBG, 48, 16, NOW, env)).toMatchObject({ ok: false, status: 426, code: 'update_needed' });
+    expect(await rowCounts()).toEqual({ sheets: 1, cells: 1 });
+  });
+
+  it('claims on a hand-made sheet as it always did', async () => {
+    await insertSheet({ cols: 1, rows: 1 });
+    await insertCells('goteborg-norr', 1, 1);
+    expect((await claimCell(env.DB, klang, 'goteborg-norr', 0, 0, NOW)).ok).toBe(true);
+  });
+
+  it('the route reads the source from the body, and refuses one that is not a source', async () => {
+    stubOutside(38);
+    const post = (body) => call(new Request('https://x/v1/claim', { method: 'POST', headers: { Authorization: 'Bearer t', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
+    const old = await post({ sheet: HBG, col: 47, row: 16 });
+    expect(old.status).toBe(426);
+    expect((await old.json()).error).toBe('update_needed');
+    const bad = await post({ sheet: HBG, col: 47, row: 16, kind: 'bing' });
+    expect(bad.status).toBe(400);
+    expect((await post({ sheet: HBG, col: 47, row: 16, kind: 'google' })).status).toBe(201);
   });
 });

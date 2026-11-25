@@ -405,6 +405,42 @@ class SourceFromTheServiceTests(_ServiceCase):
         self.assertIn(f"claimed: {NEW_SHEET} 3_4", out)
         self.assertEqual(len(self.claims()), 1)
 
+    def test_a_claim_says_the_source_it_will_draw_from(self) -> None:
+        # The service refuses a claim on a sheet of the tiling that names no source: that is
+        # how it tells this rutor from one installed before, which could not draw the cell.
+        self.put(_new_sheet())
+        with patch.object(google, "not_ready", return_value=None):
+            code, _out, err = self.run_cmd(["claim", NEW_SHEET, "3_4"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(bytes(self.claims()[-1]["body"])), {"sheet": NEW_SHEET, "col": 3, "row": 4, "kind": "google"})
+        # A sheet whose row says no source gets the one the code knows for it.
+        self.put(_new_sheet(id="goteborg-norr", kind=None, made="hand"))
+        code, _out, err = self.run_cmd(["claim", "goteborg-norr", "3_4"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(bytes(self.claims()[-1]["body"]))["kind"], "open")
+
+    def test_the_stand_in_refuses_a_claim_that_names_no_source_as_the_service_does(self) -> None:
+        from rutor import api
+
+        self.put(_new_sheet())
+        with self.assertRaises(RutorError) as caught:
+            api.post("/v1/claim", {"sheet": NEW_SHEET, "col": 3, "row": 4}, "test-token")
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("refused: update_needed", caught.exception.message)
+        cells = self.svc.state["cells"]
+        assert isinstance(cells, dict)
+        self.assertEqual(cells[f"{NEW_SHEET}/3_4"]["state"], "fri")
+
+    def test_a_sheet_that_has_no_row_yet_is_not_rendered(self) -> None:
+        # Before the first claim the service answers a sheet with a stand-in height. A picture
+        # drawn from it would lie some hundred pixels off. The claim makes the row.
+        self.put(_new_sheet(exists=False, ground_height=0, y_meters=6016))
+        with patch.object(commands, "render_cell", side_effect=AssertionError("a renderer was asked")):
+            code, out, err = self.run_cmd(["render", NEW_SHEET, "3_4"])
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("refused: not_claimed", err)
+        self.assertIn(f"rutor claim {NEW_SHEET} 3_4", err)
+
     def test_an_open_sheet_asks_nothing_of_google(self) -> None:
         self.put(_new_sheet(id="any-town", kind="open"))
         with patch.object(google, "not_ready", side_effect=AssertionError("google was asked")):
@@ -469,7 +505,11 @@ class ClaimAtTests(_ServiceCase):
             ],
         )
         self.assertEqual(self.asked(), ["/v1/place?lat=56.0465&lon=12.6945"])
-        self.assertEqual([json.loads(bytes(r["body"])) for r in self.claims()], [{"sheet": NEW_SHEET, "col": 47, "row": 16}])
+        # The claim says the source the cell will be drawn from: the service asks it on a new sheet.
+        self.assertEqual(
+            [json.loads(bytes(r["body"])) for r in self.claims()],
+            [{"sheet": NEW_SHEET, "col": 47, "row": 16, "kind": "google"}],
+        )
 
     def test_a_space_after_the_comma_and_a_southern_or_western_point_are_read(self) -> None:
         self.put_place()

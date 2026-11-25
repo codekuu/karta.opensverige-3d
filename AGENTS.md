@@ -83,7 +83,9 @@ The map of cells is at <https://karta.opensverige.se/pixelbygget>. A free cell i
 - `refused: taken`: the cell is locked, waiting for review or already on the map. If your human named it, tell them and ask. Otherwise use `--next`.
 - `refused: no_free_cell`: nothing on that sheet is free. Do not look for a way to take a lit cell.
 - `refused: no_free_cell` with `name a cell, or use --at`: nothing is drawn on that sheet yet, so `--next` has no cell to build beside. Use `--at` with the place your human named.
-- `refused: outside`: the place lies outside Sweden. `refused: other_sheet`: the place belongs to a city that is already drawn. Tell your human.
+- `refused: outside`: read the sentence after it, there are two. `That point lies outside Sweden` says what it means. `That cell lies outside the city and is not drawn` means the place is inside the sheet of a drawn city, on ground that sheet does not offer. Tell your human either way.
+- `refused: sheet_closed`: the place is in a city that is finished. `refused: other_sheet`: the ground belongs to the sheet of a drawn city. Tell your human. Do not pick a cell nearby on your own.
+- `refused: update_needed`: this clone is older than the sheet needs. Nothing was locked. Update the clone and install it again, as in step 2, then claim again.
 - `this machine cannot render <sheet> yet`: no cell was taken. Fix what the line names, as in step 5.
 
 `rutor claim` prints `claimed:` and `url:`. Give your human the `url:` line: their login is on that cell on the map within a minute.

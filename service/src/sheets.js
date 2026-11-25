@@ -139,6 +139,7 @@ export const seedRoute = requireAdmin(async (request, env, ctx, params, now, adm
 });
 
 const GRID_CACHE = { 'Cache-Control': 'public, max-age=60' };
+const NOT_KEPT = { 'Cache-Control': 'no-store' };
 
 /**
  * Every sheet with how many cells are live (done) and how many count at all (total:
@@ -174,7 +175,9 @@ export async function getGrid(db, sheetId, pipeline = '') {
   const sheet = await db.prepare('SELECT * FROM sheets WHERE id = ?').bind(sheetId).first();
   if (!sheet) {
     const tile = sheetById(sheetId);
-    return tile ? { sheet: gridRow(tile, pipeline), cells: [] } : null;
+    // exists false: this is not a row. Its height and picture top are stand-ins until the
+    // first claim asks for the real height, so nothing may be drawn from it.
+    return tile ? { sheet: { ...gridRow(tile, pipeline), exists: false }, cells: [] } : null;
   }
   const { results } = await db
     .prepare('SELECT col, row, state, owner_login, updated_at, removed_at FROM cells WHERE sheet = ? ORDER BY row, col')
@@ -207,7 +210,9 @@ export async function citiesRoute(request, env) {
 export async function gridRoute(request, env, ctx, params) {
   const grid = await getGrid(env.DB, params.sheet, env.PIPELINE_NOW);
   if (!grid) return error(404, 'no_sheet', `No sheet named ${params.sheet}.`);
-  return json(200, grid, GRID_CACHE);
+  // A sheet with no row is never kept, here or on the way: the claim that makes the row
+  // changes the answer, and the renderer reads it seconds later.
+  return json(200, grid, grid.sheet.exists === false ? NOT_KEPT : GRID_CACHE);
 }
 
 /**

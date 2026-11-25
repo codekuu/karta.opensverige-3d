@@ -101,6 +101,8 @@ rutor claim --at 56.0465,12.6945
 
 `rutor preflight` checks Python, the NVIDIA card, the disk, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login. With `--sheet stockholm-norr` it also checks what that sheet's source needs: Node, the Google renderer and the Cesium ion token. Do not claim, render or redraw when any line says `missing`. `rutor claim` refuses on a Google sheet until those three are in place, so no cell is locked that the machine cannot render.
 
+`rutor render` refuses a sheet nobody has claimed on (`refused: not_claimed`): claim the cell first. A claim answered `refused: update_needed` means this clone is older than the sheet needs: update it and install again.
+
 Exit codes: 0 done, 1 bad input, 2 refused by the service, 3 something missing on this machine, 4 network, or a service that is busy or down (try again in a minute), 5 the redraw failed the quality check, 6 the SE3 price is high (try later).
 
 ## Build from a page

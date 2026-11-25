@@ -108,7 +108,7 @@ describe('GET /v1/place', () => {
     // The tiling's own sheet over the same ground is refused too.
     const tile = sheetAt(55.605, 13.0);
     const over = nearestCell(tile, 55.605, 13.0);
-    expect(await claimCell(env.DB, klang, tile.id, over.col, over.row, NOW, env)).toMatchObject({ ok: false, status: 409, code: 'other_sheet' });
+    expect(await claimCell(env.DB, klang, tile.id, over.col, over.row, NOW, env, 'google')).toMatchObject({ ok: false, status: 409, code: 'other_sheet' });
   });
 
   it('is 404 outside for Oslo', async () => {

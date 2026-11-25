@@ -152,16 +152,18 @@ def pick_next(sheet: dict[str, object], cells: list[object]) -> tuple[int, int]:
     return pool[0]
 
 
-def _refuse_unready(sheet: dict[str, object], sheet_id: str) -> None:
-    """Stop before a claim on a sheet this machine cannot render.
+def _source_ready(sheet: dict[str, object], sheet_id: str) -> str:
+    """The source the sheet is drawn from, once this machine is known to be able to render it.
 
     Without Node, the renderer and a token Cesium ion accepts, a Google render fails with the
     cell already taken from everyone else. A sheet with no source decided raises here too.
     """
-    if kind_of(sheet) == "google":
+    kind = kind_of(sheet)
+    if kind == "google":
         problem = google.not_ready()
         if problem is not None:
             raise environment(f"this machine cannot render {sheet_id} yet: {problem}")
+    return kind
 
 
 def cell_url(sheet: str, col: int, row: int) -> str:
@@ -215,20 +217,23 @@ def cmd_claim(args: argparse.Namespace) -> int:
         sheet, col, row = _place(lat, lon)
         sheet_id = str(sheet.get("id"))
         print(f"place: {sheet_id} {col}_{row}")
-        _refuse_unready(sheet, sheet_id)
+        kind = _source_ready(sheet, sheet_id)
         token = require_token()
     else:
         sheet_id = args.sheet
         _status, body = api.get(f"/v1/grid/{sheet_id}", token=config.read_token())
         payload = _object(body, "object")
         sheet = _object(payload.get("sheet"), "sheet")
-        _refuse_unready(sheet, sheet_id)
+        kind = _source_ready(sheet, sheet_id)
         token = require_token()
         if args.next:
             col, row = pick_next(sheet, _rows(payload.get("cells"), "cells"))
         else:
             col, row = parse_cell(str(args.cell))
-    _status, claimed = api.post("/v1/claim", {"sheet": sheet_id, "col": col, "row": row}, token)
+    # The claim says the source this rutor will draw from. On a sheet of the tiling the service
+    # refuses a claim that names none: that is how it stops a rutor from before, which would
+    # lock the cell and then not know how to draw it.
+    _status, claimed = api.post("/v1/claim", {"sheet": sheet_id, "col": col, "row": row, "kind": kind}, token)
     expires = _object(claimed, "object").get("expires_at")
     print(f"claimed: {sheet_id} {col}_{row} expires {expires}")
     print(f"url: {cell_url(sheet_id, col, row)}")
@@ -506,6 +511,10 @@ def cmd_render(args: argparse.Namespace) -> int:
     token = require_token()
     col, row = parse_cell(args.cell)
     sheet = _sheet_body(token, args.sheet)
+    if sheet.get("exists") is False:
+        # Nobody has claimed on this sheet, so it has no row: the height and the picture's top
+        # in this answer are stand-ins, and a cell drawn from them would lie off its place.
+        raise refused(f"refused: not_claimed: nothing is claimed on {args.sheet} yet. Run rutor claim {args.sheet} {col}_{row} first.")
     out = config.work_dir(args.sheet) / f"{col}_{row}.src.png"
     kind = kind_of(sheet)
     if kind == "google":
