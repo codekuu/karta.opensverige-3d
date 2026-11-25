@@ -770,9 +770,11 @@ class Builder:
                 # An upload takes seconds, and ending it halfway leaves a cell that the
                 # service may have and the page does not know about. It is given a while
                 # to finish by itself.
-                uploading = self._phase == "upload"
-                self._finishing = uploading
                 run = self._job_run
+                # Only while the upload itself is out. The lock being asked back after an
+                # upload that failed is the same phase, and is not an upload finishing.
+                uploading = self._phase == "upload" and run is not None and not self._asked_back
+                self._finishing = uploading
             else:
                 uploading = False
                 run = None
@@ -860,6 +862,11 @@ class Builder:
             elif self._stop_asked:
                 self._phase = "stopped"
                 self._job_problem = ""
+                if self._adopted:
+                    # A lock from before was found as the stop came, and the page will not
+                    # say so. It is forgotten, so that no later press gives it back unasked.
+                    self._held = None
+                    self._adopted = False
             else:
                 self._phase = "failed"
                 self._job_problem = problem

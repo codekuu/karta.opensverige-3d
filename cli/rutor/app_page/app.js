@@ -564,7 +564,8 @@ function steg7(s) {
   visa("slut-igen", slut && !["taken", "daily", "old_app"].includes(j.problem));
   el("slut-igen").disabled = upptagen;
   // Nor another cell when the day's limit is reached: it would be drawn and then refused.
-  visa("slut-annan", slut && j.problem !== "daily");
+  // Nor when a lock from before stands in the way: it would stand in the way of that cell too.
+  visa("slut-annan", slut && !["daily", "old_lock"].includes(j.problem));
   visa("slut-kopiera", j.phase === "failed");
 
   if (fraga) {

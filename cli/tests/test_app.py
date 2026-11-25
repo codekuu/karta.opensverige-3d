@@ -2743,7 +2743,7 @@ class PageFilesTests(unittest.TestCase):
         # A stop during the upload is said to wait for it, and a lock from before is named.
         self.assertIn("Skickar in klart först.", script)
         self.assertIn('"Låst sedan förut: " + j.old', script)
-        self.assertIn('slut && j.problem !== "daily"', script)
+        self.assertIn('slut && !["daily", "old_lock"].includes(j.problem)', script)
         for said in ("bekostnad och risk", "för forskning och utvärdering, inte kommersiellt", "Google kan stänga din åtkomst"):
             self.assertIn(said, page)
         # No "try again" where it would get the same answer.

@@ -499,3 +499,19 @@ class SecondRoundDiskTests(DiskForAHalfDoneFetchTests):
             patch("rutor.app_install.left_to_fetch_gb", return_value=left),
         ):
             return app.machine()
+
+
+class ThirdRoundTests(_Jobs):
+    def test_a_lock_found_as_a_stop_came_is_not_given_back_unasked(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", ["error: refused: too_many_locks: no"], code=2, hold=True)
+        builder.choose(SHEET, 74, 20)
+        with patch("rutor.app.my_locks", return_value=[(SHEET, "70_10")]):
+            builder.build()
+            base.wait_until(lambda: builder.job_state()["phase"] == "claim" and len(fake.runs) == 2)
+            # The stop comes while the claim is out. The fake ends as a real refused claim would.
+            with builder._lock:
+                builder._stop_asked = True
+            fake.runs[-1].release()
+            state = self._ended(builder)
+        self.assertEqual((state["phase"], state["held"], state["old"]), ("stopped", False, ""))
