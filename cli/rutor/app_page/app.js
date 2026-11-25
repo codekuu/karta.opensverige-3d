@@ -559,7 +559,9 @@ function steg7(s) {
   visa("rita-rad", fraga && dyrt);
   visa("rita-avbryt", pagar);
   el("rita-avbryt").disabled = upptagen;
-  visa("slut-igen", slut && j.problem !== "taken");
+  // No "try again" where trying again gets the same answer: the cell is someone else's, the
+  // day's limit is reached, or the app is too old for the sheet.
+  visa("slut-igen", slut && !["taken", "daily", "old_app"].includes(j.problem));
   el("slut-igen").disabled = upptagen;
   visa("slut-annan", slut);
   visa("slut-kopiera", j.phase === "failed");

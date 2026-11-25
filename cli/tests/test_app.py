@@ -2734,6 +2734,8 @@ class PageFilesTests(unittest.TestCase):
             self.assertIn(said, page)
         # A fetch whose bytes did not match can be tried again: the bad file is gone.
         self.assertNotIn('i.problem === "changed"', script)
+        # No "try again" where it would get the same answer.
+        self.assertIn('!["taken", "daily", "old_app"].includes(j.problem)', script)
         # A cell that waits is said to wait, and where it shows.
         self.assertIn("Tills dess syns den som Väntar.", page)
 
