@@ -89,6 +89,14 @@ Today's free cells are on `stockholm-norr`, which needs Node 22, `npm ci` in `cl
 
 `rutor claim` prints the cell you got and a `url:` line: the cell on the map, with your login on it within a minute. Use that `col_row` in render, redraw and upload. `rutor status` shows your open locks, `rutor whoami` your login and whether you are trusted.
 
+A cell does not have to lie in a city someone has opened. A cell may lie anywhere in Sweden where Google has 3D tiles and the map is not drawn yet:
+
+```bash
+rutor claim --at 56.0465,12.6945
+```
+
+`--at` takes a latitude and a longitude in decimal degrees. The service says which sheet and cell that place belongs to, the command prints it as `place: <sheet> <col>_<row>`, and then claims that cell. A place nobody has drawn near gets a sheet of its own, named like `se-n5602-e1262`. Such a sheet is drawn from Google's 3D tiles, as `stockholm-norr` is, and needs the same three things. After the first cell, `rutor claim <sheet> <col>_<row>` and `rutor claim <sheet> --next` work on it as on any sheet: `--next` takes a free cell beside one that is already taken. A place inside a city that is already drawn belongs to that city's sheet, and its cell there may be taken or not offered. Where Google has no 3D buildings the picture comes out flat: look at the render before the redraw, and release the cell if there is nothing to draw.
+
 `rutor redraw --wait-for-cheap` runs the SE3 price check first. While the price is high it exits 6 and you keep your lock; run it again after the time it prints. Without the flag the price check is advice only: `python -m rutor.se3_price`.
 
 `rutor preflight` checks Python, the NVIDIA card, the disk, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login. With `--sheet stockholm-norr` it also checks what that sheet's source needs: Node, the Google renderer and the Cesium ion token. Do not claim, render or redraw when any line says `missing`. `rutor claim` refuses on a Google sheet until those three are in place, so no cell is locked that the machine cannot render.

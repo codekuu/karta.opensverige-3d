@@ -433,3 +433,176 @@ class SourceFromTheServiceTests(_ServiceCase):
         code, out, _err = self.run_cmd(["preflight", "--machine", "--sheet", "no-such-sheet"])
         self.assertEqual(code, 3)
         self.assertIn("check: sheet missing ", out)
+
+
+class ClaimAtTests(_ServiceCase):
+    """rutor claim --at: a point on the earth, and the service says which sheet and cell it is."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ready = patch.object(google, "not_ready", return_value=None)
+        ready.start()
+        self.addCleanup(ready.stop)
+
+    def claims(self) -> list[dict[str, object]]:
+        return [r for r in self.svc.requests if r.get("method") == "POST" and r.get("path") == "/v1/claim"]
+
+    def asked(self) -> list[str]:
+        return [str(r.get("path")) for r in self.svc.requests if str(r.get("path")).startswith("/v1/place")]
+
+    def put_place(self, col: int = 47, row: int = 16, state: str = "fri", **sheet: object) -> None:
+        row_of_sheet = _new_sheet(**sheet)
+        self.svc.state["sheets"] = {str(row_of_sheet["id"]): row_of_sheet}
+        self.svc.state["cells"] = {}
+        self.svc.state["place"] = {"sheet": {**row_of_sheet, "exists": False}, "col": col, "row": row, "state": state}
+
+    def test_a_point_is_claimed_as_the_cell_the_service_says_it_is(self) -> None:
+        self.put_place()
+        code, out, err = self.run_cmd(["claim", "--at", "56.0465,12.6945"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(
+            out.splitlines(),
+            [
+                f"place: {NEW_SHEET} 47_16",
+                f"claimed: {NEW_SHEET} 47_16 expires 2026-11-19T12:00:00Z",
+                f"url: https://karta.opensverige.se/pixelbygget#{NEW_SHEET}/47_16",
+            ],
+        )
+        self.assertEqual(self.asked(), ["/v1/place?lat=56.0465&lon=12.6945"])
+        self.assertEqual([json.loads(bytes(r["body"])) for r in self.claims()], [{"sheet": NEW_SHEET, "col": 47, "row": 16}])
+
+    def test_a_space_after_the_comma_and_a_southern_or_western_point_are_read(self) -> None:
+        self.put_place()
+        code, _out, err = self.run_cmd(["claim", "--at", "56.0465, 12.6945"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.asked(), ["/v1/place?lat=56.0465&lon=12.6945"])
+        code, _out, _err = self.run_cmd(["claim", "--at=-33.9,-70.6"])
+        self.assertEqual(self.asked()[-1], "/v1/place?lat=-33.9&lon=-70.6")
+
+    def test_a_malformed_place_exits_1_and_asks_nobody(self) -> None:
+        self.put_place()
+        for text in ("56.0465", "56.0465;12.6945", "abc,def", "56.0465,12.6945,3", "1e2,12", ",", "", "91,12", "56,181", "56.,12", "0x38,12", "56.0465 12.6945"):
+            with self.subTest(at=text):
+                code, out, err = self.run_cmd(["claim", f"--at={text}"])
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("--at", err)
+        self.assertEqual(self.svc.requests, [])
+
+    def test_a_place_and_a_sheet_together_exit_1(self) -> None:
+        self.put_place()
+        for argv in (
+            ["claim", NEW_SHEET, "--at", "56.0465,12.6945"],
+            ["claim", NEW_SHEET, "47_16", "--at", "56.0465,12.6945"],
+            ["claim", "--at", "56.0465,12.6945", "--next"],
+            ["claim"],
+            ["claim", NEW_SHEET],
+        ):
+            with self.subTest(argv=argv):
+                code, out, _err = self.run_cmd(argv)
+                self.assertEqual((code, out), (1, ""))
+        self.assertEqual(self.svc.requests, [])
+
+    def test_a_point_outside_sweden_is_refused_and_nothing_is_claimed(self) -> None:
+        code, out, err = self.run_cmd(["claim", "--at", "59.9139,10.7522"])
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("refused: outside", err)
+        self.assertEqual(self.claims(), [])
+
+    def test_a_place_this_machine_cannot_render_is_not_claimed(self) -> None:
+        self.put_place()
+        with patch.object(google, "not_ready", return_value="CESIUM_ION_TOKEN is not set."):
+            code, out, err = self.run_cmd(["claim", "--at", "56.0465,12.6945"])
+        self.assertEqual(code, 3)
+        # The place is said first, so the person knows which sheet the message is about.
+        self.assertEqual(out, f"place: {NEW_SHEET} 47_16\n")
+        self.assertIn(f"this machine cannot render {NEW_SHEET} yet: CESIUM_ION_TOKEN is not set", err)
+        self.assertEqual(self.claims(), [])
+
+    def test_a_place_that_is_taken_says_so_as_any_claim_does(self) -> None:
+        self.put_place(state="last")
+        cells = self.svc.state["cells"]
+        assert isinstance(cells, dict)
+        cells[f"{NEW_SHEET}/47_16"] = _cell(47, 16, "last", "ebba")
+        code, out, err = self.run_cmd(["claim", "--at", "56.0465,12.6945"])
+        self.assertEqual(code, 2)
+        self.assertIn("refused: taken:", err)
+
+    def test_an_answer_that_names_no_cell_is_not_claimed(self) -> None:
+        for broken in (
+            {"col": 47, "row": 16, "state": "fri"},
+            {"sheet": _new_sheet(id="Not A Sheet"), "col": 47, "row": 16, "state": "fri"},
+            {"sheet": _new_sheet(), "col": "47", "row": 16, "state": "fri"},
+            {"sheet": _new_sheet(), "col": 47, "row": -1, "state": "fri"},
+            {"sheet": _new_sheet(), "col": True, "row": 16, "state": "fri"},
+        ):
+            with self.subTest(broken=broken):
+                self.svc.state["place"] = broken
+                code, out, _err = self.run_cmd(["claim", "--at", "56.0465,12.6945"])
+                self.assertEqual((code, out), (4, ""))
+        self.assertEqual(self.claims(), [])
+
+    def test_a_place_needs_a_login_to_be_claimed_but_not_to_be_found(self) -> None:
+        self.put_place()
+        os.remove(os.path.join(self.tmp.name, "token"))
+        code, out, err = self.run_cmd(["claim", "--at", "56.0465,12.6945"])
+        self.assertEqual(code, 3)
+        self.assertEqual(out, f"place: {NEW_SHEET} 47_16\n")
+        self.assertIn("not logged in: run rutor login", err)
+
+
+class NextOnTheTilingTests(_ServiceCase):
+    """--next on a sheet of the tiling: its free cells have no row, so there is no list to pick from."""
+
+    SHEET: dict[str, object] = {"id": NEW_SHEET, "cols": 61, "rows": 47, "made": "grid"}
+
+    def test_it_picks_a_free_neighbour_of_a_cell_that_is_drawn(self) -> None:
+        cells: list[object] = [[30, 23, "live", "ebba", ""]]
+        self.assertEqual(commands.pick_next(self.SHEET, cells), (30, 22))
+
+    def test_a_neighbour_that_is_taken_is_passed_over(self) -> None:
+        cells: list[object] = [[30, 23, "live", "ebba", ""], [30, 22, "last", "klang", ""], [29, 23, "vantar", "klang", ""]]
+        self.assertEqual(commands.pick_next(self.SHEET, cells), (31, 23))
+
+    def test_a_cell_that_was_given_back_is_free(self) -> None:
+        cells: list[object] = [[30, 23, "live", "ebba", ""], [30, 22, "fri", None, ""]]
+        self.assertEqual(commands.pick_next(self.SHEET, cells), (30, 22))
+
+    def test_it_stays_inside_the_sheet(self) -> None:
+        cells: list[object] = [[0, 0, "live", "ebba", ""]]
+        self.assertEqual(commands.pick_next(self.SHEET, cells), (1, 1))
+        cells = [[60, 46, "last", "ebba", ""]]
+        self.assertEqual(commands.pick_next(self.SHEET, cells), (59, 45))
+
+    def test_beside_a_cell_on_the_map_comes_before_beside_a_locked_one(self) -> None:
+        cells: list[object] = [[30, 23, "last", "ebba", ""], [10, 10, "live", "ebba", ""]]
+        col, row = commands.pick_next(self.SHEET, cells)
+        self.assertLessEqual(max(abs(col - 10), abs(row - 10)), 1)
+
+    def test_a_sheet_nobody_has_drawn_on_is_refused_with_what_to_do(self) -> None:
+        with self.assertRaises(RutorError) as caught:
+            commands.pick_next(self.SHEET, [])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("refused: no_free_cell", caught.exception.message)
+        self.assertIn("name a cell, or use --at", caught.exception.message)
+
+    def test_a_lone_cell_that_was_given_back_counts_as_drawn(self) -> None:
+        self.assertEqual(commands.pick_next(self.SHEET, [[12, 40, "fri", None, ""]]), (13, 39))
+        self.assertEqual(commands.pick_next(self.SHEET, [[30, 23, "fri", None, ""]]), (30, 23))
+
+    def test_a_hand_made_sheet_picks_as_it_always_did(self) -> None:
+        hand = {"id": "goteborg-norr", "cols": 5, "rows": 5}
+        cells: list[object] = [[2, 2, "fri", None, ""], [0, 0, "live", "g", ""], [0, 1, "fri", None, ""]]
+        self.assertEqual(commands.pick_next(hand, cells), (0, 1))
+        with self.assertRaises(RutorError) as caught:
+            commands.pick_next(hand, [[0, 0, "live", "g", ""]])
+        self.assertNotIn("--at", caught.exception.message)
+
+    def test_the_command_claims_the_neighbour(self) -> None:
+        patcher = patch.object(google, "not_ready", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.svc.state["sheets"] = {NEW_SHEET: _new_sheet()}
+        self.svc.state["cells"] = {f"{NEW_SHEET}/30_23": _cell(30, 23, "live", "ebba")}
+        code, out, err = self.run_cmd(["claim", NEW_SHEET, "--next"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"claimed: {NEW_SHEET} 30_22 expires", out)

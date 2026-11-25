@@ -77,10 +77,13 @@ No yes, no login.
 The map of cells is at <https://karta.opensverige.se/pixelbygget>. A free cell is marked `Ledig` there and can be clicked. `Tänd` is a cell that is already on the map.
 
 - Your human named a cell: `rutor claim <sheet> <col>_<row>`.
+- Your human named a place that is not drawn yet, a town or an address: find its latitude and longitude and run `rutor claim --at <lat>,<lon>`, for example `rutor claim --at 56.0465,12.6945`. It prints `place: <sheet> <col>_<row>`, the sheet and cell that place belongs to, and then claims it. A cell may lie anywhere in Sweden where Google has 3D tiles. A new place is drawn from Google's tiles, so everything steps 3 and 5 say about `stockholm-norr` holds for it: the preflight for `stockholm-norr` checks the same three things, and `rutor claim --at` asks them again before it takes a cell.
 - Your human said "any", or left it to you: `rutor claim stockholm-norr --next`.
 - It is unclear how many cells: one. Ask before you build more.
 - `refused: taken`: the cell is locked, waiting for review or already on the map. If your human named it, tell them and ask. Otherwise use `--next`.
 - `refused: no_free_cell`: nothing on that sheet is free. Do not look for a way to take a lit cell.
+- `refused: no_free_cell` with `name a cell, or use --at`: nothing is drawn on that sheet yet, so `--next` has no cell to build beside. Use `--at` with the place your human named.
+- `refused: outside`: the place lies outside Sweden. `refused: other_sheet`: the place belongs to a city that is already drawn. Tell your human.
 - `this machine cannot render <sheet> yet`: no cell was taken. Fix what the line names, as in step 5.
 
 `rutor claim` prints `claimed:` and `url:`. Give your human the `url:` line: their login is on that cell on the map within a minute.

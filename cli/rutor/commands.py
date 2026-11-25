@@ -8,6 +8,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -115,6 +116,20 @@ def pick_next(sheet: dict[str, object], cells: list[object]) -> tuple[int, int]:
             parsed.append((col, row, state))
     by_pos = {(col, row): state for col, row, state in parsed}
     free = [(col, row) for col, row, state in parsed if state == "fri"]
+    if sheet.get("made") == "grid":
+        # A sheet of the tiling lists only the cells someone has taken: every other cell is
+        # free and has no row. "Next" is then a free cell beside one that has a row, so what
+        # is drawn grows outwards from where someone started.
+        around = {(col + d_col, row + d_row) for col, row in by_pos for d_col in (-1, 0, 1) for d_row in (-1, 0, 1)}
+        free = sorted(
+            (col, row)
+            for col, row in around
+            if 0 <= col < cols and 0 <= row < rows and by_pos.get((col, row), "fri") == "fri"
+        )
+        if not free:
+            raise refused(
+                f"refused: no_free_cell: nothing is drawn on {sheet.get('id')} yet, so there is no cell to build beside: name a cell, or use --at."
+            )
     if not free:
         # Every cell here is on the map already, or nobody can build what is left yet.
         raise refused(f"refused: no_free_cell: no cell on {sheet.get('id')} is free. rutor cities shows where there are free cells.")
@@ -154,29 +169,69 @@ def cell_url(sheet: str, col: int, row: int) -> str:
     return f"{config.MAP_URL}#{sheet}/{col}_{row}"
 
 
+_DEGREES = r"-?\d{1,3}(?:\.\d{1,9})?"
+_POINT = re.compile(rf"\s*({_DEGREES})\s*,\s*({_DEGREES})\s*")
+
+
+def parse_point(text: str) -> tuple[str, str]:
+    """Latitude and longitude out of `--at`, as the digits the person wrote."""
+    found = _POINT.fullmatch(text)
+    if found is None or abs(float(found.group(1))) > 90 or abs(float(found.group(2))) > 180:
+        raise bad_input(f"--at must be latitude,longitude in decimal degrees, like 56.0465,12.6945, not {text!r}")
+    return found.group(1), found.group(2)
+
+
+def _place(lat: str, lon: str) -> tuple[dict[str, object], int, int]:
+    """The sheet and cell the service says a point belongs to. Public: it needs no login."""
+    _status, body = api.get(f"/v1/place?lat={lat}&lon={lon}", token=config.read_token())
+    payload = _object(body, "object")
+    sheet = _object(payload.get("sheet"), "sheet")
+    sheet_id, col, row = sheet.get("id"), payload.get("col"), payload.get("row")
+    if not isinstance(sheet_id, str) or config.SHEET_ID.fullmatch(sheet_id) is None:
+        raise network("service answer names no sheet")
+    for value in (col, row):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise network("service answer names no cell")
+    assert isinstance(col, int) and isinstance(row, int)
+    return sheet, col, row
+
+
 def cmd_claim(args: argparse.Namespace) -> int:
-    if bool(args.next) == bool(args.cell):
-        raise bad_input("Pass a cell like 64_59, or --next, and not both.")
+    at = getattr(args, "at", None)
+    if at is not None:
+        if args.sheet or args.cell or args.next:
+            raise bad_input("Pass a place with --at, or a sheet and a cell, and not both.")
+        lat, lon = parse_point(at)
+    elif not args.sheet or bool(args.next) == bool(args.cell):
+        raise bad_input("Pass a sheet and a cell like 64_59, or a sheet and --next, or a place with --at.")
     # A lock holds the cell for 48 hours, so a machine that cannot build one does not take one.
     # The machine is asked before the login: on one that cannot build, "log in" is no next step.
     problem = _gpu_missing()
     if problem is not None:
         raise environment(f"this machine cannot build a cell: {problem}")
-    # The sheet's row says which source it is drawn from. The grid is public, so this needs no
-    # login, and a sheet with no source decided stops here with nothing claimed.
-    _status, body = api.get(f"/v1/grid/{args.sheet}", token=config.read_token())
-    payload = _object(body, "object")
-    sheet = _object(payload.get("sheet"), "sheet")
-    _refuse_unready(sheet, args.sheet)
-    token = require_token()
-    if args.next:
-        col, row = pick_next(sheet, _rows(payload.get("cells"), "cells"))
+    # The sheet's row says which source it is drawn from. The place and the grid are public, so
+    # this needs no login, and a sheet with no source decided stops here with nothing claimed.
+    if at is not None:
+        sheet, col, row = _place(lat, lon)
+        sheet_id = str(sheet.get("id"))
+        print(f"place: {sheet_id} {col}_{row}")
+        _refuse_unready(sheet, sheet_id)
+        token = require_token()
     else:
-        col, row = parse_cell(str(args.cell))
-    _status, claimed = api.post("/v1/claim", {"sheet": args.sheet, "col": col, "row": row}, token)
+        sheet_id = args.sheet
+        _status, body = api.get(f"/v1/grid/{sheet_id}", token=config.read_token())
+        payload = _object(body, "object")
+        sheet = _object(payload.get("sheet"), "sheet")
+        _refuse_unready(sheet, sheet_id)
+        token = require_token()
+        if args.next:
+            col, row = pick_next(sheet, _rows(payload.get("cells"), "cells"))
+        else:
+            col, row = parse_cell(str(args.cell))
+    _status, claimed = api.post("/v1/claim", {"sheet": sheet_id, "col": col, "row": row}, token)
     expires = _object(claimed, "object").get("expires_at")
-    print(f"claimed: {args.sheet} {col}_{row} expires {expires}")
-    print(f"url: {cell_url(args.sheet, col, row)}")
+    print(f"claimed: {sheet_id} {col}_{row} expires {expires}")
+    print(f"url: {cell_url(sheet_id, col, row)}")
     return 0
 
 
@@ -815,9 +870,14 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
         help="lock one cell",
         description="Lock one free cell for 48 hours. Refuses on a machine that cannot build or render it, before anything is locked.",
     )
-    claim.add_argument("sheet", help="the sheet, such as stockholm-norr")
+    claim.add_argument("sheet", nargs="?", help="the sheet, such as stockholm-norr")
     claim.add_argument("cell", nargs="?", help="the cell as col_row, such as 74_20")
     claim.add_argument("--next", action="store_true", help="take the free cell beside the map that is nearest the middle of the sheet")
+    claim.add_argument(
+        "--at",
+        metavar="LAT,LON",
+        help="take the cell at this place, such as 56.0465,12.6945: the service says which sheet and cell it is. Instead of a sheet and a cell",
+    )
     claim.set_defaults(func=cmd_claim)
 
     release = sub.add_parser("release", help="give a lock back")

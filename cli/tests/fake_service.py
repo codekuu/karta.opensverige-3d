@@ -3,6 +3,11 @@
 `state` holds `sheets`, `cells` keyed `sheet/col_row`, `users`, plus `queue`,
 `inbox` and `user` for the routes the CLI calls. `fail_next_with` answers the
 next request with a fixed status and body.
+
+`state["place"]` is what GET /v1/place answers, whatever point is asked: a dict
+with `sheet`, `col`, `row` and `state`. Without it every point lies outside.
+A sheet whose row says `made: "grid"` has free cells with no row, as in the
+service: a claim inside its size makes the cell.
 """
 
 from __future__ import annotations
@@ -87,6 +92,11 @@ class FakeService:
             return _json(200, {"sheets": list(_maps(self.state.get("sheets")).values())})
         if method == "GET" and head == "grid" and len(parts) == 3:
             return self._grid(parts[2])
+        if method == "GET" and head == "place" and len(parts) == 2:
+            place = _as_dict(self.state.get("place"))
+            if place is None:
+                return _error(404, "outside", "That point lies outside Sweden.")
+            return _json(200, place)
         if method == "GET" and head == "me" and len(parts) == 2:
             denied = _auth(headers)
             if denied is not None:
@@ -164,6 +174,12 @@ class FakeService:
             return _error(403, "sheet_closed", "That sheet is not open for claims.")
         cells = _maps(self.state.get("cells"))
         cell = cells.get(f"{sheet_id}/{col}_{row}")
+        if cell is None and sheet.get("made") == "grid" and _inside(sheet, col, row):
+            # A sheet of the tiling: the first claim on a cell makes its row.
+            cell = {"col": col, "row": row, "state": "fri", "login": None, "updated": "", "expires_at": None}
+            stored = self.state.get("cells")
+            if isinstance(stored, dict):
+                stored[f"{sheet_id}/{col}_{row}"] = cell
         if cell is None:
             return _error(404, "no_cell", "No such cell.")
         if cell.get("state") == "ute":
@@ -241,6 +257,11 @@ def _maps(value: object) -> dict[str, dict[str, object]]:
         if isinstance(key, str) and isinstance(item, dict):
             out[key] = item
     return out
+
+
+def _inside(sheet: dict[str, object], col: int, row: int) -> bool:
+    cols, rows = sheet.get("cols"), sheet.get("rows")
+    return isinstance(cols, int) and isinstance(rows, int) and 0 <= col < cols and 0 <= row < rows
 
 
 def _user(state: dict[str, object]) -> dict[str, object]:
