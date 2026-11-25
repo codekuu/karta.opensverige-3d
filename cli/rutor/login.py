@@ -33,8 +33,8 @@ TERMS = "\n".join(
         '6. Your GitHub login is shown publicly on your cells, with the time each cell last changed. Open an issue to have it removed.',
         '7. The login asks GitHub for no permissions (an empty scope). The service uses your token only to ask GitHub who you are, and does not store it.',
         "8. The redraw model is under the Qwen Research License: non-commercial research and evaluation only. You download and run it under that license yourself. The LoRA is Apache 2.0, and its model card says it was trained on renders of Google's 3D tiles.",
-        "9. goteborg-norr is drawn from open data: Göteborgs Stad's orthophoto and terrain model (CC0) and OpenStreetMap (© OpenStreetMap contributors, ODbL).",
-        "10. stockholm-norr is drawn from Google's 3D tiles through your own Cesium ion account, whose terms bind you, not this project. Google's Map Tiles policy does not allow deriving new content from its tiles: read it and decide for yourself. Google can close your access and ask for those cells to be taken down.",
+        "9. A sheet with open data as its source is drawn from a public orthophoto and terrain model and from OpenStreetMap (© OpenStreetMap contributors, ODbL). Today that is goteborg-norr alone: Göteborgs Stad's orthophoto and terrain model (CC0).",
+        "10. Every other sheet, stockholm-norr among them, is drawn from Google's 3D tiles through your own Cesium ion account, whose terms bind you, not this project. Google's Map Tiles policy does not allow deriving new content from its tiles: read it and decide for yourself. Google can close your access and ask for those cells to be taken down.",
     ]
 )
 

@@ -2971,6 +2971,9 @@ class PageFilesTests(unittest.TestCase):
         # too: unpaid and at their own risk, their name is shown, and the choice about Google.
         for said in ("Frivilligt och obetalt", "Ditt GitHub-namn visas öppet", "Googles regler tillåter inte det", "Den engelska texten är den som gäller"):
             self.assertIn(said, page)
+        # The line about Google is about the source, not about Stockholm: a cell may lie anywhere.
+        self.assertIn("Allt utom Göteborg ritas från Googles 3D-kartor, genom ditt eget Cesium-konto.", page)
+        self.assertNotIn("Stockholm ritas från Googles", page)
         # A fetch whose bytes did not match can be tried again: the bad file is gone.
         self.assertNotIn('i.problem === "changed"', script)
         # A stop during the upload is said to wait for it, and a lock from before is named.

@@ -132,6 +132,29 @@ class LoginTests(unittest.TestCase):
         # Short enough to read before saying yes.
         self.assertLessEqual(len(TERMS.splitlines()), 10)
 
+    def test_the_terms_name_the_source_of_a_sheet_not_the_city(self) -> None:
+        # A cell may lie in any town now. A line that names stockholm-norr alone would tell a
+        # builder in Helsingborg nothing about Google's tiles, which their cell is drawn from.
+        lines = TERMS.splitlines()
+        self.assertTrue(lines[8].startswith("9. A sheet with open data as its source is drawn from"), lines[8])
+        self.assertIn("goteborg-norr", lines[8])
+        self.assertIn("(CC0)", lines[8])
+        self.assertTrue(
+            lines[9].startswith(
+                "10. Every other sheet, stockholm-norr among them, is drawn from Google's 3D tiles through your own Cesium ion account, whose terms bind you, not this project."
+            ),
+            lines[9],
+        )
+        # What line 10 said about Google's policy stands, word for word.
+        self.assertTrue(
+            lines[9].endswith(
+                "Google's Map Tiles policy does not allow deriving new content from its tiles: read it and decide for yourself. Google can close your access and ask for those cells to be taken down."
+            ),
+            lines[9],
+        )
+        written = (Path(__file__).resolve().parents[2] / "TERMS.md").read_text(encoding="utf-8")
+        self.assertIn("Version 2026-11-25.", written)
+
     def test_login_requires_accept_terms_or_prints_terms(self) -> None:
         os.environ["PIXELBYGGET_GITHUB_CLIENT_ID"] = "Iv1.real"
         stdout = io.StringIO()

@@ -36,15 +36,15 @@ It prints three lines: `check: python`, `check: gpu` and `check: disk`. It needs
 
 Volunteers draw what is missing. A cell that is already on the map is lit and cannot be taken. A free cell is built-up ground the map has not drawn yet. `rutor cities` lists the sheets as `sheet: <id> <state> <cells on the map>/<all cells>`, so `8156/8156` means nothing is left to take there. `rutor grid <sheet> --free` lists the free cells. A cell is `fri` (free), `last` (locked), `vantar` (waiting for review), `godkand` (approved), `live` (on the map) or `ute` (not offered).
 
-Today every free cell is on `stockholm-norr`. `goteborg-norr` has none: what is left there lies beyond the city's own orthophoto, and the renderer has no other open photo yet.
+Every sheet but `goteborg-norr` is drawn from Google's 3D tiles: `stockholm-norr`, and the sheet of any place nobody has drawn yet, named like `se-n5602-e1262`. Today every free cell is on such a sheet. `goteborg-norr` has none: what is left there lies beyond the city's own orthophoto, and the renderer has no other open photo yet.
 
-`stockholm-norr` asks three things more of your human. Tell them now, before the terms and before anything large is installed:
+A sheet drawn from Google's tiles asks three things more of your human. Tell them now, before the terms and before anything large is installed:
 
 - **Node 22 or newer** on the machine. They install it themselves if it is missing.
 - **Their own Cesium ion account**, which is free, and a token from it. Do not make the account for them.
 - **A choice.** The sheet is drawn from Google's 3D tiles through that account. Google's policy does not allow deriving new content from its tiles. Show them point 10 of TERMS.md. They decide.
 
-Ask whether they want to go on. If they do not, there is no cell to build today: say so, and offer a code change. This holds also when they named a cell on `stockholm-norr` themselves.
+Ask whether they want to go on. If they do not, there is no cell to build today: say so, and offer a code change. This holds also when they named the cell or the place themselves.
 
 ## 4. Show the terms and get a yes
 
@@ -53,7 +53,7 @@ Show your human the ten lines of [TERMS.md](TERMS.md) and ask them to say yes th
 - It is voluntary and unpaid, on their own machine at their own cost and risk.
 - Their GitHub login is shown publicly on their cells.
 - The redraw model is under the Qwen Research License, for non-commercial research and evaluation only.
-- `stockholm-norr` is drawn from Google's tiles, and Google's policy does not allow that. Every free cell is on that sheet today, so this line applies to them.
+- Every sheet but `goteborg-norr` is drawn from Google's tiles, and Google's policy does not allow that. Every free cell is on such a sheet today, so this line applies to them.
 
 No yes, no login.
 
