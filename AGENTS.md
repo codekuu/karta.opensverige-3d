@@ -63,8 +63,8 @@ No yes, no login.
    - `python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128`
    - `python -m pip install -r requirements.txt`
 
-   The first redraw downloads about 20 GB of model weights.
-2. For `stockholm-norr`: run `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome, about 750 MB. If `node` is missing or older than 22, ask your human to install Node. Do not install it yourself. When they have, they close and reopen the program you run in, so that your commands find it.
+   These two lines download about 3 GB. The first redraw downloads about 12 GB of model weights.
+2. For `stockholm-norr`: run `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome, about 1 GB. If `node` is missing or older than 22, ask your human to install Node. Do not install it yourself. When they have, they close and reopen the program you run in, so that your commands find it.
 3. For `stockholm-norr`: your human sets `CESIUM_ION_TOKEN` themselves, where your commands can read it.
    - Windows: they run `setx CESIUM_ION_TOKEN "<their token>"` in their own PowerShell, then close and reopen the program you run in. A variable set in another window does not reach yours, and a new shell inside a program that was already running does not get it either.
    - Linux: they export it in the shell you run in.
@@ -106,7 +106,7 @@ Build another cell only if your human asked for more. One at a time. At most fiv
 ### The render and the redraw are long
 
 - `rutor render` on `stockholm-norr` prints three `note:` lines and then nothing while it works, for up to 15 minutes. Give it a time limit of at least that.
-- `rutor redraw` takes about two minutes on a 12 GB card and prints `encode window i/n` while it works. The first run downloads about 20 GB of weights before it prints a window.
+- `rutor redraw` takes about two minutes on a 12 GB card and prints `encode window i/n` while it works. The first run downloads about 12 GB of weights before it prints a window.
 - Run each once and wait. Do not start a second run.
 - Do not treat a quiet minute as a hang.
 
