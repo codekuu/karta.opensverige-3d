@@ -2513,7 +2513,16 @@ class WindowlessTests(_OwnHome):
     def _serving(self, **options: object) -> tuple[app.AppServer, threading.Thread]:
         """A server whose serve_forever runs on a thread, as cmd_app runs it on the main one."""
         server = app.AppServer(self.builder, releases=list, installer=FakeInstaller(), **options)  # type: ignore[arg-type]
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+
+        def serve() -> None:
+            # As cmd_app does: when the serving ends, the server is closed and its port with it.
+            # A port left listening still takes a connection on Linux, and then never answers.
+            try:
+                server.serve_forever()
+            finally:
+                server.stop()
+
+        thread = threading.Thread(target=serve, daemon=True)
         thread.start()
 
         def end() -> None:
