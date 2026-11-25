@@ -64,6 +64,7 @@ const ORD = {
     terms: "Säg ja till villkoren först.",
     none_free: "Inga rutor är lediga just nu. Titta in senare.",
     taken: "Rutan är inte ledig längre. Välj en annan.",
+    bad_code: "Koden ser inte rätt ut. Kopiera den från kartan igen.",
   },
   blad: {
     none_free: "Inga rutor är lediga just nu. Titta in senare.",
@@ -96,6 +97,8 @@ const CESIUM_ION = "https://ion.cesium.com";
 const KARTANS_VARD = "karta.opensverige.se";
 const NY_VERSION = "https://github.com/opensverige/karta.opensverige-3d/releases/";
 const SAJTEN = "https://techembassy.se";
+// The map of cells, where a person picks a cell anywhere in the country and copies its code.
+const KARTAN = "https://karta.opensverige.se/pixelbygget";
 
 const FRAGA_SEKUNDER = 2;
 const FRAGA_SEKUNDER_UNDER_JOBB = 1;
@@ -123,6 +126,7 @@ let bytNyckel = false;
 let stangFraga = false;
 let stangd = false;
 let stegFel = "";
+let kodFel = "";
 let vantaVisad = false;
 let rapportVisad = false;
 let upptagen = false;
@@ -234,6 +238,7 @@ function ga(till) {
   if (mal === visat) return;
   visat = mal;
   stegFel = "";
+  kodFel = "";
   rita();
 }
 
@@ -521,9 +526,15 @@ function steg5(s) {
 function steg6(s) {
   const blad = s.sheet;
   const finns = Boolean(blad.id) && !blad.problem;
+  // A cell by its code can be chosen whatever the sheet above says, also when nothing is free.
+  visa("kod-del", true);
+  visa("kod-fel", Boolean(kodFel));
+  text("kod-fel", kodFel);
+  el("kod-anvand").disabled = upptagen;
+  const synligt = finns && rutnat !== null && rutnat.blad === blad.id && fonster(s) !== null;
   visa("ruta-ingress", finns);
-  visa("ruta-karta", finns && rutnat !== null);
-  visa("ruta-forklaring", finns && rutnat !== null);
+  visa("ruta-karta", synligt);
+  visa("ruta-forklaring", synligt);
   const fel = stegFel || (blad.problem ? ord("blad", blad.problem) : "");
   visa("ruta-fel", Boolean(fel));
   text("ruta-fel", fel);
@@ -646,8 +657,15 @@ async function hamtaRutnat() {
           rutor.set(rad[0] + "_" + rad[1], rad[2]);
         }
       }
-      rutnat = { blad: String(data.sheet.id), cols: Number(data.sheet.cols) || 0, rows: Number(data.sheet.rows) || 0, rutor: rutor };
-      if (vald !== null && rutor.get(vald.col + "_" + vald.row) !== "fri") vald = null;
+      // On a sheet of the tiling only the cells someone has taken are listed. Any other is free.
+      rutnat = {
+        blad: String(data.sheet.id),
+        cols: Number(data.sheet.cols) || 0,
+        rows: Number(data.sheet.rows) || 0,
+        fritt: data.sheet.made === "grid",
+        rutor: rutor,
+      };
+      if (vald !== null && !ledig(vald.col, vald.row)) vald = null;
     }
   } catch (fel) {
     // The state says so when the service cannot be reached. The old grid stays meanwhile.
@@ -657,30 +675,53 @@ async function hamtaRutnat() {
   if (lage && visat === 6) rita();
 }
 
-function ritaRutnat() {
-  if (rutnat === null || !lage) return;
-  // Only the part of the sheet that is offered is drawn, so each cell gets room.
+function ledig(col, row) {
+  // Free: a listed cell that says so, or on a sheet of the tiling a cell that is not listed.
+  if (rutnat === null) return false;
+  const tillstand = rutnat.rutor.get(col + "_" + row);
+  if (tillstand === undefined) return rutnat.fritt && col >= 0 && row >= 0 && col < rutnat.cols && row < rutnat.rows;
+  return tillstand === "fri";
+}
+
+function fonster(s) {
+  // The part of the sheet that is drawn: the cells that are offered and one cell around
+  // them, so each gets room. On a sheet of the tiling the chosen cell counts too: it may be
+  // the first cell anyone takes there. Null when there is nothing to draw.
+  if (rutnat === null) return null;
   let minC = Infinity;
   let maxC = -Infinity;
   let minR = Infinity;
   let maxR = -Infinity;
-  for (const [plats, tillstand] of rutnat.rutor) {
-    if (tillstand === "ute") continue;
-    const delar = plats.split("_");
-    const c = Number(delar[0]);
-    const r = Number(delar[1]);
+  const med = (c, r) => {
     minC = Math.min(minC, c);
     maxC = Math.max(maxC, c);
     minR = Math.min(minR, r);
     maxR = Math.max(maxR, r);
+  };
+  for (const [plats, tillstand] of rutnat.rutor) {
+    if (tillstand === "ute") continue;
+    const delar = plats.split("_");
+    med(Number(delar[0]), Number(delar[1]));
   }
-  if (minC === Infinity) return;
-  minC = Math.max(0, minC - 1);
-  minR = Math.max(0, minR - 1);
-  maxC = Math.min(rutnat.cols - 1, maxC + 1);
-  maxR = Math.min(rutnat.rows - 1, maxR + 1);
-  const kol = maxC - minC + 1;
-  const rad = maxR - minR + 1;
+  const mal = rutnat.fritt ? malruta(s) : null;
+  if (mal !== null && mal.sheet === rutnat.blad) med(mal.col, mal.row);
+  if (minC === Infinity) return null;
+  return {
+    minC: Math.max(0, minC - 1),
+    minR: Math.max(0, minR - 1),
+    maxC: Math.min(rutnat.cols - 1, maxC + 1),
+    maxR: Math.min(rutnat.rows - 1, maxR + 1),
+  };
+}
+
+function ritaRutnat() {
+  if (rutnat === null || !lage) return;
+  const ram = fonster(lage);
+  if (ram === null) return;
+  const minC = ram.minC;
+  const minR = ram.minR;
+  const kol = ram.maxC - minC + 1;
+  const rad = ram.maxR - minR + 1;
   const sida = Math.max(3, Math.min(28, Math.floor(RUTNAT_BREDD / kol)));
   const skala = window.devicePixelRatio || 1;
 
@@ -705,7 +746,16 @@ function ritaRutnat() {
   penna.setTransform(skala, 0, 0, skala, 0, 0);
   penna.clearRect(0, 0, kol * sida, rad * sida);
   const glipa = sida >= 6 ? 1 : 0;
-  for (const [plats, tillstand] of rutnat.rutor) {
+  const rutor = new Map(rutnat.rutor);
+  if (rutnat.fritt) {
+    // The cells nobody has taken have no row. They are free, and drawn as free.
+    for (let r = ram.minR; r <= ram.maxR; r += 1) {
+      for (let c = minC; c <= ram.maxC; c += 1) {
+        if (!rutor.has(c + "_" + r)) rutor.set(c + "_" + r, "fri");
+      }
+    }
+  }
+  for (const [plats, tillstand] of rutor) {
     if (!Object.prototype.hasOwnProperty.call(farger, tillstand)) continue;
     const delar = plats.split("_");
     const x = (Number(delar[0]) - minC) * sida;
@@ -744,7 +794,7 @@ function klickPaRutnat(handelse) {
   if (kant.width === 0 || kant.height === 0) return;
   const col = rutnatMatt.minC + Math.floor(((handelse.clientX - kant.left) / kant.width) * rutnatMatt.kol);
   const row = rutnatMatt.minR + Math.floor(((handelse.clientY - kant.top) / kant.height) * rutnatMatt.rad);
-  if (rutnat.rutor.get(col + "_" + row) === "fri") {
+  if (ledig(col, row)) {
     vald = { col: col, row: row };
     stegFel = "";
   } else {
@@ -901,10 +951,32 @@ function koppla() {
     }
   });
   el("ruta-nasta").addEventListener("click", async () => {
+    kodFel = "";
     if ((await gor("api/cell", { next: true }, "svar")) !== null) {
       vald = null;
+      rutnatTid = 0;
       ga(7);
     }
+  });
+  const anvandKod = async () => {
+    // The code is sent as the person pasted it. The app takes it apart, and says only yes or no.
+    kodFel = "";
+    const svar = await gor("api/cell", { code: el("kod").value }, "svar");
+    if (svar !== null) {
+      el("kod").value = "";
+      vald = null;
+      rutnatTid = 0;
+      ga(7);
+    } else if (stegFel) {
+      // The no belongs under the field it is about, not above the map.
+      kodFel = stegFel;
+      stegFel = "";
+      rita();
+    }
+  };
+  el("kod-anvand").addEventListener("click", anvandKod);
+  el("kod").addEventListener("keydown", (handelse) => {
+    if (handelse.key === "Enter") anvandKod();
   });
 
   el("rita-start").addEventListener("click", () => gor("api/build", {}, "svar"));
@@ -936,6 +1008,7 @@ function koppla() {
 
   for (const knapp of document.querySelectorAll("[data-stang]")) knapp.addEventListener("click", stang);
   el("syfte-lank").setAttribute("href", SAJTEN);
+  el("kod-karta").setAttribute("href", KARTAN);
   el("hamta").addEventListener("click", () => gor("api/install", {}, "svar"));
   el("hamta-avbryt").addEventListener("click", () => gor("api/install/stop", {}, "svar"));
 }

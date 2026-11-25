@@ -95,7 +95,7 @@
 
         <section class="steg" id="steg-4" aria-labelledby="rubrik-4" hidden>
           <h2 id="rubrik-4" tabindex="-1">Ditt eget Cesium-konto</h2>
-          <p id="nyckel-ingress">Kartbilden över Stockholm hämtas genom ditt gratiskonto. Appen skapar aldrig kontot åt dig.</p>
+          <p id="nyckel-ingress">Kartbilden hämtas genom ditt eget gratiskonto hos Cesium. Appen skapar aldrig kontot åt dig.</p>
           <ol class="tre" id="nyckel-tre">
             <li><span>Skapa ett gratiskonto på <a id="nyckel-lank" target="_blank" rel="noopener noreferrer">ion.cesium.com</a>.</span></li>
             <li><span>Öppna Access Tokens där. Skapa en nyckel (token) med förvalda inställningar.</span></li>
@@ -158,6 +158,18 @@
           <div class="knappar">
             <button class="knapp" type="button" id="ruta-ta" hidden>Ta den här →</button>
             <button class="knapp tyst" type="button" id="ruta-nasta">Ta nästa lediga →</button>
+          </div>
+          <div class="steg-del" id="kod-del">
+            <p id="kod-ingress">Vill du rita en annan plats? Välj rutan på kartan och kopiera koden.</p>
+            <div class="falt" id="kod-falt">
+              <label for="kod">Klistra in rutans kod</label>
+              <input id="kod" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="100">
+            </div>
+            <p class="besked nejruta" id="kod-fel" role="alert" hidden></p>
+            <div class="knappar">
+              <button class="knapp tyst" type="button" id="kod-anvand">Använd den →</button>
+              <a class="lank" id="kod-karta" target="_blank" rel="noopener noreferrer">Välj på kartan →</a>
+            </div>
           </div>
         </section>
 

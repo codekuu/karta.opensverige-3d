@@ -118,7 +118,7 @@ It prints `url:` with the page's address, opens it in your browser, and runs unt
 3. The GitHub login: the page shows the device code and you approve it at GitHub.
 4. Your Cesium ion token, for a sheet that needs one. You paste it once. Cesium ion is asked whether it works before it is kept.
 5. What is missing of PyTorch, bitsandbytes, Pillow, Node and the Google renderer. Into an install made by hand the page installs nothing: see [Setup](#setup). The Windows app (`installer/`) fetches them itself here, about 16 GB, with a progress bar.
-6. The sheet's cells, and a button that picks the next free one.
+6. The sheet's cells, and a button that picks the next free one. A cell anywhere else is chosen by its code: the map of cells at <https://karta.opensverige.se/pixelbygget> gives a code like `se-n5602-e1262 31_22`, and the page takes it pasted into a field. The page itself loads nothing from outside, so it has no map of the country.
 7. The page asks before the card is used, shows the SE3 price, and then runs claim, render, redraw and upload for that one cell.
 8. The cell waits for review, with its address on the map.
 

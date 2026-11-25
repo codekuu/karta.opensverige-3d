@@ -1165,19 +1165,12 @@ def _source(sheet: dict[str, object]) -> str:
         return ""
 
 
-def _open_record(raw: object) -> dict[str, object] | None:
-    """One sheet from the queue, or None when it is not an open sheet this page can draw."""
+def _sheet_record(raw: object) -> dict[str, object] | None:
+    """One sheet as the page keeps it, or None when the row is not a sheet it can read."""
     if not isinstance(raw, dict):
         return None
     sheet_id = raw.get("id")
     if not isinstance(sheet_id, str) or config.SHEET_ID.fullmatch(sheet_id) is None:
-        return None
-    if raw.get("state") != "open":
-        return None
-    done, total = raw.get("done"), raw.get("total")
-    if isinstance(done, bool) or isinstance(total, bool) or not isinstance(done, int) or not isinstance(total, int):
-        return None
-    if done >= total:
         return None
     cols, rows = _size(raw.get("cols")), _size(raw.get("rows"))
     if cols is None or rows is None:
@@ -1186,11 +1179,26 @@ def _open_record(raw: object) -> dict[str, object] | None:
         "id": sheet_id,
         "name": _short(raw.get("name")),
         "kind": _source(raw),
+        # A sheet of the tiling lists only the cells someone has taken. Any other cell of
+        # it is free and has no row. On a hand-made sheet a cell with no row is not offered.
+        "made": "grid" if raw.get("made") == "grid" else "hand",
         "cols": cols,
         "rows": rows,
         "pipeline": _short(raw.get("pipeline")),
         "problem": "",
     }
+
+
+def _open_record(raw: object) -> dict[str, object] | None:
+    """One sheet from the queue, or None when it is not an open sheet this page can draw."""
+    if not isinstance(raw, dict) or raw.get("state") != "open":
+        return None
+    done, total = raw.get("done"), raw.get("total")
+    if isinstance(done, bool) or isinstance(total, bool) or not isinstance(done, int) or not isinstance(total, int):
+        return None
+    if done >= total:
+        return None
+    return _sheet_record(raw)
 
 
 def _any_free(cells: object) -> bool:
@@ -1253,6 +1261,14 @@ class _Known:
         self._cesium: tuple[dict[str, object], float] | None = None
         self._price: tuple[dict[str, object], float] | None = None
         self._sheet: tuple[dict[str, object], float] | None = None
+        # The sheet of a cell the person chose by its code. It is the page's sheet until they
+        # ask for the next free cell: the search for an open sheet does not replace it.
+        self._chosen: dict[str, object] | None = None
+
+    def choose_sheet(self, record: dict[str, object] | None) -> None:
+        """The person chose a cell on this sheet (None: back to the first open one)."""
+        with self._lock:
+            self._chosen = dict(record) if record is not None else None
 
     def forget_cesium(self) -> None:
         """The person pasted a token. The next state asks Cesium again."""
@@ -1330,6 +1346,9 @@ class _Known:
         running = self._running()
         with self._lock:
             hit = self._sheet
+            chosen = self._chosen
+        if chosen is not None:
+            return chosen
         if hit is not None and (running or self._clock() - hit[1] < _SHEET_SECONDS):
             return hit[0]
         if running:
@@ -1438,16 +1457,22 @@ def _public_cells(cols: int, rows: int, cells: object) -> list[list[object]]:
     return kept
 
 
-def _is_free(cells: list[object], col: int, row: int) -> bool:
+def _is_free(cells: list[object], col: int, row: int, rowless_is_free: bool = False) -> bool:
+    """True when the cell may be taken. A cell with no row is free only on a sheet of the tiling."""
     for cell in cells:
         if not isinstance(cell, list) or len(cell) < 3:
             continue
         found_col, found_row, state = cell[0], cell[1], cell[2]
         if isinstance(found_col, bool) or isinstance(found_row, bool):
             continue
-        if found_col == col and found_row == row and state == "fri":
-            return True
-    return False
+        if found_col == col and found_row == row:
+            return state == "fri"
+    return rowless_is_free
+
+
+# A cell's code as the map of cells gives it: the sheet's id, a space, and col_row.
+_CODE_MAX = 100
+_CODE = re.compile(rf"({config.SHEET_ID.pattern})\s+(\d{{1,4}})_(\d{{1,4}})")
 
 
 def _sheet_id(sheet: dict[str, object]) -> str:
@@ -1859,6 +1884,7 @@ class AppServer:
             "sheet": {
                 "id": sheet_id,
                 "name": sheet.get("name") if isinstance(sheet.get("name"), str) else "",
+                "made": "grid" if sheet.get("made") == "grid" else "hand",
                 "cols": cols,
                 "rows": rows,
                 "pipeline": sheet.get("pipeline") if isinstance(sheet.get("pipeline"), str) else "",
@@ -1886,9 +1912,46 @@ class AppServer:
 
     def _cell(self, raw: bytes) -> dict[str, object]:
         body = _body(raw)
+        if "code" in body:
+            return self._cell_coded(body.get("code"))
         if body.get("next") is True:
             return self._cell_next()
         return self._cell_named(body)
+
+    def _cell_coded(self, code: object) -> dict[str, object]:
+        """A cell by its code from the map: any sheet, also one this page was not looking at.
+
+        The code is text a person pasted. It is taken apart by shape before anything is
+        asked, it is never said back, and the sheet's size comes from the service.
+        """
+        bad = Refusal(400, "the code names no cell", "bad_code")
+        if not isinstance(code, str) or len(code) > _CODE_MAX:
+            raise bad
+        found = _CODE.fullmatch(code.strip())
+        if found is None:
+            raise bad
+        sheet_id, col, row = found.group(1), int(found.group(2)), int(found.group(3))
+        try:
+            _status, body = api.get(f"/v1/grid/{sheet_id}", token=config.read_token())
+        except RutorError as exc:
+            if exc.code == 2:
+                # The service has no sheet by that name.
+                raise bad from exc
+            raise
+        raw = body.get("sheet") if isinstance(body, dict) else None
+        cells = body.get("cells") if isinstance(body, dict) else None
+        record = _sheet_record(raw)
+        if record is None or record["id"] != sheet_id or not isinstance(cells, list):
+            raise bad
+        if _coord(col, record["cols"]) is None or _coord(row, record["rows"]) is None:
+            raise bad
+        is_open = isinstance(raw, dict) and raw.get("state") == "open"
+        if not is_open or not _is_free(cells, col, row, record["made"] == "grid"):
+            raise Refusal(409, "that cell is not free", "taken")
+        # Refused here while a cell is being built, before the page's sheet is changed.
+        self._builder.choose(sheet_id, col, row, _kind_of(record))
+        self._known.choose_sheet(record)
+        return {"sheet": sheet_id, "col": col, "row": row}
 
     def _open(self) -> dict[str, object]:
         sheet = self._known.sheet_for_choice()
@@ -1897,6 +1960,10 @@ class AppServer:
         return sheet
 
     def _cell_next(self) -> dict[str, object]:
+        if self._builder.busy():
+            raise Refusal(409, "a cell is being built", "busy")
+        # "The next free cell" is asked of the first open sheet, not of one chosen by a code.
+        self._known.choose_sheet(None)
         sheet = self._open()
         sheet_id = _sheet_id(sheet)
         cells = _service_grid(sheet_id)
@@ -1917,7 +1984,7 @@ class AppServer:
         row = _coord(body.get("row"), sheet.get("rows"))
         if body.get("sheet") != sheet_id or col is None or row is None:
             raise bad_input("the body names no cell")
-        if not _is_free(_service_grid(sheet_id), col, row):
+        if not _is_free(_service_grid(sheet_id), col, row, sheet.get("made") == "grid"):
             raise Refusal(409, "that cell is not free", "taken")
         self._builder.choose(sheet_id, col, row, _kind_of(sheet))
         return {"sheet": sheet_id, "col": col, "row": row}

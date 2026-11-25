@@ -1902,6 +1902,184 @@ class AppServerTests(_OwnHome):
         self.assertEqual(cell, {"sheet": "stockholm-norr", "col": expect[0], "row": expect[1]})
         self.assertEqual(self.fake.calls, [])
 
+    # ---- a cell by its code, pasted from the map
+
+    NEW = "se-n5602-e1262"
+
+    def _add_new_sheet(self, cells: tuple[tuple[int, int, str, str | None], ...] = (), **overrides: object) -> None:
+        """A sheet of the tiling beside the open one: its free cells have no rows."""
+        sheet: dict[str, object] = {
+            "id": self.NEW,
+            "name": "N 56,02 E 12,62",
+            "state": "open",
+            "done": 0,
+            "total": len(cells),
+            "cols": 61,
+            "rows": 47,
+            "pipeline": pipeline.PIPELINE,
+            "kind": "google",
+            "made": "grid",
+        }
+        sheet.update(overrides)
+        sheets, stored = self.svc.state["sheets"], self.svc.state["cells"]
+        assert isinstance(sheets, dict) and isinstance(stored, dict)
+        sheets[self.NEW] = sheet
+        for col, row, state, who in cells:
+            stored[f"{self.NEW}/{col}_{row}"] = {"col": col, "row": row, "state": state, "login": who, "updated": "2026-11-17T12:00:00Z"}
+
+    def _code(self, code: object) -> tuple[int, dict[str, object]]:
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"code": code})
+        parsed = json.loads(body)
+        self.assertIsInstance(parsed, dict)
+        return status, parsed
+
+    def test_a_good_code_chooses_that_cell_and_that_sheet(self) -> None:
+        self._add_new_sheet()
+        status, answer = self._code(f"{self.NEW} 31_22")
+        self.assertEqual((status, answer), (200, {"sheet": self.NEW, "col": 31, "row": 22}))
+        found = self._state()
+        self.assertEqual(found["cell"], {"sheet": self.NEW, "col": 31, "row": 22})
+        sheet = found["sheet"]
+        self.assertEqual((sheet["id"], sheet["kind"], sheet["cols"], sheet["rows"], sheet["problem"]), (self.NEW, "google", 61, 47, ""))
+        status, _headers, body = self.call("GET", f"{self.base}/api/grid")
+        self.assertEqual(json.loads(body)["sheet"]["id"], self.NEW)
+        # Nothing was claimed and no child was started: the cell is locked when Rita is pressed.
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual([r for r in self.svc.requests if r["method"] == "POST"], [])
+
+    def test_the_chosen_sheet_stays_the_pages_sheet(self) -> None:
+        # The page looks for an open sheet again every minute. A sheet the person chose is theirs.
+        now = {"t": 0.0}
+        self.server._known._clock = lambda: now["t"]
+        self._add_new_sheet()
+        self._code(f"{self.NEW} 31_22")
+        now["t"] = 10_000.0
+        self.assertEqual(self._state()["sheet"]["id"], self.NEW)
+
+    def test_a_code_is_read_whatever_space_the_copy_left_around_it(self) -> None:
+        self._add_new_sheet()
+        for code in (f"  {self.NEW} 31_22\n", f"{self.NEW}\t31_22", f"{self.NEW}  31_22 "):
+            with self.subTest(code=code):
+                status, answer = self._code(code)
+                self.assertEqual((status, answer.get("col"), answer.get("row")), (200, 31, 22))
+
+    def test_a_code_for_a_hand_made_sheet_works_too(self) -> None:
+        status, answer = self._code("stockholm-norr 1_0")
+        self.assertEqual((status, answer), (200, {"sheet": "stockholm-norr", "col": 1, "row": 0}))
+        status, answer = self._code("stockholm-norr 0_1")
+        self.assertEqual((status, answer.get("code")), (409, "taken"))
+
+    def test_a_code_for_a_cell_outside_the_sheet_is_a_bad_code(self) -> None:
+        self._add_new_sheet()
+        for code in (f"{self.NEW} 61_0", f"{self.NEW} 0_47", f"{self.NEW} 9999_9999", "stockholm-norr 3_0"):
+            with self.subTest(code=code):
+                status, answer = self._code(code)
+                self.assertEqual((status, answer.get("code")), (400, "bad_code"))
+        self.assertIsNone(self.builder.chosen())
+
+    def test_a_code_of_another_shape_is_a_bad_code_and_the_service_is_not_asked(self) -> None:
+        self._add_new_sheet()
+        before = len(self.svc.requests)
+        codes: tuple[object, ...] = (
+            "SE-N5602-E1262 31_22", "../etc 1_1", "se n5602 1_1", self.NEW, f"{self.NEW} 31-22", f"{self.NEW} 31_22 extra",
+            "31_22", "", "   ", f"{self.NEW} -1_2", f"{self.NEW} 1.0_2", f"{self.NEW}/31_22", f"{self.NEW} 31_22?x=1",
+            f"{self.NEW} 00031_22", "x" * 101, 5602, None, True, ["se-n5602-e1262", 31, 22], {"sheet": self.NEW},
+        )
+        for code in codes:
+            with self.subTest(code=code):
+                status, answer = self._code(code)
+                self.assertEqual((status, answer.get("code")), (400, "bad_code"))
+        self.assertEqual(len(self.svc.requests), before)
+        self.assertIsNone(self.builder.chosen())
+
+    def test_a_code_with_markup_is_a_bad_code_and_is_not_said_back(self) -> None:
+        self._add_new_sheet()
+        for code in (f"<b>{self.NEW}</b> 31_22", '"><script>alert(1)</script>', f"{self.NEW} 31_22<img src=x>", f"javascript:{self.NEW} 31_22"):
+            with self.subTest(code=code):
+                status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"code": code})
+                self.assertEqual((status, json.loads(body).get("code")), (400, "bad_code"))
+                self.assertNotIn(b"<", body)
+                self.assertNotIn(b"script", body)
+        self.assertIsNone(self.builder.chosen())
+
+    def test_a_code_for_a_sheet_the_service_does_not_have_is_a_bad_code(self) -> None:
+        status, answer = self._code("se-n9999-e9999 1_1")
+        self.assertEqual((status, answer.get("code")), (400, "bad_code"))
+        self.assertIsNone(self.builder.chosen())
+
+    def test_a_code_for_a_cell_someone_has_is_taken(self) -> None:
+        self._add_new_sheet(((31, 22, "last", "ebba"), (30, 22, "fri", None)))
+        status, answer = self._code(f"{self.NEW} 31_22")
+        self.assertEqual((status, answer.get("code")), (409, "taken"))
+        self.assertIsNone(self.builder.chosen())
+        # One that was given back has a row and is free; one nobody took has no row and is free.
+        self.assertEqual(self._code(f"{self.NEW} 30_22")[0], 200)
+        self.assertEqual(self._code(f"{self.NEW} 12_40")[0], 200)
+
+    def test_a_code_on_a_sheet_that_is_not_open_is_taken(self) -> None:
+        self._add_new_sheet(state="done")
+        status, answer = self._code(f"{self.NEW} 31_22")
+        self.assertEqual((status, answer.get("code")), (409, "taken"))
+
+    def test_a_code_on_a_hand_made_sheet_needs_the_cell_to_have_a_free_row(self) -> None:
+        # On a hand-made sheet a cell with no row is not offered.
+        self._put_sheet([(0, 0, "fri", None)])
+        self.assertEqual(self._code("stockholm-norr 0_0")[0], 200)
+        status, answer = self._code("stockholm-norr 2_2")
+        self.assertEqual((status, answer.get("code")), (409, "taken"))
+
+    def test_a_click_on_the_chosen_sheet_takes_a_cell_with_no_row(self) -> None:
+        self._add_new_sheet(((31, 22, "live", "ebba"),))
+        self._code(f"{self.NEW} 30_22")
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"sheet": self.NEW, "col": 32, "row": 22})
+        self.assertEqual((status, json.loads(body)), (200, {"sheet": self.NEW, "col": 32, "row": 22}))
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"sheet": self.NEW, "col": 31, "row": 22})
+        self.assertEqual((status, json.loads(body).get("code")), (409, "taken"))
+
+    def test_the_grid_of_a_sheet_of_the_tiling_says_that_a_cell_with_no_row_is_free(self) -> None:
+        self._add_new_sheet(((31, 22, "live", "ebba"),))
+        self._code(f"{self.NEW} 30_22")
+        status, _headers, body = self.call("GET", f"{self.base}/api/grid")
+        grid = json.loads(body)
+        self.assertEqual(grid["sheet"]["made"], "grid")
+        self.assertEqual(grid["cells"], [[31, 22, "live"]])
+        # A hand-made sheet does not say so.
+        self.call("POST", f"{self.base}/api/cell", {"next": True})
+        status, _headers, body = self.call("GET", f"{self.base}/api/grid")
+        self.assertEqual(json.loads(body)["sheet"]["made"], "hand")
+
+    def test_next_goes_back_to_the_open_sheet(self) -> None:
+        self._add_new_sheet()
+        self._code(f"{self.NEW} 31_22")
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"next": True})
+        self.assertEqual((status, json.loads(body)["sheet"]), (200, "stockholm-norr"))
+        self.assertEqual(self._state()["sheet"]["id"], "stockholm-norr")
+
+    def test_a_build_after_a_code_is_judged_by_the_chosen_sheet(self) -> None:
+        self.builder.accept_terms()
+        self._add_new_sheet(pipeline="2099.01-z")
+        self._code(f"{self.NEW} 31_22")
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual((status, json.loads(body).get("code")), (409, "old_app"))
+        self._add_new_sheet()
+        self._code(f"{self.NEW} 31_22")
+        self.fake.script("claim", [], hold=True)
+        self.ask.reset_mock()
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual(status, 200, body)
+        self.ask.assert_called()
+        wait_until(lambda: [argv for argv, _env in self.fake.calls if argv[0] == "claim"] == [["claim", self.NEW, "31_22"]])
+
+    def test_a_code_is_not_taken_while_a_cell_is_being_built(self) -> None:
+        self.builder.accept_terms()
+        self._add_new_sheet()
+        self.fake.script("claim", [], hold=True)
+        self.call("POST", f"{self.base}/api/cell", {"next": True})
+        self.call("POST", f"{self.base}/api/build", {})
+        status, answer = self._code(f"{self.NEW} 31_22")
+        self.assertEqual((status, answer.get("code")), (409, "busy"))
+        self.assertEqual(self._state()["sheet"]["id"], "stockholm-norr")
+
     def test_a_cell_outside_the_sheet_is_refused(self) -> None:
         for body in (
             {"sheet": "stockholm-norr", "col": 9999, "row": 0},
@@ -2725,13 +2903,14 @@ class PageFilesTests(unittest.TestCase):
             self.assertNotIn("@import", text, name)
             self.assertNotIn("url(", text, name)
         script = self.read("app.js")
-        # The four places a person is sent to: GitHub's device page, Cesium ion, the release
-        # page of a newer app and the map's own site. Links, not loads.
+        # The five places a person is sent to: GitHub's device page, Cesium ion, the release
+        # page of a newer app, the map's own site and the map of cells. Links, not loads.
         allowed = {
             "https://github.com/login/device",
             "https://ion.cesium.com",
             "https://github.com/opensverige/karta.opensverige-3d/releases/",
             "https://techembassy.se",
+            "https://karta.opensverige.se/pixelbygget",
         }
         found = set(re.findall(r"https?://[^\s\"'`)]*", script))
         self.assertEqual(found - allowed, set())
@@ -2804,6 +2983,30 @@ class PageFilesTests(unittest.TestCase):
         self.assertIn('!["taken", "daily", "old_app"].includes(j.problem)', script)
         # A cell that waits is said to wait, and where it shows.
         self.assertIn("Tills dess syns den som Väntar.", page)
+
+    def test_step_six_takes_a_cell_by_its_code_from_the_map(self) -> None:
+        page = self.read("index.html")
+        script = self.read("app.js")
+        # The field, with its label, and the two ways on: use the code, or go and fetch one.
+        self.assertIn('<label for="kod">Klistra in rutans kod</label>', page)
+        self.assertRegex(page, r'<input id="kod" type="text"[^>]*maxlength="100"')
+        self.assertRegex(page, r'<button[^>]*id="kod-anvand"[^>]*>Använd den →</button>')
+        self.assertRegex(page, r'<a[^>]*id="kod-karta"[^>]*>Välj på kartan →</a>')
+        self.assertRegex(page, r'<a[^>]*id="kod-karta"[^>]*rel="noopener noreferrer"')
+        # The address is set by the script, like every link the page has, and is the map of cells.
+        self.assertIn('const KARTAN = "https://karta.opensverige.se/pixelbygget";', script)
+        self.assertIn('el("kod-karta").setAttribute("href", KARTAN);', script)
+        self.assertIn('"api/cell", { code: ', script)
+        # The two things the app can answer a code with, each in a sentence.
+        block = script[script.index("  svar: {") : script.index("}", script.index("  svar: {"))]
+        self.assertIn('bad_code: "Koden ser inte rätt ut. Kopiera den från kartan igen."', block)
+        self.assertRegex(block, r"\btaken: \"")
+        # The field is there also when no sheet has a free cell: that is when it is needed most.
+        step = page[page.index('id="steg-6"') : page.index('id="steg-7"')]
+        self.assertLess(step.index('id="ruta-fel"'), step.index('id="kod"'))
+        self.assertIn("visa(\"kod-del\", true);", script)
+        # The Cesium step no longer says that the picture is of Stockholm.
+        self.assertNotIn("Kartbilden över Stockholm", page)
 
     def test_a_step_the_page_moved_to_by_itself_gets_the_focus(self) -> None:
         script = self.read("app.js")
