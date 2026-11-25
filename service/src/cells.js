@@ -3,6 +3,7 @@
 
 import { requireUser } from './auth.js';
 import { error, json } from './db.js';
+import { cellAt, cellCentre, gridRow, groundHeight, sheetById } from './tiling.js';
 
 export const LOCK_HOURS = 48;
 /** How many uploads of a builder who is not trusted may wait for review at once. */
@@ -40,24 +41,69 @@ function plusHours(now, hours) {
 }
 
 /**
- * Locks a free cell for the user.
+ * Makes the rows a first claim on a sheet of the tiling needs: the sheet's, when nobody has
+ * claimed there before, and the cell's, as free. Two claims at the same moment both come
+ * here; INSERT OR IGNORE lets one write each row. Nothing is written unless the ground height
+ * is known: a sheet is never made with a guessed height.
+ * @param {D1Database} db
+ * @param {import('./db.js').Env} env
+ * @param {import('./db.js').User} user
+ * @param {import('./tiling.js').Tile} tile
+ * @param {boolean} sheetMissing
+ * @param {number} col
+ * @param {number} row
+ * @param {string} now
+ * @returns {Promise<{ ok: true } | { ok: false, status: number, code: string, message?: string }>}
+ */
+async function makeGridCell(db, env, user, tile, sheetMissing, col, row, now) {
+  // What is drawn by hand is not gridded again: that ground belongs to its own sheet.
+  const centre = cellCentre(tile, col, row);
+  const { results: hand } = await db.prepare("SELECT * FROM sheets WHERE made = 'hand'").all();
+  const owner = hand.find((sheet) => cellAt(sheet, centre.lat, centre.lon));
+  if (owner) return { ok: false, status: 409, code: 'other_sheet', message: `That ground belongs to the sheet ${owner.id}. Ask /v1/place for its cell there.` };
+  if (sheetMissing) {
+    if (!env.PIPELINE_NOW) return { ok: false, status: 503, code: 'misconfigured' };
+    const height = await groundHeight(tile.origin_lat, tile.origin_lon);
+    if (height === null) return { ok: false, status: 503, code: 'no_height' };
+    const s = gridRow(tile, env.PIPELINE_NOW, height);
+    const made = await db
+      .prepare(
+        'INSERT OR IGNORE INTO sheets (id, city, name, cols, rows, origin_lat, origin_lon, x_meters, y_meters, ground_height, dzi_levels, pipeline, state, queue_order, rev, kind, made) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      )
+      .bind(s.id, s.city, s.name, s.cols, s.rows, s.origin_lat, s.origin_lon, s.x_meters, s.y_meters, s.ground_height, s.dzi_levels, s.pipeline, s.state, s.queue_order, s.rev, s.kind, s.made)
+      .run();
+    if (made.meta.changes === 1) {
+      await logEvent(db, { at: now, github_id: user.github_id, login: user.login, action: 'make_sheet', sheet: s.id, detail: `ground height ${height} m` });
+    }
+  }
+  await db.prepare("INSERT OR IGNORE INTO cells (sheet, col, row, state, updated_at) VALUES (?, ?, ?, 'fri', ?)").bind(tile.id, col, row, now).run();
+  return { ok: true };
+}
+
+/**
+ * Locks a free cell for the user. On a sheet of the tiling (an id sheetById knows) the cell
+ * need not have a row, nor the sheet: the first claim there makes them, once every refusal
+ * that needs no row has had its say.
  * @param {D1Database} db
  * @param {import('./db.js').User} user
  * @param {string} sheet
  * @param {number} col
  * @param {number} row
  * @param {string} now
- * @returns {Promise<{ ok: true, expires_at: string } | { ok: false, status: number, code: string }>}
+ * @param {import('./db.js').Env} [env] read only when a sheet of the tiling gets its row
+ * @returns {Promise<{ ok: true, expires_at: string } | { ok: false, status: number, code: string, message?: string }>}
  */
-export async function claimCell(db, user, sheet, col, row, now) {
-  const sheetRow = await db.prepare('SELECT id, state FROM sheets WHERE id = ?').bind(sheet).first();
-  if (!sheetRow) return { ok: false, status: 404, code: 'no_sheet' };
-  if (sheetRow.state !== 'open') return { ok: false, status: 403, code: 'sheet_closed' };
-  const cell = await db.prepare('SELECT state, removed_at FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
-  if (!cell) return { ok: false, status: 404, code: 'no_cell' };
-  if (cell.state === 'ute') return { ok: false, status: 422, code: 'outside' };
+export async function claimCell(db, user, sheet, col, row, now, env = {}) {
+  const sheetRow = await db.prepare('SELECT id, state, made FROM sheets WHERE id = ?').bind(sheet).first();
+  // A row made by hand keeps to its own cells, whatever its id looks like.
+  const tile = !sheetRow || sheetRow.made === 'grid' ? sheetById(sheet) : null;
+  if (!sheetRow && !tile) return { ok: false, status: 404, code: 'no_sheet' };
+  if (sheetRow && sheetRow.state !== 'open') return { ok: false, status: 403, code: 'sheet_closed' };
+  const cell = sheetRow ? await db.prepare('SELECT state, removed_at FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first() : null;
+  if (!cell && !(tile && col < tile.cols && row < tile.rows)) return { ok: false, status: 404, code: 'no_cell' };
+  if (cell && cell.state === 'ute') return { ok: false, status: 422, code: 'outside' };
   // A removed live cell waits for the intake to blank its tiles before anyone may draw it again.
-  if (cell.removed_at) return { ok: false, status: 409, code: 'being_removed' };
+  if (cell && cell.removed_at) return { ok: false, status: 409, code: 'being_removed' };
   const limit = lockLimit(user);
   // A lock past its expiry no longer counts and may be taken over, even before the cron frees it.
   const held = await db.prepare("SELECT COUNT(*) AS n FROM cells WHERE owner_id = ? AND state = 'last' AND expires_at > ?").bind(user.github_id, now).first();
@@ -67,6 +113,10 @@ export async function claimCell(db, user, sheet, col, row, now) {
   const waitingLimit = user.trusted ? 1e9 : WAITING_LIMIT;
   const waiting = await db.prepare("SELECT COUNT(*) AS n FROM cells WHERE owner_id = ? AND state = 'vantar'").bind(user.github_id).first();
   if (waiting.n >= waitingLimit) return { ok: false, status: 403, code: 'too_many_waiting' };
+  if (!cell) {
+    const made = await makeGridCell(db, env, user, tile, !sheetRow, col, row, now);
+    if (!made.ok) return made;
+  }
   const expires_at = plusHours(now, LOCK_HOURS);
   // The lock and the limit are decided by this one statement, so parallel claims cannot
   // slip past the count read above.
@@ -121,6 +171,9 @@ const MESSAGES = {
   too_many_waiting: 'Five of your cells are waiting for review. Take another when one has been reviewed.',
   taken: 'Someone else holds that cell. Pick another.',
   being_removed: 'That cell is being taken off the map. Try again in an hour.',
+  other_sheet: 'That ground belongs to another sheet.',
+  no_height: 'The ground height of that place could not be read just now, so its sheet was not made. Try again in a minute.',
+  misconfigured: 'The service is not set up to make new sheets yet.',
   not_yours: 'That cell is not yours.',
   already_uploaded: 'That cell is already uploaded and cannot be released.',
 };
@@ -146,8 +199,8 @@ export async function readCellBody(request) {
 export const claimRoute = requireUser(async (request, env, ctx, params, now, user) => {
   const body = await readCellBody(request);
   if (!body) return error(400, 'bad_body', 'Send JSON with sheet, col and row (integers from 0).');
-  const r = await claimCell(env.DB, user, body.sheet, body.col, body.row, now);
-  if (!r.ok) return error(r.status, r.code, MESSAGES[r.code]);
+  const r = await claimCell(env.DB, user, body.sheet, body.col, body.row, now, env);
+  if (!r.ok) return error(r.status, r.code, r.message || MESSAGES[r.code], r.status === 503 ? { 'Retry-After': '60' } : {});
   return json(201, { ...body, expires_at: r.expires_at });
 });
 

@@ -181,3 +181,48 @@ export function gridRow(tile, pipeline, groundHeight = 0) {
     made: 'grid',
   };
 }
+
+/**
+ * Latitude and longitude of the middle of a cell of a sheet of the tiling, on the ground.
+ * Near enough (some ten metres at the far edge of a sheet) to say whose ground it is.
+ * @param {Tile} tile
+ * @param {number} col
+ * @param {number} row
+ * @returns {{ lat: number, lon: number }}
+ */
+export function cellCentre(tile, col, row) {
+  const east = tile.x_meters + (col + 0.5) * CELL_METERS;
+  const north = (tile.y_meters - (row + 0.5) * CELL_METERS) * Math.SQRT2;
+  return {
+    lat: tile.origin_lat + north / METRES_PER_DEGREE,
+    lon: tile.origin_lon + east / (METRES_PER_DEGREE * Math.cos((tile.origin_lat * Math.PI) / 180)),
+  };
+}
+
+const ELEVATION_URL = 'https://api.open-meteo.com/v1/elevation';
+/** The sea level the elevation service counts from lies about this far above the ellipsoid in Sweden. */
+const GEOID_METERS = 30;
+const ELEVATION_TIMEOUT_MS = 8000;
+
+/**
+ * The height of the ground at a point, in metres above the ellipsoid, or null when the
+ * elevation service does not give a plain answer. Asked once per sheet, when its row is made.
+ * The request carries the two coordinates and nothing else: nothing about who claimed.
+ * @param {number} lat
+ * @param {number} lon
+ * @returns {Promise<number | null>}
+ */
+export async function groundHeight(lat, lon) {
+  let body;
+  try {
+    const response = await fetch(`${ELEVATION_URL}?latitude=${lat}&longitude=${lon}`, { signal: AbortSignal.timeout(ELEVATION_TIMEOUT_MS) });
+    if (!response.ok) return null;
+    body = await response.json();
+  } catch {
+    return null;
+  }
+  const metres = body && Array.isArray(body.elevation) ? body.elevation[0] : null;
+  // Sweden lies between the sea and 2100 m. Anything else is not an answer about this point.
+  if (typeof metres !== 'number' || !Number.isFinite(metres) || metres < -100 || metres > 2500) return null;
+  return Math.round(metres) + GEOID_METERS;
+}

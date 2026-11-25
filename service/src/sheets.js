@@ -4,7 +4,7 @@
 import { requireAdmin } from './auth.js';
 import { logEvent } from './cells.js';
 import { error, json } from './db.js';
-import { cellAt, gridRow, nearestCell, sheetAt } from './tiling.js';
+import { cellAt, gridRow, nearestCell, sheetAt, sheetById } from './tiling.js';
 
 const BATCH = 500;
 const SHEET_FIELDS = [
@@ -163,13 +163,19 @@ export async function listSheets(db) {
  * A live cell the admin took down is free in the table but nobody may claim it until its
  * tiles are blanked, so it is shown as locked: a client that takes "the next free cell"
  * must not be handed one that answers being_removed.
+ * A sheet of the tiling that nobody has claimed on yet has no row: it is answered as the
+ * tiling computes it, with no cells. A cell with no row is free there.
  * @param {D1Database} db
  * @param {string} sheetId
+ * @param {string} [pipeline] the pipeline a sheet of the tiling would be made with
  * @returns {Promise<{ sheet: import('./db.js').Sheet, cells: Array<[number, number, string, string|null, string]> } | null>}
  */
-export async function getGrid(db, sheetId) {
+export async function getGrid(db, sheetId, pipeline = '') {
   const sheet = await db.prepare('SELECT * FROM sheets WHERE id = ?').bind(sheetId).first();
-  if (!sheet) return null;
+  if (!sheet) {
+    const tile = sheetById(sheetId);
+    return tile ? { sheet: gridRow(tile, pipeline), cells: [] } : null;
+  }
   const { results } = await db
     .prepare('SELECT col, row, state, owner_login, updated_at, removed_at FROM cells WHERE sheet = ? ORDER BY row, col')
     .bind(sheetId)
@@ -199,7 +205,7 @@ export async function citiesRoute(request, env) {
 
 /** GET /v1/grid/:sheet */
 export async function gridRoute(request, env, ctx, params) {
-  const grid = await getGrid(env.DB, params.sheet);
+  const grid = await getGrid(env.DB, params.sheet, env.PIPELINE_NOW);
   if (!grid) return error(404, 'no_sheet', `No sheet named ${params.sheet}.`);
   return json(200, grid, GRID_CACHE);
 }

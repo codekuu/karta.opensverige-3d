@@ -71,10 +71,10 @@ All under `/v1`. Errors are `{ "error": "<code>", "message": "..." }`.
 | GET | `/health` | anyone | 200 |
 | GET | `/sheets` | anyone | sheets with `done` and `total` |
 | GET | `/cities` | anyone | sheets grouped by city |
-| GET | `/grid/{sheet}` | anyone | sheet and cells `[col, row, state, login, updated]`; 404 `no_sheet`. A live cell the admin took down is shown as `last` until its tiles are blanked: it cannot be claimed |
+| GET | `/grid/{sheet}` | anyone | sheet and cells `[col, row, state, login, updated]`; 404 `no_sheet`. A live cell the admin took down is shown as `last` until its tiles are blanked: it cannot be claimed. A sheet of the tiling lists only the cells that have a row; one nobody has claimed on yet is answered as the tiling computes it, with no cells |
 | GET | `/place?lat=..&lon=..` | anyone | `{sheet, col, row, state}`: the sheet and cell a point on the earth belongs to. A point inside a hand-made sheet's picture belongs to that sheet. Anywhere else in Sweden the tiling decides, and `sheet.exists` is false until someone has claimed a cell there; a cell with no row is `fri`. 404 `outside` outside Sweden, 400 `bad_query`. Writes nothing |
 | GET | `/me` | user | login, counts, locks |
-| POST | `/claim` `{sheet, col, row}` | user | 201 `expires_at`; 409 `taken` `being_removed`, 403 `sheet_closed` `too_many_locks` `too_many_waiting` (five uploads of a builder who is not trusted already wait for review), 422 `outside`. A lock past its expiry can be taken |
+| POST | `/claim` `{sheet, col, row}` | user | 201 `expires_at`; 404 `no_sheet` `no_cell`, 409 `taken` `being_removed` `other_sheet` (the ground belongs to a hand-made sheet), 403 `sheet_closed` `too_many_locks` `too_many_waiting` (five uploads of a builder who is not trusted already wait for review), 422 `outside`, 503 `no_height` `misconfigured` (a new sheet could not be made; nothing was written). A lock past its expiry can be taken. On a sheet of the tiling the first claim makes the sheet's row and the cell's |
 | POST | `/release` `{sheet, col, row}` | user | 200; 403 `not_yours`, 409 `already_uploaded` |
 | PUT | `/upload/{sheet}/{col}_{row}` | user | body PNG, header `X-Manifest`; 201 `{state}`; 404 `no_cell`, 403 `not_yours`, 411 `no_length`, 413 `too_big`, 400 `bad_manifest` `short_body`, 422 `not_checked` `wrong_pipeline` `bad_size` `sha_mismatch`, 415 `not_png` `not_plain` (the PNG is not 8-bit RGB, is interlaced, or holds alpha, animation, a gamma, a colour profile or any part but the picture, text, a time, the print size and the sRGB mark), 429 `daily_limit`, 409 `lock_expired` `lock_lost` (the lock ended during the upload; nothing kept). The manifest must have `check: "ok"`; strings are at most 200 characters and unknown keys are dropped |
 | GET | `/inkorg/{sheet}/{col}_{row}.png` · `.json` | admin | the cell's current upload; header `X-Inbox-Key` |
@@ -90,5 +90,17 @@ All under `/v1`. Errors are `{ "error": "<code>", "message": "..." }`.
 Everything answers 503 `closed` when the service is closed (GET excepted), 429 `rate_limited` over 60 requests a minute per client, and 500 `internal` when storage fails. The admin's token, once GitHub has vouched for it, passes the rate limit on admin routes.
 
 A sheet row says which source it is drawn from in `kind`: `open` (orthophoto and OpenStreetMap) or `google` (Google's 3D tiles through the builder's own Cesium ion account). The CLI reads it from `/grid/{sheet}`, so a new sheet needs no line in the drawing code. `made` says how the row came to be: `hand` by the admin through `POST /sheets`, `grid` by the tiling.
+
+## The tiling
+
+Nobody opens a sheet for a new town. The country is cut into fixed sheets by a rule in `src/tiling.js`: a sheet is a box of 0.15° of latitude by 0.25° of longitude, on whole steps, with its origin in the middle, 47 cells high and 41 to 61 wide. Its id is `se-n<lat>-e<lon>`, the origin's hundredths of a degree (`se-n5602-e1262` is Helsingborg). `GET /place` turns a point into a sheet and a cell.
+
+A sheet of the tiling has no row until someone claims a cell on it, and a cell has no row until someone claims it: a cell with no row is free. The first claim writes the sheet's row (`made` `grid`, `kind` `google`, pipeline from the variable `PIPELINE_NOW`) and the cell's, and then locks the cell as any other. The limits are the same as on a hand-made sheet, and they are asked before anything is written.
+
+The ground height of a new sheet is asked of the [Open-Meteo elevation API](https://open-meteo.com/en/docs/elevation-api) once, when the row is made: the sheet's origin, two numbers, and nothing about who claimed. 30 m is added for the geoid. When the answer does not come, the claim is refused with 503 `no_height` and nothing is written. The heights are from the Copernicus DEM (GLO-90) through Open-Meteo, and both ask to be named where the data is used.
+
+The ground inside a hand-made sheet's picture belongs to that sheet. `GET /place` answers the hand-made sheet there, and a claim on a cell of the tiling whose middle lies there is refused with `other_sheet`.
+
+`PIPELINE_NOW` in `wrangler.jsonc` has to be the pipeline the CLI ships (`cli/rutor/pipeline.py`); a test in `cli/tests` holds them together. Move both in the same change.
 
 States of a cell: `ute` (not offered: outside the built-up area, or no source to draw it from yet), `fri`, `last` (locked), `vantar` (uploaded, waiting for review), `godkand`, `live`. A live cell credited to `opensverige` is one the map showed before Pixelbygget.

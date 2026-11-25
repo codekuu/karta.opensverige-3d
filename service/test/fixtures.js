@@ -1,6 +1,7 @@
 /* Test fixtures: a sheet, its cells, a user, and a clean database. */
 
 import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
+import { vi } from 'vitest';
 import worker from '../src/index.js';
 
 export const NOW = '2026-11-17T12:00:00Z';
@@ -114,4 +115,27 @@ export async function call(request, overrides = {}) {
   const response = await worker.fetch(request, { ...env, TAKT: allow, ...overrides }, ctx);
   await waitOnExecutionContext(ctx);
   return response;
+}
+
+/**
+ * Stands in for the two services outside: GitHub answers that the caller is klang, and the
+ * elevation service answers `metres` for any point. `metres` may also be 'down' (no answer),
+ * a status code (an error answer) or a string (that body, as it is). Returns the list of
+ * elevation requests made, so a test can say what was asked and how often.
+ * @param {number | 'down' | string} [metres]
+ * @returns {Array<{ url: string, init: RequestInit | undefined }>}
+ */
+export function stubOutside(metres = 38) {
+  const asked = [];
+  vi.stubGlobal('fetch', async (url, init) => {
+    if (String(url).startsWith('https://api.open-meteo.com/')) {
+      asked.push({ url: String(url), init });
+      if (metres === 'down') throw new Error('no answer');
+      if (typeof metres === 'string') return new Response(metres, { status: 200 });
+      if (metres >= 400) return new Response('{}', { status: metres });
+      return new Response(JSON.stringify({ elevation: [metres] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ id: 4242, login: 'klang' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  return asked;
 }

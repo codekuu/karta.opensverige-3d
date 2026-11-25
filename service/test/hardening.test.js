@@ -4,8 +4,9 @@ import { env } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setBlock } from '../src/admin.js';
 import { resolveUser } from '../src/auth.js';
+import { claimCell } from '../src/cells.js';
 import { getGrid } from '../src/sheets.js';
-import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser, setCell } from './fixtures.js';
+import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser, rowCounts, setCell, stubOutside } from './fixtures.js';
 import { manifestHeader, minimalPng } from './png.js';
 
 const LATER = '2026-11-17T13:00:00Z';
@@ -186,5 +187,56 @@ describe('unblocking a builder', () => {
     expect(await setBlock(env.DB, { login: 'klang' }, 0, LATER)).toEqual({ ok: true });
     expect((await env.DB.prepare('SELECT blocked FROM users WHERE github_id = 4242').first()).blocked).toBe(0);
     expect(await getCell('goteborg-norr', 2, 1)).toMatchObject({ state: 'vantar', owner_id: 4242 });
+  });
+});
+
+describe('a claim on a sheet of the tiling', () => {
+  const HBG = 'se-n5602-e1262';
+  const klang = { github_id: 4242, login: 'klang', first_seen: NOW, approved_count: 0, trusted: 0, blocked: 0 };
+  const ebba = { github_id: 7, login: 'ebba', first_seen: NOW, approved_count: 0, trusted: 0, blocked: 0 };
+
+  it('is refused for an id that has the shape but lies outside Sweden or off the steps, and makes no row', async () => {
+    const asked = stubOutside(38);
+    for (const id of ['se-n5002-e1262', 'se-n5602-e0512', 'se-n5601-e1263', 'se-n5602-e1263', 'se-n9999-e9999']) {
+      expect(await claimCell(env.DB, klang, id, 0, 0, NOW, env), id).toMatchObject({ ok: false, status: 404, code: 'no_sheet' });
+    }
+    expect(await rowCounts()).toEqual({ sheets: 0, cells: 0 });
+    expect(asked).toHaveLength(0);
+  });
+
+  it('two first claims at the same moment make one sheet, and both cells are claimed', async () => {
+    stubOutside(38);
+    const [a, b] = await Promise.all([claimCell(env.DB, klang, HBG, 47, 16, NOW, env), claimCell(env.DB, ebba, HBG, 48, 16, NOW, env)]);
+    expect([a.ok, b.ok]).toEqual([true, true]);
+    expect(await rowCounts()).toEqual({ sheets: 1, cells: 2 });
+    expect((await getCell(HBG, 47, 16)).owner_login).toBe('klang');
+    expect((await getCell(HBG, 48, 16)).owner_login).toBe('ebba');
+  });
+
+  it('two first claims on the same cell at the same moment have one winner', async () => {
+    stubOutside(38);
+    const [a, b] = await Promise.all([claimCell(env.DB, klang, HBG, 47, 16, NOW, env), claimCell(env.DB, ebba, HBG, 47, 16, NOW, env)]);
+    expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
+    expect([a, b].find((r) => !r.ok)).toMatchObject({ status: 409, code: 'taken' });
+    expect(await rowCounts()).toEqual({ sheets: 1, cells: 1 });
+  });
+
+  it('is refused for a cell outside the size of the sheet, and makes no row', async () => {
+    const asked = stubOutside(38);
+    for (const [col, row] of [[61, 0], [0, 47], [9999, 9999]]) {
+      expect(await claimCell(env.DB, klang, HBG, col, row, NOW, env)).toMatchObject({ ok: false, status: 404, code: 'no_cell' });
+    }
+    expect(await rowCounts()).toEqual({ sheets: 0, cells: 0 });
+    expect(asked).toHaveLength(0);
+    // The same when the sheet has its row.
+    expect((await claimCell(env.DB, ebba, HBG, 60, 46, NOW, env)).ok).toBe(true);
+    expect(await claimCell(env.DB, klang, HBG, 61, 46, NOW, env)).toMatchObject({ ok: false, status: 404, code: 'no_cell' });
+    expect(await rowCounts()).toEqual({ sheets: 1, cells: 1 });
+  });
+
+  it('a hand-made sheet with missing cell rows is not filled in by a claim', async () => {
+    await insertSheet({ cols: 2, rows: 1 });
+    expect(await claimCell(env.DB, klang, 'goteborg-norr', 1, 0, NOW, env)).toMatchObject({ ok: false, status: 404, code: 'no_cell' });
+    expect(await rowCounts()).toEqual({ sheets: 1, cells: 0 });
   });
 });
