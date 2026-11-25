@@ -2,6 +2,9 @@
 
 import { env } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { claimCell } from '../src/cells.js';
+import { openSheet } from '../src/sheets.js';
+import { nearestCell, sheetAt } from '../src/tiling.js';
 import { NOW, call, clearDb, insertCell, insertSheet, rowCounts, setCell } from './fixtures.js';
 
 // A hand-made sheet over central Stockholm. The cells named below are what cli/rutor/frame.py
@@ -92,6 +95,20 @@ describe('GET /v1/place', () => {
       expect(body.row).toBeGreaterThanOrEqual(0);
       expect(body.row).toBeLessThan(47);
     }
+  });
+
+  it('answers a finished city with nothing free, and no claim is had there', async () => {
+    // The body the README gives for Malmö, with a height.
+    const malmo = { id: 'malmo-norr', city: 'malmo', name: 'Malmö', cols: 62, rows: 36, origin_lat: 55.605, origin_lon: 13, x_meters: -7680, y_meters: 3584, ground_height: 40, dzi_levels: 17, pipeline: '2026.11-a', state: 'done', queue_order: 2, kind: 'google', mask: [] };
+    expect(await openSheet(env.DB, malmo, NOW)).toEqual({ ok: true, cells: 2232, fri: 0 });
+    const body = await (await place('?lat=55.605&lon=13.0')).json();
+    expect(body).toMatchObject({ sheet: { id: 'malmo-norr', state: 'done', kind: 'google', made: 'hand', exists: true }, state: 'ute' });
+    const klang = { github_id: 4242, login: 'klang', first_seen: NOW, approved_count: 0, trusted: 0, blocked: 0 };
+    expect(await claimCell(env.DB, klang, 'malmo-norr', body.col, body.row, NOW, env)).toMatchObject({ ok: false, status: 403, code: 'sheet_closed' });
+    // The tiling's own sheet over the same ground is refused too.
+    const tile = sheetAt(55.605, 13.0);
+    const over = nearestCell(tile, 55.605, 13.0);
+    expect(await claimCell(env.DB, klang, tile.id, over.col, over.row, NOW, env)).toMatchObject({ ok: false, status: 409, code: 'other_sheet' });
   });
 
   it('is 404 outside for Oslo', async () => {

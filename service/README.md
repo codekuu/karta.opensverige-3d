@@ -101,6 +101,39 @@ The ground height of a new sheet is asked of the [Open-Meteo elevation API](http
 
 The ground inside a hand-made sheet's picture belongs to that sheet. `GET /place` answers the hand-made sheet there, and a claim on a cell of the tiling whose middle lies there is refused with `other_sheet`.
 
+### A city that is on the map and not open
+
+A city the map already shows whole, and that volunteers do not draw in, is registered as a hand-made sheet in the state `done` with an empty mask. Every cell is then `ute`, a click there resolves to that sheet with nothing free, and the tiling does not grid the ground again. Malmö is such a city. The maintainer sends this once, as the admin:
+
+```bash
+curl -sS -X POST "$BASE/v1/sheets" -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/json" -d @malmo-norr.json
+```
+
+with `malmo-norr.json`:
+
+```json
+{
+  "id": "malmo-norr",
+  "city": "malmo",
+  "name": "Malmö",
+  "cols": 62,
+  "rows": 36,
+  "origin_lat": 55.605,
+  "origin_lon": 13,
+  "x_meters": -7680,
+  "y_meters": 3584,
+  "ground_height": 0,
+  "dzi_levels": 17,
+  "pipeline": "2026.11-a",
+  "state": "done",
+  "queue_order": 2,
+  "kind": "google",
+  "mask": []
+}
+```
+
+The picture is 63488 by 36864 px, so 62 by 36 cells. Before sending, put Malmö's `groundHeight` from the live `karta.json` in `ground_height`: the 0 above is a placeholder, and a wrong height moves the picture's edge north or south by 0.7 m per metre. The service keeps no heading, so this holds for a city whose `heading` in `karta.json` is 0. The answer is `201 {"ok": true, "cells": 2232, "fri": 0}`.
+
 `PIPELINE_NOW` in `wrangler.jsonc` has to be the pipeline the CLI ships (`cli/rutor/pipeline.py`); a test in `cli/tests` holds them together. Move both in the same change.
 
 States of a cell: `ute` (not offered: outside the built-up area, or no source to draw it from yet), `fri`, `last` (locked), `vantar` (uploaded, waiting for review), `godkand`, `live`. A live cell credited to `opensverige` is one the map showed before Pixelbygget.
