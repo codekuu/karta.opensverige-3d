@@ -118,7 +118,7 @@ What is worth knowing:
 
 - **The page drives the same commands.** It starts `rutor claim`, `render`, `redraw` and `upload` as its own child processes and reads the lines they print. There is one drawing code, not two.
 - **The cell is locked when you press Rita,** not when you choose it. One cell at a time.
-- **Stopping gives the lock back.** Avbryt ends the running command and what it started, Node and Chrome too, and releases the cell. So does Ctrl-C.
+- **Stopping gives the lock back.** Avbryt ends the running command and what it started, Node and Chrome too, and releases the cell. So does Ctrl-C. The one exception is the last few seconds: a stop that comes while the picture is being sent waits for the sending to end, and the cell then waits for review. A picture that is half sent may already be with the service.
 - **A closed tab stops the job too,** after two and a half minutes without the page asking. A tab you have only switched away from keeps asking and keeps the job.
 - **Nothing runs when the page is closed.** No scheduled job, no service, no background loop.
 - **The page is for you alone.** It listens on 127.0.0.1, under an address with a long random key that is new at every start, and loads nothing from outside. Whoever has that address can build cells as you while the page is up, so keep it to yourself.

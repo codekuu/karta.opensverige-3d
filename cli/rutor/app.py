@@ -119,7 +119,7 @@ MEMORY_MARGIN_GB = 4
 def machine() -> dict[str, object]:
     needed = int(commands.DISK_MIN_CACHED_GB if commands._model_is_cached() else commands.DISK_MIN_GB)
     left = app_install.left_to_fetch_gb()
-    if left is not None:
+    if left is not None and left > 0:
         # An app install fetches everything itself, and knows how much is left. Asking for
         # the whole amount again would stop a fetch that is half done from going on.
         needed = max(int(commands.DISK_MIN_CACHED_GB), math.ceil(left + app_install.HEADROOM_GB))
@@ -459,12 +459,14 @@ _SAID_WHY = (
 # How long a stop waits for an upload to end by itself before the upload is ended too.
 UPLOAD_GRACE_SECONDS = 45.0
 
-# A stored login the service could not be asked about is asked about again, this often.
+# A stored login the service could not be asked about is asked about again, this long after
+# the ask that failed ended. The ask itself is short: the page waits for it.
 LOGIN_RETRY_SECONDS = 30.0
+LOGIN_ASK_SECONDS = 5.0
 
 
 def my_locks() -> list[tuple[str, str]]:
-    """The cells the logged-in person holds a lock on, as (sheet, cell). None when unknown."""
+    """The cells the logged-in person holds a lock on, as (sheet, cell). Empty when unknown."""
     token = config.read_token()
     if not token:
         return []
@@ -553,6 +555,13 @@ class Builder:
         # A claim that ended without saying whether the service gave the lock.
         self._unsure = False
         self._releasing = False
+        # A lock found from before, which stands in the way of a claim. It is given back
+        # only when the person presses again for the cell that was refused.
+        self._adopted = False
+        # A stop was asked for while the upload was out, and waits for it to end.
+        self._finishing = False
+        # The release after a failed upload has been tried already, inside the job.
+        self._asked_back = False
         self._lines: list[str] = []
         self._seen = clock()
         self._job_run: app_jobs.Run | None = None
@@ -661,14 +670,17 @@ class Builder:
                 self._looked = True
             return
         try:
-            _status, me = api.get("/v1/me", token=token)
+            _status, me = api.get("/v1/me", token=token, timeout=LOGIN_ASK_SECONDS)
         except RutorError as exc:
             # A refusal is an answer: nobody is logged in. A service that could not be
             # reached is not, and a person who logged in yesterday is not asked to do it
             # again because the network was slow at start.
-            if exc.code != 4:
-                with self._lock:
+            with self._lock:
+                if exc.code != 4:
                     self._looked = True
+                # Counted from now, when the ask ended: a service that is slow to fail
+                # would otherwise be asked again by the very next look.
+                self._asked_at = self._clock()
             return
         with self._lock:
             self._looked = True
@@ -686,6 +698,12 @@ class Builder:
         with self._lock:
             if self._busy():
                 raise Refusal(409, "a cell is being built", "busy")
+            if self._adopted and (sheet, col, row) != (self._sheet, self._col, self._row):
+                # The lock from before was to be given back for the cell that was refused.
+                # Another cell is another question, and the lock may be one the person is
+                # drawing in a terminal.
+                self._held = None
+                self._adopted = False
             self._sheet = sheet
             self._col = col
             self._row = row
@@ -753,6 +771,7 @@ class Builder:
                 # service may have and the page does not know about. It is given a while
                 # to finish by itself.
                 uploading = self._phase == "upload"
+                self._finishing = uploading
                 run = self._job_run
             else:
                 uploading = False
@@ -761,6 +780,7 @@ class Builder:
         if uploading and thread is not None and thread is not threading.current_thread():
             thread.join(timeout=UPLOAD_GRACE_SECONDS)
             with self._lock:
+                self._finishing = False
                 # Still the same child, still out: it is ended like any other.
                 run = self._job_run if self._job_run is run else None
         if run is not None:
@@ -809,6 +829,9 @@ class Builder:
                 "col": self._col,
                 "row": self._row,
                 "held": self._held is not None,
+                # The cell a lock from before is on, for the sentence that names it.
+                "old": f"{self._held[0]} {self._held[1]}" if self._adopted and self._held else "",
+                "finishing": self._finishing,
             }
 
     def job_lines(self) -> list[str]:
@@ -842,10 +865,13 @@ class Builder:
                 self._job_problem = problem
             # No command runs now, so there is no progress line left to show.
             self._detail = ""
-            # An earlier cell's lock that was just asked back in vain is not asked a third time.
+            self._finishing = False
+            # An earlier cell's lock that was just asked back in vain is not asked a third time,
+            # and neither is one that was asked back inside the job, after a failed upload.
             # One found from before is given back when the person presses again, not behind
             # their back: it may be a cell they are drawing in a terminal.
-            kept = problem in ("lock_left", "old_lock")
+            kept = problem in ("lock_left", "old_lock") or self._asked_back
+            self._asked_back = False
             held = None if kept else self._held
             unsure = self._unsure and held is None and not kept
             # A lock that is still out is given back before another job may start.
@@ -863,12 +889,6 @@ class Builder:
                         # and asked back by its own name before the next cell is claimed.
                         with self._lock:
                             self._held = (sheet, cell)
-                if answer == "uploaded" and (held is None or held == (sheet, cell)):
-                    # The service has this cell's picture: the upload went in, and it was
-                    # only its answer that was lost. That is a cell waiting for review.
-                    with self._lock:
-                        self._phase = "done"
-                        self._job_problem = ""
             except Exception as exc:  # noqa: BLE001 - the page still has to learn it ended
                 print(f"app: {type(exc).__name__} while releasing", file=sys.stderr)
             finally:
@@ -882,10 +902,16 @@ class Builder:
         if left is not None:
             # A lock from an earlier job that could not be given back then. A new builder may
             # hold one cell, so it is asked back before another is claimed, by its own name.
-            self._release(left[0], left[1], tries=2)
+            answer = self._release(left[0], left[1], tries=2)
             with self._lock:
+                self._adopted = False
                 if self._held is not None:
                     return "lock_left"
+            if answer == "uploaded" and left == (sheet, cell):
+                # This very cell went in last time: its upload was stored, and the answer and
+                # the release after it were both lost. It waits for review. It is not claimed
+                # again, which the service would refuse as taken.
+                return ""
         for command in ("claim", "render", "redraw", "upload"):
             with self._lock:
                 if self._stop_asked:
@@ -958,10 +984,20 @@ class Builder:
                             if word == "locks" and self._adopt_lock():
                                 return "old_lock"
                             return word
+            problem = _PROBLEM_BY_EXIT.get(exit_code, "failed")
             for said, word in _SAID_WHY:
                 if said in last_error:
-                    return word
-            return _PROBLEM_BY_EXIT.get(exit_code, "failed")
+                    problem = word
+                    break
+            if command == "upload":
+                # An upload can be stored without its answer coming back. The lock is asked
+                # back here, while the job is still the upload, and the service's answer
+                # says which it was: the page is never told "failed" and then "done".
+                with self._lock:
+                    self._asked_back = True
+                if self._release(sheet, cell, tries=2) == "uploaded":
+                    return ""
+            return problem
         return ""
 
     def _adopt_lock(self) -> bool:
@@ -977,6 +1013,7 @@ class Builder:
         with self._lock:
             if self._held is None:
                 self._held = locks[0]
+                self._adopted = True
         return True
 
     def _release(self, sheet: str, cell: str, tries: int) -> str:
@@ -1429,7 +1466,7 @@ def _scrub(text: str) -> str:
         # Which of these a system without a user name raises depends on the Python.
         pass
     # The same folder written as an address: file:///C:/Users/Ebba%20Ek/...
-    for spelled in {urllib.parse.quote(home.as_posix()), urllib.parse.quote(str(home))}:
+    for spelled in {urllib.parse.quote(home.as_posix()), urllib.parse.quote(home.as_posix(), safe="/:"), urllib.parse.quote(str(home))}:
         if spelled and spelled != "/":
             text = text.replace(spelled, "~")
     for name in list(names):

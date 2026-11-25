@@ -17,6 +17,12 @@ Three independent readers went through the repository on 2026-11-25: one as a ne
 - **The secret without the app's id let any GitHub token in.** `secret && clientId` fell back to "any token" when the id was empty. It answers 503 now.
 - **pip and npm ran under the person's own settings.** A `pip.ini` with `user = true`, `PIP_REQUIRE_VIRTUALENV`, or an `.npmrc` with `ignore-scripts` would each have ended the fetch somewhere the app never looks. Not seen on a machine: found by reading.
 - **The machine check asked for 25 GB free after 9 of the 16 were already on the disk.** A fetch that was stopped halfway could not go on. An app install is asked for what is left plus the headroom.
+- **A fourth reader went through the fixes and found two holes in them.** A lost upload answer followed by a release nobody answered still ended as "taken" at the next press: the release's `already_uploaded` was thrown away and the same cell claimed again. And a stored login was asked about with the command's 30 second timeout, with the pause counted from before the ask, so a slow service held every look at the page for a minute. The ask is 5 seconds now and the pause is counted from its end.
+- **The page was told "failed" and then "done".** After a failed upload the lock is asked back while the job is still the upload, so the page hears one answer.
+- **A stop during the upload waits for the upload.** Up to 45 seconds. The page says "Skickar in klart först", and the cell then waits for review. Ending the upload halfway left a cell the service might have and the page did not know about.
+- **A lock from before is named, and is given back only for the cell that was refused.** `/v1/me` lists every lock, on any sheet, and one of them may be a cell the person is drawing in a terminal. Choosing another cell forgets it.
+- **Only a failed write takes an uploaded picture away again.** The first fix also deleted it when the database call threw, which could leave a cell pointing at nothing if the change had gone through.
+- **A test that could not fail was taken out:** `expireLocks` returned the same number before and after its fix in the one case the test made.
 - **Not fixed, and why:** the builder never sees the comment on a rejected cell (needs a column); the same builder can hold a cell for ever by releasing and claiming again; one account can use up the database's daily writes; approve names a cell, not an upload. Each needs a decision or a migration.
 - **Not tried:** any of the new sentences on a real machine; pip and npm with the new settings on Windows.
 

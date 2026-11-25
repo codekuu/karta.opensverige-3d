@@ -260,9 +260,6 @@ class NetworkFaultTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, 4)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class LoginWaitTests(unittest.TestCase):
     def _poll(self, answers: list[object]) -> str:
@@ -383,3 +380,122 @@ class DiskForAHalfDoneFetchTests(unittest.TestCase):
     def test_an_install_made_by_hand_keeps_its_rule(self) -> None:
         found = self._machine(free=20.0, left=None)
         self.assertEqual((found["ok"], found["problem"], found["needed_gb"]), (False, "disk", 25))
+
+
+class SecondRoundTests(_Jobs):
+    """What a second reader found in the first round's fixes."""
+
+    def test_a_lost_answer_and_a_release_nobody_answered_is_still_a_cell_that_went_in(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [CLAIMED])
+        fake.script("upload", [], code=4)
+        # The network is down for the release too, which is the likely case: it runs in the
+        # same second as the upload that lost its answer.
+        fake.script("release", [], code=4)
+        fake.script("release", [], code=4)
+        builder.choose(SHEET, 74, 20)
+        builder.build()
+        state = self._ended(builder)
+        self.assertEqual((state["phase"], state["problem"], state["held"]), ("failed", "network", True))
+        claims = self._argvs(fake).count(["claim", SHEET, CELL])
+        # Försök igen. The service says what became of the cell, and it is not claimed again.
+        fake.script("release", ["error: refused: already_uploaded: no"], code=2)
+        builder.build()
+        state = self._ended(builder)
+        self.assertEqual((state["phase"], state["problem"], state["held"]), ("done", "", False))
+        self.assertEqual(self._argvs(fake).count(["claim", SHEET, CELL]), claims)
+
+    def test_the_page_is_not_told_failed_before_it_is_told_done(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [CLAIMED])
+        fake.script("upload", [], code=4)
+        fake.script("release", [], code=2, hold=True)
+        builder.choose(SHEET, 74, 20)
+        builder.build()
+        base.wait_until(lambda: ["release", SHEET, CELL] in self._argvs(fake))
+        # While the service is asked what became of the cell, the job is still the upload.
+        self.assertEqual(builder.job_state()["phase"], "upload")
+        fake.runs[-1].say("error: refused: already_uploaded: no")
+        fake.runs[-1].release()
+        self.assertEqual(self._ended(builder)["phase"], "done")
+
+    def test_a_stop_during_the_upload_says_that_the_upload_is_finishing(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", [CLAIMED])
+        fake.script("upload", [], hold=True)
+        builder.choose(SHEET, 74, 20)
+        builder.build()
+        base.wait_until(lambda: builder.job_state()["phase"] == "upload")
+        self.assertIs(builder.job_state()["finishing"], False)
+        stopper = base.threading.Thread(target=builder.stop)
+        stopper.start()
+        base.wait_until(lambda: builder.job_state()["finishing"] is True)
+        fake.runs[-1].say(f"uploaded: {SHEET} {CELL} state vantar")
+        fake.runs[-1].release()
+        stopper.join(timeout=10)
+        state = self._ended(builder)
+        self.assertEqual((state["phase"], state["finishing"]), ("done", False))
+
+    def test_a_lock_from_before_is_named_and_is_not_given_back_for_another_cell(self) -> None:
+        builder, fake = self._builder()
+        fake.script("claim", ["error: refused: too_many_locks: no"], code=2)
+        builder.choose(SHEET, 75, 20)
+        with patch("rutor.app.my_locks", return_value=[("goteborg-norr", "3_4")]):
+            builder.build()
+            state = self._ended(builder)
+        self.assertEqual((state["problem"], state["old"]), ("old_lock", "goteborg-norr 3_4"))
+        # It may be a cell the person is drawing in a terminal. Only pressing again, for
+        # the cell that was refused, gives it back: choosing another cell forgets it.
+        builder.choose(SHEET, 76, 20)
+        self.assertEqual((builder.job_state()["held"], builder.job_state()["old"]), (False, ""))
+        fake.script("claim", [f"claimed: {SHEET} 76_20 expires 2026-11-25T12:00"])
+        fake.script("upload", [f"uploaded: {SHEET} 76_20 state vantar"])
+        builder.build()
+        self._ended(builder)
+        self.assertNotIn(["release", "goteborg-norr", "3_4"], self._argvs(fake))
+
+    def test_a_service_that_closed_is_a_no_and_not_the_network(self) -> None:
+        with patch("rutor.api._exchange", return_value=(503, b'{"error":"closed","message":"Pixelbygget is closed for the moment."}')):
+            with self.assertRaises(RutorError) as caught:
+                api.get("/v1/me", token="t")
+        self.assertEqual(caught.exception.code, 2)
+
+
+class SecondRoundLoginTests(base._OwnHome):
+    def test_a_slow_service_does_not_hold_the_page_for_long_or_often(self) -> None:
+        config.write_token("test-token")
+        self.now = 0.0
+        builder = app.Builder(base.FakeStart(), clock=lambda: self.now)
+        self.addCleanup(builder.shutdown)
+
+        def slow(path: str, token: str | None = None, timeout: float | None = None) -> tuple[int, object]:
+            del path, token
+            # The page waits a few seconds for this, not the half minute a command may take.
+            self.assertEqual(timeout, app.LOGIN_ASK_SECONDS)
+            self.now += 40.0
+            raise network("slow")
+
+        with patch("rutor.api.get", side_effect=slow) as asked:
+            builder.login_state()
+            # The pause is counted from when the ask ended, so a slow service is not asked
+            # again by the very next look.
+            builder.login_state()
+            builder.terms_accepted()
+            self.assertEqual(asked.call_count, 1)
+
+
+class SecondRoundDiskTests(DiskForAHalfDoneFetchTests):
+    def test_a_finished_app_install_needs_no_more_than_one_made_by_hand(self) -> None:
+        found = self._machine_cached(free=3.0, left=0.0)
+        self.assertEqual((found["ok"], found["needed_gb"]), (True, 2))
+
+    def _machine_cached(self, free: float, left: float | None) -> dict[str, object]:
+        with (
+            patch("rutor.app._platform", return_value="win32"),
+            patch("rutor.commands._nvidia_cards", return_value=[("RTX 5070", 12282)]),
+            patch("rutor.commands._nvidia_driver", return_value="616.56"),
+            patch("rutor.commands._free_gb", return_value=free),
+            patch("rutor.commands._model_is_cached", return_value=True),
+            patch("rutor.app_install.left_to_fetch_gb", return_value=left),
+        ):
+            return app.machine()

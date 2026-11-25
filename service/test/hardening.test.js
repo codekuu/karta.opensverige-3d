@@ -4,7 +4,6 @@ import { env } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setBlock } from '../src/admin.js';
 import { resolveUser } from '../src/auth.js';
-import { expireLocks } from '../src/cron.js';
 import { getGrid } from '../src/sheets.js';
 import { NOW, call, clearDb, getCell, insertCells, insertSheet, insertUser, setCell } from './fixtures.js';
 import { manifestHeader, minimalPng } from './png.js';
@@ -178,12 +177,14 @@ describe('an upload that fails after the picture is stored', () => {
   });
 });
 
-describe('expireLocks', () => {
-  it('counts the locks it freed, not the ones it read', async () => {
+describe('unblocking a builder', () => {
+  it('changes nothing but the block', async () => {
     await insertSheet();
     await insertCells('goteborg-norr', 4, 3);
-    await setCell('goteborg-norr', 0, 0, { state: 'last', owner_id: 4242, owner_login: 'klang', expires_at: '2026-11-17T11:00:00Z' });
-    expect(await expireLocks(env.DB, NOW)).toBe(1);
-    expect(await expireLocks(env.DB, NOW)).toBe(0);
+    await insertUser({ blocked: 1 });
+    await setCell('goteborg-norr', 2, 1, { state: 'vantar', owner_id: 4242, owner_login: 'klang', uploaded_at: NOW });
+    expect(await setBlock(env.DB, { login: 'klang' }, 0, LATER)).toEqual({ ok: true });
+    expect((await env.DB.prepare('SELECT blocked FROM users WHERE github_id = 4242').first()).blocked).toBe(0);
+    expect(await getCell('goteborg-norr', 2, 1)).toMatchObject({ state: 'vantar', owner_id: 4242 });
   });
 });

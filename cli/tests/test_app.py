@@ -943,6 +943,8 @@ class JobTests(_OwnHome):
                 "col": 74,
                 "row": 20,
                 "held": False,
+                "old": "",
+                "finishing": False,
             },
         )
 
@@ -961,6 +963,8 @@ class JobTests(_OwnHome):
                 "col": 74,
                 "row": 20,
                 "held": False,
+                "old": "",
+                "finishing": False,
             },
         )
         self.assertEqual(builder.chosen(), {"sheet": self.SHEET, "col": 74, "row": 20})
@@ -1252,6 +1256,8 @@ class JobTests(_OwnHome):
                 "col": 75,
                 "row": 21,
                 "held": False,
+                "old": "",
+                "finishing": False,
             },
         )
 
@@ -2734,6 +2740,12 @@ class PageFilesTests(unittest.TestCase):
             self.assertIn(said, page)
         # A fetch whose bytes did not match can be tried again: the bad file is gone.
         self.assertNotIn('i.problem === "changed"', script)
+        # A stop during the upload is said to wait for it, and a lock from before is named.
+        self.assertIn("Skickar in klart först.", script)
+        self.assertIn('"Låst sedan förut: " + j.old', script)
+        self.assertIn('slut && j.problem !== "daily"', script)
+        for said in ("bekostnad och risk", "för forskning och utvärdering, inte kommersiellt", "Google kan stänga din åtkomst"):
+            self.assertIn(said, page)
         # No "try again" where it would get the same answer.
         self.assertIn('!["taken", "daily", "old_app"].includes(j.problem)', script)
         # A cell that waits is said to wait, and where it shows.

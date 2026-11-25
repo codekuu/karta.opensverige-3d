@@ -43,10 +43,10 @@ const ORD = {
     locks: "Du har redan en låst ruta. Den släpps inom två dygn.",
     waiting: "Fem av dina rutor väntar på granskning. Vänta tills en är granskad.",
     lock_left: "En tidigare ruta är fortfarande låst. Försök igen om en stund.",
-    old_lock: "Du har en låst ruta sedan förut. Tryck Försök igen, så släpps den.",
+    old_lock: "Du har en låst ruta sedan förut. Tryck Försök igen, så släpps den och den här ritas.",
     daily: "Du har skickat in 20 rutor i dag. Fortsätt i morgon.",
     old_app: "Appen är för gammal för kartbladet. Hämta den nya versionen.",
-    quota: "Ditt Cesium-konto har nått sin gräns för nu. Försök igen i morgon.",
+    quota: "Cesium tar inte emot fler hämtningar från ditt konto just nu. Försök igen senare.",
     token: "Cesium tog inte emot nyckeln. Byt nyckel i steg 4.",
   },
   hamtning: {
@@ -563,7 +563,8 @@ function steg7(s) {
   // day's limit is reached, or the app is too old for the sheet.
   visa("slut-igen", slut && !["taken", "daily", "old_app"].includes(j.problem));
   el("slut-igen").disabled = upptagen;
-  visa("slut-annan", slut);
+  // Nor another cell when the day's limit is reached: it would be drawn and then refused.
+  visa("slut-annan", slut && j.problem !== "daily");
   visa("slut-kopiera", j.phase === "failed");
 
   if (fraga) {
@@ -592,14 +593,17 @@ function steg7(s) {
       rad.classList.toggle("nu", plats === nu);
     }
     text("fas-rita-tid", s.tools.model_cached === false ? "12 GB hämtas först" : "ungefär 2 min");
-    text("rita-detalj", j.detail || "");
+    // A stop that came during the upload waits for it: the cell may already be with the service.
+    text("rita-detalj", j.finishing ? "Skickar in klart först. Det tar några sekunder." : j.detail || "");
     return;
   }
 
   const avbrutet = j.phase === "stopped";
   text("rubrik-7", avbrutet ? "Ritandet avbröts" : "Rutan blev inte ritad");
   el("slut-besked").classList.toggle("nejruta", !avbrutet);
-  text("slut-besked", stegFel || (avbrutet ? "Ritandet stannade. Kortet är ledigt igen." : ord("jobb", j.problem)));
+  // A lock from before is named, so that the person knows which cell is given back.
+  const gammalt = j.problem === "old_lock" && j.old ? "Låst sedan förut: " + j.old + ". " : "";
+  text("slut-besked", stegFel || (avbrutet ? "Ritandet stannade. Kortet är ledigt igen." : gammalt + ord("jobb", j.problem)));
   // Where the sentence above already says which cell is locked, or that none was, no more is said.
   const sagt = ["taken", "locks", "waiting", "lock_left", "old_lock"].includes(j.problem);
   visa("slut-las", !sagt);
