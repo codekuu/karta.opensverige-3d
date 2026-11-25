@@ -465,6 +465,21 @@ class InstallJobTests(_Install):
         self.assertEqual(self.state()["phase"], "done")
         self.assertFalse(only.exists())
 
+    def test_pip_and_npm_do_not_run_under_the_persons_own_settings(self) -> None:
+        # A pip.ini with "user = true" or another index, PIP_REQUIRE_VIRTUALENV, or an .npmrc
+        # with ignore-scripts would each make the fetch end somewhere the app never looks.
+        self.installer.run()
+        _name, _pip, pip_env = self.children.calls[0]
+        self.assertEqual(pip_env["PIP_CONFIG_FILE"], os.devnull)
+        self.assertEqual(pip_env["PIP_USER"], "0")
+        self.assertEqual(pip_env["PIP_REQUIRE_VIRTUALENV"], "0")
+        self.assertEqual(pip_env["PIP_INDEX_URL"], "https://pypi.org/simple")
+        _name, _npm, npm_env = self.children.calls[1]
+        settings = Path(npm_env["npm_config_userconfig"])
+        self.assertEqual(settings.parent, self.app)
+        self.assertEqual(npm_env["npm_config_globalconfig"], str(settings))
+        self.assertEqual(npm_env["npm_config_ignore_scripts"], "false")
+
     def test_npm_keeps_its_cache_in_the_apps_folder_and_takes_it_away(self) -> None:
         self.installer.run()
         _name, _npm, env = self.children.calls[1]

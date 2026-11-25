@@ -20,6 +20,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -47,6 +48,7 @@ MANIFEST = Path(__file__).with_name("app_install.json")
 LOCK_NAME = "requirements-app.lock"
 # Wheels the installer carries: diffusers, which is pinned by commit and is on no index.
 WHEELS = "wheels"
+PYPI_INDEX = "https://pypi.org/simple"
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 
 # Written when a phase has ended well, beside what the phase made, so that a folder that
@@ -387,6 +389,44 @@ def _is_full(exc: OSError) -> bool:
     return exc.errno == errno.ENOSPC
 
 
+def _on_disk(app: Path, manifest: _Manifest, name: str) -> int:
+    """How much of a phase is on the disk, in bytes, and never more than the phase holds."""
+    size = manifest.size(name)
+    if _complete(app, manifest, name):
+        return size
+    if name == "stack":
+        # pip holds what it has fetched in its temp folder, and keeps finished wheels
+        # in its cache across a failure.
+        return min(size, max(_tree_bytes(app / "tmp"), _tree_bytes(app / "pip-cache")))
+    if name == "node":
+        try:
+            return min(size, (app / "downloads" / "node.zip").stat().st_size)
+        except OSError:
+            return 0
+    if name == "renderer":
+        # The packages, and the Chrome that puppeteer fetches into the app's folder.
+        return min(size, _tree_bytes(google.default_render_dir() / "node_modules") + _tree_bytes(app / "chrome"))
+    cache = commands._hub_cache()
+    held = 0
+    for repo in (pipeline.MODEL_ID, pipeline.LORA_ID):
+        # The whole folder: where links cannot be made, the hub library moves a
+        # finished file out of blobs and into snapshots.
+        held += _tree_bytes(cache / ("models--" + repo.replace("/", "--")))
+    return min(size, held)
+
+
+def left_to_fetch_gb() -> float | None:
+    """How much an app install has left to fetch, in GB. None where nothing is fetched."""
+    app = config.app_dir()
+    if app is None or not is_app():
+        return None
+    try:
+        manifest = load_manifest()
+        return sum(manifest.size(name) - _on_disk(app, manifest, name) for name in PHASES) / 1e9
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 class Installer:
     """Fetches what an app install lacks, one phase after the other, and says how far it is.
 
@@ -604,6 +644,14 @@ class Installer:
             "PIP_NO_INPUT": "1",
             # Packages the person installed for another Python of theirs are not this one's.
             "PYTHONNOUSERSITE": "1",
+            # Nor are their settings for pip: a pip.ini with "user = true" or another index,
+            # or PIP_REQUIRE_VIRTUALENV, would put the stack where this Python never looks,
+            # or stop it. No settings file is read, and what a variable may have set is
+            # set back.
+            "PIP_CONFIG_FILE": os.devnull,
+            "PIP_USER": "0",
+            "PIP_REQUIRE_VIRTUALENV": "0",
+            "PIP_INDEX_URL": PYPI_INDEX,
             **_UTF8,
         }
         argv = [
@@ -721,6 +769,10 @@ class Installer:
             return
         node = app / "node"
         cache = app / "npm-cache"
+        # npm reads the person's own .npmrc otherwise. One that says ignore-scripts would
+        # skip the step that fetches Chrome, and the first render would fail under a lock.
+        settings = app / "npmrc"
+        settings.write_text("", encoding="utf-8")
         code, said = self._child(
             [
                 # npm's own program, run by the app's Node. npm.cmd would go through cmd.exe,
@@ -735,7 +787,14 @@ class Installer:
             ],
             # The packages' own install steps start `node`, and must find this one. npm's
             # cache is kept in the app's folder, so that nothing is left in the person's own.
-            {**config.tool_env(), "npm_config_cache": str(cache), "npm_config_update_notifier": "false"},
+            {
+                **config.tool_env(),
+                "npm_config_cache": str(cache),
+                "npm_config_update_notifier": "false",
+                "npm_config_userconfig": str(settings),
+                "npm_config_globalconfig": str(settings),
+                "npm_config_ignore_scripts": "false",
+            },
         )
         if code != 0:
             raise self._ended_badly(said)
@@ -775,29 +834,7 @@ class Installer:
             (app / MODEL_MARKER).unlink(missing_ok=True)
 
     def _on_disk(self, app: Path, manifest: _Manifest, name: str) -> int:
-        """How much of a phase is on the disk, in bytes, and never more than the phase holds."""
-        size = manifest.size(name)
-        if _complete(app, manifest, name):
-            return size
-        if name == "stack":
-            # pip holds what it has fetched in its temp folder, and keeps finished wheels
-            # in its cache across a failure.
-            return min(size, max(_tree_bytes(app / "tmp"), _tree_bytes(app / "pip-cache")))
-        if name == "node":
-            try:
-                return min(size, (app / "downloads" / "node.zip").stat().st_size)
-            except OSError:
-                return 0
-        if name == "renderer":
-            # The packages, and the Chrome that puppeteer fetches into the app's folder.
-            return min(size, _tree_bytes(google.default_render_dir() / "node_modules") + _tree_bytes(app / "chrome"))
-        cache = commands._hub_cache()
-        held = 0
-        for repo in (pipeline.MODEL_ID, pipeline.LORA_ID):
-            # The whole folder: where links cannot be made, the hub library moves a
-            # finished file out of blobs and into snapshots.
-            held += _tree_bytes(cache / ("models--" + repo.replace("/", "--")))
-        return min(size, held)
+        return _on_disk(app, manifest, name)
 
 
 # pip writes a pipe in the machine's own code page, and the page reads UTF-8. Without this

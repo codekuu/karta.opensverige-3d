@@ -356,3 +356,30 @@ class ReportScrubTests(unittest.TestCase):
         token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "a" * 300
         said = self._scrub(f"token={token[:120]}… failed", r"C:\Users\ebba", [token])
         self.assertNotIn("eyJhbGciOiJIUzI1NiIs", said)
+
+
+class DiskForAHalfDoneFetchTests(unittest.TestCase):
+    def _machine(self, free: float, left: float | None) -> dict[str, object]:
+        with (
+            patch("rutor.app._platform", return_value="win32"),
+            patch("rutor.commands._nvidia_cards", return_value=[("RTX 5070", 12282)]),
+            patch("rutor.commands._nvidia_driver", return_value="616.56"),
+            patch("rutor.commands._free_gb", return_value=free),
+            patch("rutor.commands._model_is_cached", return_value=False),
+            patch("rutor.app_install.left_to_fetch_gb", return_value=left),
+        ):
+            return app.machine()
+
+    def test_what_is_already_fetched_is_not_asked_for_again(self) -> None:
+        # 27 GB free at the start, the stack fetched and unpacked, 20 GB free now and 12 GB
+        # left to fetch. The fixed 25 said "the disk is too full" and the fetch could not go on.
+        found = self._machine(free=20.0, left=12.4)
+        self.assertEqual((found["ok"], found["problem"], found["needed_gb"]), (True, "", 17))
+
+    def test_too_little_for_what_is_left_is_still_a_no(self) -> None:
+        found = self._machine(free=10.0, left=12.4)
+        self.assertEqual((found["ok"], found["problem"]), (False, "disk"))
+
+    def test_an_install_made_by_hand_keeps_its_rule(self) -> None:
+        found = self._machine(free=20.0, left=None)
+        self.assertEqual((found["ok"], found["problem"], found["needed_gb"]), (False, "disk", 25))

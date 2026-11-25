@@ -2,6 +2,24 @@
 
 What we tried, what we measured and what we changed. Newest first. One entry per finding, with the number that decided it. Images, renders and raw logs stay outside the repository; this file keeps the conclusions.
 
+## 2026-11-25
+
+### Three reviewers read the whole contribution path
+Three independent readers went through the repository on 2026-11-25: one as a newcomer on each of the three ways in (the app, an agent, the terminal), one hunting bugs in the CLI, the app page and the installer, one in the service. They found 52 things. What was fixed is in the same change as this entry.
+- **A lock could be left with nothing running, in four ways.** An upload whose answer was lost; an app that was ended in the middle of a cell; a claim that crashed (exit 1 was read as "certainly no lock"); a claim and its release both cut off by the same dead network. A new builder may hold one cell, so each of them locked the person out for up to 48 hours with nothing on the page to press.
+- **A release the service refuses with `already_uploaded` is a cell that went in.** The page now says done. `not_yours` and `no_cell` mean there is no lock of ours, and are not asked about again.
+- **"Try again" was said for things trying again cannot fix.** The daily limit of 20, a pipeline the sheet no longer takes, a used-up Cesium quota and a token refused in the middle of a render each have a sentence now. A person who is told to try again tries again.
+- **An old pipeline was found out at upload, after the whole drawing.** The page refuses Rita at once.
+- **"Lediga rutor saknas på kartan" reads as "no cell is free".** It meant "the map lacks them". It stood above a map of free cells.
+- **The terms were in English only on a Swedish page.** Four lines in Swedish stand above the ten, the choice about Google's tiles among them. The English text is the one that applies.
+- **A live cell the admin took down was shown as free and could not be claimed.** `pick_next` is the same for everyone, so every `--next` picked that cell and was refused until the tiles were blanked. The grid shows it as locked.
+- **429 `rate_limited` and every 5xx exited 2, "refused".** AGENTS.md tells an agent to report a refusal and to retry exit 4. They exit 4 now. 429 `daily_limit` is the person's own limit and stays a refusal.
+- **The secret without the app's id let any GitHub token in.** `secret && clientId` fell back to "any token" when the id was empty. It answers 503 now.
+- **pip and npm ran under the person's own settings.** A `pip.ini` with `user = true`, `PIP_REQUIRE_VIRTUALENV`, or an `.npmrc` with `ignore-scripts` would each have ended the fetch somewhere the app never looks. Not seen on a machine: found by reading.
+- **The machine check asked for 25 GB free after 9 of the 16 were already on the disk.** A fetch that was stopped halfway could not go on. An app install is asked for what is left plus the headroom.
+- **Not fixed, and why:** the builder never sees the comment on a rejected cell (needs a column); the same builder can hold a cell for ever by releasing and claiming again; one account can use up the database's daily writes; approve names a cell, not an upload. Each needs a decision or a migration.
+- **Not tried:** any of the new sentences on a real machine; pip and npm with the new settings on Windows.
+
 ## 2026-11-24
 
 ### The installer, built and tried on GitHub

@@ -17,6 +17,7 @@ import contextlib
 import getpass
 import importlib
 import json
+import math
 import os
 import platform
 import re
@@ -117,6 +118,11 @@ MEMORY_MARGIN_GB = 4
 
 def machine() -> dict[str, object]:
     needed = int(commands.DISK_MIN_CACHED_GB if commands._model_is_cached() else commands.DISK_MIN_GB)
+    left = app_install.left_to_fetch_gb()
+    if left is not None:
+        # An app install fetches everything itself, and knows how much is left. Asking for
+        # the whole amount again would stop a fetch that is half done from going on.
+        needed = max(int(commands.DISK_MIN_CACHED_GB), math.ceil(left + app_install.HEADROOM_GB))
     free = commands._free_gb()
     card = ""
     card_gb = 0

@@ -55,7 +55,7 @@ Read this before you start. It is what building a cell asks of you and your mach
 **What you agree to**, in ten lines in [TERMS.md](TERMS.md):
 
 - It is voluntary and unpaid, at your own risk.
-- Only the finished picture leaves your machine.
+- Only the finished picture and its short manifest leave your machine.
 - The redraw model has a research license that does not allow commercial use.
 - `stockholm-norr` is drawn from Google's 3D tiles through your Cesium account. Google's policy does not allow that. You decide for yourself.
 
@@ -65,7 +65,7 @@ The quickest way to know whether a machine will do is `rutor preflight --machine
 
 ## What this is
 
-This repository is the `rutor` tool and the pinned redraw pipeline. You do not push claims or tiles with git. The PNG you upload is the only thing that leaves your machine, and it is the redraw, not the source render.
+This repository is the `rutor` tool and the pinned redraw pipeline. You do not push claims or tiles with git. The PNG you upload and its manifest are the only things that leave your machine. The PNG is the redraw, not the source render, and the manifest says how it was made: the pipeline, the source and the name of your graphics card.
 
 Run the tool from `cli/` with `python -m rutor`, or install it into the virtualenv with `python -m pip install -e cli` and then call `rutor`. Output lines look like `claimed: stockholm-norr 74_20 expires 2026-11-19T12:00:00Z`. An agent reads [AGENTS.md](AGENTS.md) before it runs anything. The rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -93,7 +93,7 @@ Today's free cells are on `stockholm-norr`, which needs Node 22, `npm ci` in `cl
 
 `rutor preflight` checks Python, the NVIDIA card, the disk, PyTorch with CUDA, bitsandbytes, Pillow and numpy, the service and the login. With `--sheet stockholm-norr` it also checks what that sheet's source needs: Node, the Google renderer and the Cesium ion token. Do not claim, render or redraw when any line says `missing`. `rutor claim` refuses on a Google sheet until those three are in place, so no cell is locked that the machine cannot render.
 
-Exit codes: 0 done, 1 bad input, 2 refused by the service, 3 something missing on this machine, 4 network, 5 the redraw failed the quality check, 6 the SE3 price is high (try later).
+Exit codes: 0 done, 1 bad input, 2 refused by the service, 3 something missing on this machine, 4 network, or a service that is busy or down (try again in a minute), 5 the redraw failed the quality check, 6 the SE3 price is high (try later).
 
 ## Build from a page
 
@@ -109,7 +109,7 @@ It prints `url:` with the page's address, opens it in your browser, and runs unt
 2. The ten terms ([TERMS.md](TERMS.md)), word for word, and a box to tick.
 3. The GitHub login: the page shows the device code and you approve it at GitHub.
 4. Your Cesium ion token, for a sheet that needs one. You paste it once. Cesium ion is asked whether it works before it is kept.
-5. What is missing of PyTorch, bitsandbytes, Pillow, Node and the Google renderer. The page installs nothing: see [Setup](#setup).
+5. What is missing of PyTorch, bitsandbytes, Pillow, Node and the Google renderer. Into an install made by hand the page installs nothing: see [Setup](#setup). The Windows app (`installer/`) fetches them itself here, about 16 GB, with a progress bar.
 6. The sheet's cells, and a button that picks the next free one.
 7. The page asks before the card is used, shows the SE3 price, and then runs claim, render, redraw and upload for that one cell.
 8. The cell waits for review, with its address on the map.
@@ -122,10 +122,12 @@ What is worth knowing:
 - **A closed tab stops the job too,** after two and a half minutes without the page asking. A tab you have only switched away from keeps asking and keeps the job.
 - **Nothing runs when the page is closed.** No scheduled job, no service, no background loop.
 - **The page is for you alone.** It listens on 127.0.0.1, under an address with a long random key that is new at every start, and loads nothing from outside. Whoever has that address can build cells as you while the page is up, so keep it to yourself.
-- **Your login and your Cesium token stay on the machine.** Neither is in anything the page is sent. A token pasted into the page is kept beside the login (`cesium-token`, readable by you only) and is the one the page uses, also when `CESIUM_ION_TOKEN` is set.
+- **The browser page never sees your login or your Cesium token.** Neither is in anything the page is sent. The login goes to the project's service with each command, as from the terminal, and the Cesium token to Cesium ion. A token pasted into the page is kept beside the login (`cesium-token`, readable by you only) and is the one the page uses, also when `CESIUM_ION_TOKEN` is set.
 - **When a cell fails,** "Kopiera felrapport" copies a report with your user name and home folder taken out. You paste it into an issue yourself. The page sends nothing on its own.
 
-The page says no on a Mac and on a machine without a 12 GB NVIDIA card, as `rutor claim` does. The install is still done by hand, as under [Setup](#setup).
+The page says no on a Mac and on a machine without a 12 GB NVIDIA card, as `rutor claim` does. From a clone the install is still done by hand, as under [Setup](#setup).
+
+If the app was ended in the middle of a cell, that cell is still locked when you come back. The page finds it the next time you press Rita, says so, and gives it back when you press again.
 
 The first cell built this way was `stockholm-norr` 82_24, on an RTX 5070 on Windows: about 2 minutes 45 seconds from Rita to waiting for review.
 
@@ -133,7 +135,7 @@ The first cell built this way was `stockholm-norr` 82_24, on an RTX 5070 on Wind
 
 Use Python 3.11 or newer. NVIDIA CUDA is required for the redraw. The 4-bit checkpoint is a bitsandbytes quant. A 12 GB card is enough: the redraw peaks at about 11 GB. One cell takes about two minutes on an RTX 5070 or an L4.
 
-Install a CUDA build of PyTorch and torchvision first, then the rest, so a later install does not replace them with CPU wheels. The redraw does not load without torchvision. If the CUDA 12.8 index does not match your driver, use the current index from <https://pytorch.org>.
+Check the machine before anything large is fetched. Then install a CUDA build of PyTorch and torchvision before `requirements.txt`, so a later install does not replace them with CPU wheels. The redraw does not load without torchvision. If the CUDA 12.8 index does not match your driver, use the current index from <https://pytorch.org>.
 
 Model weights are not in this repo. The first redraw downloads them into the Hugging Face cache on your machine, about 12 GB.
 
@@ -150,10 +152,15 @@ cd karta.opensverige-3d
 py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-python -m pip install -r requirements.txt
 python -m pip install -e cli
 rutor preflight --machine
+```
+
+Go on only when all three lines say `ok`. The rest downloads about 3 GB:
+
+```powershell
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
 ```
 
 If activation is blocked for the current window only:
@@ -170,10 +177,15 @@ cd karta.opensverige-3d
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-python -m pip install -r requirements.txt
 python -m pip install -e cli
 rutor preflight --machine
+```
+
+Go on only when all three lines say `ok`. The rest downloads about 3 GB:
+
+```bash
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
 ```
 
 ### macOS
@@ -204,7 +216,10 @@ Each sheet has one source, so neighbouring cells match:
 
 A Google sheet needs three things on your machine:
 
-- A free account at [ion.cesium.com](https://ion.cesium.com) and a token with the default scopes, in `CESIUM_ION_TOKEN`. A free account covers about 1 000 cells a month.
+- A free account at [ion.cesium.com](https://ion.cesium.com) and a token with the default scopes (Access Tokens in ion's menu), in `CESIUM_ION_TOKEN`. A free account covers about 1 000 cells a month.
+  - Windows: `setx CESIUM_ION_TOKEN "<your token>"` in PowerShell, then close and reopen the window. A variable set in one window does not reach another that was already open.
+  - Linux: `export CESIUM_ION_TOKEN=<your token>` in the shell you run `rutor` in.
+  - `rutor app` asks for the token on its page instead, and keeps it beside the login.
 - Node 22 or newer.
 - `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome for headless rendering, about 1 GB.
 
