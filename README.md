@@ -25,7 +25,7 @@ Read this before you start. It is what building a cell asks of you and your mach
 - An NVIDIA card with 12 GB of memory. AMD and Intel cards do not work, and neither does a Mac.
 - Windows or Linux.
 - 25 GB of free disk, and about 1 GB more for `stockholm-norr`.
-- A connection that can download about 20 GB once.
+- A connection that can download about 16 GB once: 12 for the model, 3 for PyTorch and its libraries, 1 for the `stockholm-norr` renderer.
 
 **Programs**
 
@@ -41,7 +41,7 @@ Read this before you start. It is what building a cell asks of you and your mach
 
 **What it costs you**
 
-- The first time: the install and about 20 GB of model weights.
+- The first time: the install and about 12 GB of model weights.
 - For each cell: the redraw takes about two minutes on an RTX 5070, and the source render a few minutes more.
 - The electricity is yours. `rutor redraw --wait-for-cheap` checks the price first and stops when it is high, so you can run it again in a cheap hour.
 
@@ -135,7 +135,7 @@ Use Python 3.11 or newer. NVIDIA CUDA is required for the redraw. The 4-bit chec
 
 Install a CUDA build of PyTorch and torchvision first, then the rest, so a later install does not replace them with CPU wheels. The redraw does not load without torchvision. If the CUDA 12.8 index does not match your driver, use the current index from <https://pytorch.org>.
 
-Model weights are not in this repo. The first redraw downloads them into the Hugging Face cache on your machine, on the order of 20 GB.
+Model weights are not in this repo. The first redraw downloads them into the Hugging Face cache on your machine, about 12 GB.
 
 - `addlabsviral/Qwen-Image-2.1-Turbo-4bit`
 - LoRA `handful/mndf-pixel-qwen-image-2.1`
@@ -206,7 +206,7 @@ A Google sheet needs three things on your machine:
 
 - A free account at [ion.cesium.com](https://ion.cesium.com) and a token with the default scopes, in `CESIUM_ION_TOKEN`. A free account covers about 1 000 cells a month.
 - Node 22 or newer.
-- `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome for headless rendering, about 750 MB.
+- `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome for headless rendering, about 1 GB.
 
 Google's terms bind your token, not this project's MIT license. Google's Map Tiles policy does not allow deriving new content from its tiles, so read it and decide for yourself. Google can ask for cells drawn from its tiles to be taken down. `rutor render` prints a notice on every Google cell, and the manifest names the source.
 
