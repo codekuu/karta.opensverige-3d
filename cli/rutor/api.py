@@ -44,6 +44,7 @@ def _exchange(
     json_body: object | None,
     headers: dict[str, str] | None,
     limit: int | None = None,
+    timeout: float | None = None,
 ) -> tuple[int, bytes]:
     hdrs = {
         "User-Agent": f"rutor/{__version__}",
@@ -61,7 +62,7 @@ def _exchange(
     # and only a dead connection becomes a network error.
     request = urllib.request.Request(service_url() + path, data=data, headers=hdrs, method=method)
     try:
-        with _open(request, TIMEOUT_SECONDS) as response:
+        with _open(request, TIMEOUT_SECONDS if timeout is None else timeout) as response:
             if limit is None:
                 return int(response.status), response.read()
             data = response.read(limit + 1)
@@ -78,7 +79,8 @@ def _exchange(
         raise network(f"could not reach the service ({exc.reason})") from exc
     # A read timeout is a TimeoutError, not a URLError, so it needs its own
     # clause; a dropped connection and a broken HTTP stream are the same story.
-    except (TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+    # So is a TLS fault or any other socket error: all of them are OSError.
+    except (OSError, http.client.HTTPException) as exc:
         raise network(f"could not reach the service ({exc.__class__.__name__}: {exc})") from exc
 
 
@@ -99,6 +101,11 @@ def _refuse(status: int, parsed: object) -> None:
         found = parsed.get("message")
         if isinstance(found, str):
             message = one_line(found)
+    # "Try again later" is not a no. The service is busy, down, or asked too often, and an
+    # agent that is told "refused" stops where it should wait.
+    # A service the maintainer has closed says so in words of its own, and is a no.
+    if (status >= 500 and code != "closed") or (status == 429 and code == "rate_limited"):
+        raise network(f"the service cannot answer right now ({code}); try again in a minute")
     raise refused(f"refused: {code}: {message}")
 
 
@@ -110,16 +117,17 @@ def request(
     body: bytes | None = None,
     json_body: object | None = None,
     headers: dict[str, str] | None = None,
+    timeout: float | None = None,
 ) -> tuple[int, object]:
-    status, raw = _exchange(method, path, token=token, body=body, json_body=json_body, headers=headers)
+    status, raw = _exchange(method, path, token=token, body=body, json_body=json_body, headers=headers, timeout=timeout)
     parsed = _parse(status, raw)
     if status >= 400:
         _refuse(status, parsed)
     return status, parsed
 
 
-def get(path: str, token: str | None = None) -> tuple[int, object]:
-    return request("GET", path, token=token)
+def get(path: str, token: str | None = None, timeout: float | None = None) -> tuple[int, object]:
+    return request("GET", path, token=token, timeout=timeout)
 
 
 def post(path: str, json_body: object, token: str | None) -> tuple[int, object]:

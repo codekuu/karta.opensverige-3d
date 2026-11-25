@@ -13,27 +13,33 @@ claim, drawing, check and upload of one cell.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import importlib
 import json
+import math
 import os
 import platform
 import re
 import subprocess
 import sys
 import threading
+import urllib.parse
 import time
+import traceback
+import urllib.error
+import urllib.request
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rutor import __version__, api, app_jobs, commands, config, login, pipeline
+from rutor import __version__, api, app_install, app_jobs, commands, config, login, pipeline
 from rutor.errors import RutorError, bad_input, environment, network
 from rutor.localpage import LocalPage, Refusal, Reply, json_reply
 from rutor.renderer import google
-from rutor.renderer.sources import SHEET_KINDS
+from rutor.renderer.sources import SHEET_KINDS, kind_of
 
 if TYPE_CHECKING:
     # For the type of one argument only. See price() for why it is not loaded here.
@@ -112,9 +118,15 @@ MEMORY_MARGIN_GB = 4
 
 def machine() -> dict[str, object]:
     needed = int(commands.DISK_MIN_CACHED_GB if commands._model_is_cached() else commands.DISK_MIN_GB)
+    left = app_install.left_to_fetch_gb()
+    if left is not None and left > 0:
+        # An app install fetches everything itself, and knows how much is left. Asking for
+        # the whole amount again would stop a fetch that is half done from going on.
+        needed = max(int(commands.DISK_MIN_CACHED_GB), math.ceil(left + app_install.HEADROOM_GB))
     free = commands._free_gb()
     card = ""
     card_gb = 0
+    driver = ""
     problem = ""
     # A Mac has no NVIDIA driver to ask, and the redraw cannot run here.
     if _platform() == "darwin":
@@ -128,8 +140,12 @@ def machine() -> dict[str, object]:
             # The name comes from the driver. It is shown, so it is one short line.
             card = api.one_line(name, 60)
             card_gb = round(mib / 1024)
+            driver = api.one_line(commands._nvidia_driver(), 20)
             if mib < commands.GPU_MIN_MIB:
                 problem = "small_card"
+            elif _platform() == "win32" and commands.driver_too_old(driver):
+                # Said here, before anything is fetched: PyTorch would fail on it much later.
+                problem = "old_driver"
             elif free < needed:
                 problem = "disk"
     ram = _ram_gb()
@@ -139,6 +155,7 @@ def machine() -> dict[str, object]:
         "ok": problem == "",
         "card": card,
         "card_gb": card_gb,
+        "driver": driver,
         "free_gb": int(free),
         "needed_gb": needed,
         "ram_gb": ram,
@@ -274,6 +291,120 @@ def version(sheet: dict[str, object]) -> dict[str, object]:
     return {"mine": mine, "wanted": wanted, "current": wanted == "" or wanted == mine}
 
 
+# ---- the app's own version: is a newer installer out?
+
+
+# What GitHub answered about the releases, already parsed. It raises on any failure.
+ReleaseFetch = Callable[[], object]
+
+# The releases page of the app's own repo. Only a list is asked for: it is public, so no
+# login token goes with it. Nothing is downloaded from here.
+RELEASES_URL = "https://api.github.com/repos/opensverige/karta.opensverige-3d/releases?per_page=30"
+RELEASES_SECONDS = 10
+# An answer is a list of thirty releases, a few hundred bytes each. This is far more than
+# that, and it keeps a page that is not a list of releases from filling the page's memory.
+RELEASES_BYTES = 512_000
+# The installer tags a release app-v0.1.0. Any other tag on the repo is not the app's.
+_APP_TAG = re.compile(r"app-v(\d{1,4}(?:\.\d{1,4}){0,3})")
+# One version as the service and the installer write it: 0.1.0, or 1.2.
+_VERSION = re.compile(r"\d{1,4}(?:\.\d{1,4}){0,3}")
+# A release page under the app's own repo. Nothing else is ever a link on the page.
+_RELEASE_URL = re.compile(r"https://github\.com/opensverige/karta\.opensverige-3d/releases/[A-Za-z0-9._/-]{1,100}")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would send the request wherever it points, so none is followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        del req, fp, msg, headers, newurl
+        raise network(f"GitHub answered with a redirect ({code}); nothing was read from it")
+
+
+def _fetch_releases() -> object:
+    """What GitHub says about the releases. Every failure is raised, for app_version to drop."""
+    request = urllib.request.Request(
+        RELEASES_URL,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "rutor"},
+    )
+    with urllib.request.build_opener(_NoRedirect).open(request, timeout=RELEASES_SECONDS) as response:
+        raw = response.read(RELEASES_BYTES)
+    return json.loads(raw.decode("utf-8"))
+
+
+def _numbers(text: str) -> tuple[int, ...]:
+    """A version as four numbers, so that 0.2 and 0.2.0 are the same version."""
+    parts = [int(part) for part in text.split(".")]
+    return tuple(parts + [0] * (4 - len(parts)))
+
+
+def _latest_app(releases: object) -> tuple[str, str]:
+    """The highest app version GitHub named and that release's address, or ("", "").
+
+    Everything here comes from outside, so only the tag shape is read and only the address
+    shape of the release that won is passed on.
+    """
+    if not isinstance(releases, list):
+        return "", ""
+    highest: tuple[int, ...] = ()
+    latest = ""
+    url = ""
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        tag = release.get("tag_name")
+        if not isinstance(tag, str):
+            continue
+        matched = _APP_TAG.fullmatch(tag)
+        if matched is None:
+            continue
+        numbers = _numbers(matched.group(1))
+        # Compared as numbers, so 0.10.0 is newer than 0.9.0.
+        if numbers <= highest:
+            continue
+        highest = numbers
+        latest = matched.group(1)
+        address = release.get("html_url")
+        # A release with an address elsewhere still says a newer app is out. It is just no link.
+        url = address if isinstance(address, str) and _is_release_page(address) else ""
+    return latest, url
+
+
+def _is_release_page(address: str) -> bool:
+    """A page under the project's own releases, with no step that climbs out of them."""
+    if _RELEASE_URL.fullmatch(address) is None:
+        return False
+    return ".." not in address and "//" not in address.removeprefix("https://")
+
+
+def app_version(fetch: ReleaseFetch | None = None) -> dict[str, object]:
+    """{"mine": str, "latest": str, "current": bool, "url": str} for the app itself.
+
+    Only an app install asks GitHub. A clone was not downloaded from anywhere, so it has no
+    newer installer to be told about. Every failure is the same answer: no news.
+    """
+    install = config.app_install()
+    if install is None:
+        return {"mine": __version__, "latest": "", "current": True, "url": ""}
+    mine = install["version"]
+    try:
+        raw = (fetch if fetch is not None else _fetch_releases)()
+    except Exception:
+        # A page that cannot be reached, is slow or answers with another shape is no news.
+        # Nothing of what it said is kept: this process holds a login.
+        return {"mine": mine, "latest": "", "current": True, "url": ""}
+    latest, url = _latest_app(raw)
+    return {"mine": mine, "latest": latest, "current": _is_current(mine, latest), "url": url}
+
+
+def _is_current(mine: str, latest: str) -> bool:
+    """Whether the app here is at least as new as the one GitHub named."""
+    if _VERSION.fullmatch(mine) is None or _VERSION.fullmatch(latest) is None:
+        # A version of another shape cannot be compared, and an app that cannot be said to
+        # be old is not called old.
+        return True
+    return _numbers(latest) <= _numbers(mine)
+
+
 # ---- the eight steps
 
 
@@ -301,12 +432,76 @@ _TOKEN_COMMANDS = frozenset({"claim", "render"})
 # itself says with its last error line.
 _PROBLEM_BY_EXIT = {2: "refused", 3: "machine", 4: "network", 5: "check"}
 
-# How a claim ends when it is certain that no lock was given: the input was wrong (1), the
-# service refused (2), or this machine was not ready and the service was never asked (3).
-_NO_LOCK_EXITS = frozenset({1, 2, 3})
+# How a claim ends when it is certain that no lock was given: the service refused (2), or
+# this machine was not ready and the service was never asked (3). Bad input (1) is certain
+# too, but only when the command said so itself: a command that crashed also ends with 1.
+_NO_LOCK_EXITS = frozenset({2, 3})
 
 # Refusals of a claim that the page has a sentence of its own for, by the service's word.
 _CLAIM_REFUSALS = (("taken", "taken"), ("too_many_locks", "locks"), ("too_many_waiting", "waiting"))
+
+# What a release is told when there is no lock of ours to give back. The first means the
+# service has the picture: the upload went in although its answer never came.
+_UPLOADED_ALREADY = "refused: already_uploaded"
+_NO_LOCK_OF_OURS = ("refused: not_yours", "refused: no_cell", _UPLOADED_ALREADY)
+
+# Failures the page has a sentence of its own for, by a word in the command's last error
+# line. A person who is told to try again tries again, so "try again" is said only when
+# trying again can help.
+_SAID_WHY = (
+    ("refused: daily_limit", "daily"),
+    ("refused: wrong_pipeline", "old_app"),
+    ("quota is used up", "quota"),
+    ("refused the token", "token"),
+    ("did not let this token", "token"),
+)
+
+# How long a stop waits for an upload to end by itself before the upload is ended too.
+UPLOAD_GRACE_SECONDS = 45.0
+
+# A stored login the service could not be asked about is asked about again, this long after
+# the ask that failed ended. The ask itself is short: the page waits for it.
+LOGIN_RETRY_SECONDS = 30.0
+LOGIN_ASK_SECONDS = 5.0
+
+
+def my_locks() -> list[tuple[str, str]]:
+    """The cells the logged-in person holds a lock on, as (sheet, cell). Empty when unknown."""
+    token = config.read_token()
+    if not token:
+        return []
+    try:
+        _status, me = api.get("/v1/me", token=token)
+    except RutorError:
+        return []
+    rows = me.get("locks") if isinstance(me, dict) else None
+    found: list[tuple[str, str]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        sheet, col, lock_row = row.get("sheet"), row.get("col"), row.get("row")
+        # What the service says becomes a command's arguments, so it is checked like input.
+        if (
+            isinstance(sheet, str)
+            and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,60}", sheet)
+            and isinstance(col, int)
+            and isinstance(lock_row, int)
+            and not isinstance(col, bool)
+            and not isinstance(lock_row, bool)
+            and 0 <= col < 100_000
+            and 0 <= lock_row < 100_000
+        ):
+            found.append((sheet, f"{col}_{lock_row}"))
+    return found
+
+
+def refuse_old_pipeline(sheet: dict[str, object]) -> None:
+    """Refuse to draw for a sheet that wants another pipeline than this copy has.
+
+    The service refuses such a cell at upload, which is after the whole drawing.
+    """
+    if version(sheet)["current"] is not True:
+        raise Refusal(409, "this copy is too old for the sheet", "old_app")
 
 
 class Builder:
@@ -336,6 +531,8 @@ class Builder:
         self._waiting = False
         self._problem = ""
         self._looked = False
+        # When the service was last asked about a stored login and did not answer.
+        self._asked_at: float | None = None
         # Set once the page is closing. Nothing is started after that.
         self._closed = False
         # The login child, only while it is being read. A child that has ended is never
@@ -347,6 +544,9 @@ class Builder:
         self._sheet = ""
         self._col = 0
         self._row = 0
+        # The source of the chosen sheet, as the page was told it. None: nobody said, and the
+        # two sheets the code knows are looked up when the build starts.
+        self._kind: str | None = None
         self._phase = "idle"
         self._detail = ""
         self._job_problem = ""
@@ -358,6 +558,13 @@ class Builder:
         # A claim that ended without saying whether the service gave the lock.
         self._unsure = False
         self._releasing = False
+        # A lock found from before, which stands in the way of a claim. It is given back
+        # only when the person presses again for the cell that was refused.
+        self._adopted = False
+        # A stop was asked for while the upload was out, and waits for it to end.
+        self._finishing = False
+        # The release after a failed upload has been tried already, inside the job.
+        self._asked_back = False
         self._lines: list[str] = []
         self._seen = clock()
         self._job_run: app_jobs.Run | None = None
@@ -435,8 +642,10 @@ class Builder:
             if name:
                 self._problem = ""
             else:
-                # 4 is the CLI's network code; any other end is a code nobody approved.
-                self._problem = "network" if exit_code == 4 else "expired"
+                # 4 is the CLI's network code, and 2 is a no: the person pressed cancel at
+                # GitHub, or the service would not have them. Any other end is a code nobody
+                # approved in time.
+                self._problem = {4: "network", 2: "denied"}.get(exit_code, "expired")
 
     def login_state(self) -> dict[str, object]:
         self._remember_stored_login()
@@ -450,19 +659,34 @@ class Builder:
             }
 
     def _remember_stored_login(self) -> None:
-        """Ask the service, on the first look only, who a stored token belongs to."""
+        """Ask the service who a stored token belongs to, until it has answered once."""
         with self._lock:
             if self._looked:
                 return
-            self._looked = True
+            now = self._clock()
+            if self._asked_at is not None and now - self._asked_at < LOGIN_RETRY_SECONDS:
+                return
+            self._asked_at = now
         token = config.read_token()
         if not token:
+            with self._lock:
+                self._looked = True
             return
         try:
-            _status, me = api.get("/v1/me", token=token)
-        except RutorError:
-            # As far as the page knows, nobody is logged in. It says nothing more.
+            _status, me = api.get("/v1/me", token=token, timeout=LOGIN_ASK_SECONDS)
+        except RutorError as exc:
+            # A refusal is an answer: nobody is logged in. A service that could not be
+            # reached is not, and a person who logged in yesterday is not asked to do it
+            # again because the network was slow at start.
+            with self._lock:
+                if exc.code != 4:
+                    self._looked = True
+                # Counted from now, when the ask ended: a service that is slow to fail
+                # would otherwise be asked again by the very next look.
+                self._asked_at = self._clock()
             return
+        with self._lock:
+            self._looked = True
         name = me.get("login") if isinstance(me, dict) else None
         if isinstance(name, str) and _NAME_SHAPE.fullmatch(name):
             with self._lock:
@@ -472,14 +696,24 @@ class Builder:
 
     # ---- the job: one cell, claimed, drawn and uploaded
 
-    def choose(self, sheet: str, col: int, row: int) -> None:
-        """Note the cell the person picked. This takes no lock and starts nothing."""
+    def choose(self, sheet: str, col: int, row: int, kind: str | None = None) -> None:
+        """Note the cell the person picked, and the source its sheet is drawn from.
+
+        This takes no lock and starts nothing.
+        """
         with self._lock:
             if self._busy():
                 raise Refusal(409, "a cell is being built", "busy")
+            if self._adopted and (sheet, col, row) != (self._sheet, self._col, self._row):
+                # The lock from before was to be given back for the cell that was refused.
+                # Another cell is another question, and the lock may be one the person is
+                # drawing in a terminal.
+                self._held = None
+                self._adopted = False
             self._sheet = sheet
             self._col = col
             self._row = row
+            self._kind = kind
             self._phase = "idle"
             self._detail = ""
             self._job_problem = ""
@@ -499,13 +733,14 @@ class Builder:
             if self._busy():
                 raise Refusal(409, "a cell is being built", "busy")
             sheet, col, row = self._sheet, self._col, self._row
+            told = self._kind
             done = self._phase == "done"
         if not sheet or done:
             # A cell that has gone in is not built twice: the service would call it taken.
             raise Refusal(409, "choose a cell first", "no_cell")
         # The machine, the tools, the login and the token are asked here: they read the
         # disk and, for a stored login, the service. None of that happens under the lock.
-        kind = SHEET_KINDS.get(sheet, "")
+        kind = told if told is not None else SHEET_KINDS.get(sheet, "")
         if not machine()["ok"]:
             raise Refusal(409, "this machine cannot draw a cell yet", "not_ready")
         if not tools(kind)["ready"]:
@@ -540,10 +775,24 @@ class Builder:
             running = self._phase in _RUNNING
             if running:
                 self._stop_asked = True
+                # An upload takes seconds, and ending it halfway leaves a cell that the
+                # service may have and the page does not know about. It is given a while
+                # to finish by itself.
                 run = self._job_run
+                # Only while the upload itself is out. The lock being asked back after an
+                # upload that failed is the same phase, and is not an upload finishing.
+                uploading = self._phase == "upload" and run is not None and not self._asked_back
+                self._finishing = uploading
             else:
+                uploading = False
                 run = None
             thread = self._job_thread
+        if uploading and thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=UPLOAD_GRACE_SECONDS)
+            with self._lock:
+                self._finishing = False
+                # Still the same child, still out: it is ended like any other.
+                run = self._job_run if self._job_run is run else None
         if run is not None:
             # Only the child being read is stopped. A finished one is not touched.
             run.stop()
@@ -555,6 +804,21 @@ class Builder:
     def seen(self) -> None:
         with self._lock:
             self._seen = self._clock()
+
+    def away(self) -> bool:
+        """Whether the page has asked for nothing for so long that it has gone."""
+        with self._lock:
+            return self._clock() - self._seen > GONE_SECONDS
+
+    def quiet_for(self) -> float:
+        """Seconds since the page last asked for its state."""
+        with self._lock:
+            return self._clock() - self._seen
+
+    def busy(self) -> bool:
+        """Whether a cell is being built, or its lock is still being given back."""
+        with self._lock:
+            return self._busy()
 
     def tick(self) -> None:
         """Stop a job whose page has not asked for anything for a long time."""
@@ -575,6 +839,9 @@ class Builder:
                 "col": self._col,
                 "row": self._row,
                 "held": self._held is not None,
+                # The cell a lock from before is on, for the sentence that names it.
+                "old": f"{self._held[0]} {self._held[1]}" if self._adopted and self._held else "",
+                "finishing": self._finishing,
             }
 
     def job_lines(self) -> list[str]:
@@ -603,24 +870,40 @@ class Builder:
             elif self._stop_asked:
                 self._phase = "stopped"
                 self._job_problem = ""
+                if self._adopted:
+                    # A lock from before was found as the stop came, and the page will not
+                    # say so. It is forgotten, so that no later press gives it back unasked.
+                    self._held = None
+                    self._adopted = False
             else:
                 self._phase = "failed"
                 self._job_problem = problem
             # No command runs now, so there is no progress line left to show.
             self._detail = ""
-            # An earlier cell's lock that was just asked back in vain is not asked a third time.
-            held = None if problem == "lock_left" else self._held
-            unsure = self._unsure and held is None and problem != "lock_left"
+            self._finishing = False
+            # An earlier cell's lock that was just asked back in vain is not asked a third time,
+            # and neither is one that was asked back inside the job, after a failed upload.
+            # One found from before is given back when the person presses again, not behind
+            # their back: it may be a cell they are drawing in a terminal.
+            kept = problem in ("lock_left", "old_lock") or self._asked_back
+            self._asked_back = False
+            held = None if kept else self._held
+            unsure = self._unsure and held is None and not kept
             # A lock that is still out is given back before another job may start.
             self._releasing = held is not None or unsure
         if held is not None or unsure:
             try:
                 # A lock that is known is asked back twice. One that only may exist is asked
-                # back once, and what the service answers is not held against the page.
+                # back once.
                 if held is not None:
-                    self._release(held[0], held[1], tries=2)
+                    answer = self._release(held[0], held[1], tries=2)
                 else:
-                    self._release(sheet, cell, tries=1)
+                    answer = self._release(sheet, cell, tries=1)
+                    if answer == "":
+                        # Nobody answered, so the lock may still be out. It is remembered,
+                        # and asked back by its own name before the next cell is claimed.
+                        with self._lock:
+                            self._held = (sheet, cell)
             except Exception as exc:  # noqa: BLE001 - the page still has to learn it ended
                 print(f"app: {type(exc).__name__} while releasing", file=sys.stderr)
             finally:
@@ -634,10 +917,16 @@ class Builder:
         if left is not None:
             # A lock from an earlier job that could not be given back then. A new builder may
             # hold one cell, so it is asked back before another is claimed, by its own name.
-            self._release(left[0], left[1], tries=2)
+            answer = self._release(left[0], left[1], tries=2)
             with self._lock:
+                self._adopted = False
                 if self._held is not None:
                     return "lock_left"
+            if answer == "uploaded" and left == (sheet, cell):
+                # This very cell went in last time: its upload was stored, and the answer and
+                # the release after it were both lost. It waits for review. It is not claimed
+                # again, which the service would refuse as taken.
+                return ""
         for command in ("claim", "render", "redraw", "upload"):
             with self._lock:
                 if self._stop_asked:
@@ -696,21 +985,58 @@ class Builder:
                         self._held = None
                 continue
             if command == "claim":
+                # Bad input is said in an error line. A 1 with no such line is a crash.
+                certain = exit_code in _NO_LOCK_EXITS or (exit_code == 1 and last_error != "")
                 with self._lock:
                     # Stopped, cut off by the network or broken: the service may have given
                     # the lock without the claim living to say so. A stopped child's exit
                     # says nothing: a signal gives -15, taskkill on Windows gives 1.
-                    if self._stop_asked or exit_code not in _NO_LOCK_EXITS:
+                    if self._stop_asked or not certain:
                         self._unsure = True
                 if exit_code == 2:
                     for said, word in _CLAIM_REFUSALS:
                         if last_error.startswith(f"refused: {said}"):
+                            if word == "locks" and self._adopt_lock():
+                                return "old_lock"
                             return word
-            return _PROBLEM_BY_EXIT.get(exit_code, "failed")
+            problem = _PROBLEM_BY_EXIT.get(exit_code, "failed")
+            for said, word in _SAID_WHY:
+                if said in last_error:
+                    problem = word
+                    break
+            if command == "upload":
+                # An upload can be stored without its answer coming back. The lock is asked
+                # back here, while the job is still the upload, and the service's answer
+                # says which it was: the page is never told "failed" and then "done".
+                with self._lock:
+                    self._asked_back = True
+                if self._release(sheet, cell, tries=2) == "uploaded":
+                    return ""
+            return problem
         return ""
 
-    def _release(self, sheet: str, cell: str, tries: int) -> None:
-        """Give the lock back, twice at most: the service ends an abandoned lock by itself."""
+    def _adopt_lock(self) -> bool:
+        """Find the lock that stands in the way of a claim, so that it can be given back.
+
+        A lock outlives the app that took it: the machine restarted, or the app was ended,
+        in the middle of a cell. The page then holds a lock it does not know about, a new
+        builder may hold one, and nothing on the page could release it for two days.
+        """
+        locks = my_locks()
+        if not locks:
+            return False
+        with self._lock:
+            if self._held is None:
+                self._held = locks[0]
+                self._adopted = True
+        return True
+
+    def _release(self, sheet: str, cell: str, tries: int) -> str:
+        """Give the lock back, twice at most: the service ends an abandoned lock by itself.
+
+        Returns "released", "uploaded" (the service has the cell's picture, so there is no
+        lock), "none" (the service says the lock is not ours) or "" when nobody answered.
+        """
         for _attempt in range(tries):
             try:
                 run = self._start(["release", sheet, cell], {})
@@ -718,13 +1044,23 @@ class Builder:
                 continue
             # A release child is never stopped: it ends at once, and its group number may
             # already belong to somebody else's program. It is read so nothing is left.
+            last_error = ""
             for line in run.lines():
                 self._keep(line, detail=False)
-            if run.wait() == 0:
+                if line.kind == "error":
+                    last_error = line.text
+            code = run.wait()
+            # The service's own no is an answer too: asking again would get the same one,
+            # and a lock that is not ours must not stop every cell after this one.
+            gone = code == 2 and last_error.startswith(_NO_LOCK_OF_OURS)
+            if code == 0 or gone:
                 with self._lock:
                     if self._held == (sheet, cell):
                         self._held = None
-                return
+                if code == 0:
+                    return "released"
+                return "uploaded" if last_error.startswith(_UPLOADED_ALREADY) else "none"
+        return ""
 
     def _keep(self, line: app_jobs.Line, *, detail: bool) -> None:
         """Keep the line for the report, and a progress line for the page."""
@@ -760,6 +1096,9 @@ PAGE_FILES = {
     "app.css": ("app.css", "text/css; charset=utf-8"),
 }
 TICK_SECONDS = 5.0
+# How long the shortcut's app stays up with no page, no job and no fetch.
+IDLE_EXIT_SECONDS = 600.0
+QUIT_PAUSE_SECONDS = 0.3
 
 # How long an answer that cost something is allowed to stand.
 _MACHINE_SECONDS = 30.0
@@ -778,6 +1117,7 @@ _BLANK_MACHINE: dict[str, object] = {
     "ok": False,
     "card": "",
     "card_gb": 0,
+    "driver": "",
     "free_gb": 0,
     "needed_gb": 0,
     "ram_gb": None,
@@ -785,8 +1125,19 @@ _BLANK_MACHINE: dict[str, object] = {
     "warning": "",
 }
 _BLANK_TOOLS: dict[str, object] = {"ready": False, "model_cached": False, "missing": []}
+# Which phase of the fetch brings a tool. A tool that is still missing after a fetch has
+# its phase done again: tools() is the judge of what is there, not the fetch.
+_PHASE_OF_TOOL = {
+    "torch": "stack",
+    "bitsandbytes": "stack",
+    "render": "stack",
+    "node": "node",
+    "google_renderer": "renderer",
+}
 _BLANK_PRICE: dict[str, object] = {"decision": "unknown", "after": ""}
 _BLANK_CESIUM: dict[str, object] = {"set": False, "ok": False, "problem": ""}
+# Until GitHub has answered there is no news, and that is also the answer when it cannot.
+_BLANK_APP: dict[str, object] = {"mine": "", "latest": "", "current": True, "url": ""}
 # A sheet that is not Google's needs no Cesium account. That is not a cached answer.
 _NO_CESIUM: dict[str, object] = {"set": False, "ok": True, "problem": ""}
 
@@ -806,19 +1157,20 @@ def _size(value: object) -> int | None:
     return value
 
 
-def _open_record(raw: object) -> dict[str, object] | None:
-    """One sheet from the queue, or None when it is not an open sheet this page can draw."""
+def _source(sheet: dict[str, object]) -> str:
+    """The source the service's row names for a sheet, or "" when none is decided."""
+    try:
+        return kind_of(sheet)
+    except RutorError:
+        return ""
+
+
+def _sheet_record(raw: object) -> dict[str, object] | None:
+    """One sheet as the page keeps it, or None when the row is not a sheet it can read."""
     if not isinstance(raw, dict):
         return None
     sheet_id = raw.get("id")
     if not isinstance(sheet_id, str) or config.SHEET_ID.fullmatch(sheet_id) is None:
-        return None
-    if raw.get("state") != "open":
-        return None
-    done, total = raw.get("done"), raw.get("total")
-    if isinstance(done, bool) or isinstance(total, bool) or not isinstance(done, int) or not isinstance(total, int):
-        return None
-    if done >= total:
         return None
     cols, rows = _size(raw.get("cols")), _size(raw.get("rows"))
     if cols is None or rows is None:
@@ -826,12 +1178,27 @@ def _open_record(raw: object) -> dict[str, object] | None:
     return {
         "id": sheet_id,
         "name": _short(raw.get("name")),
-        "kind": SHEET_KINDS.get(sheet_id, ""),
+        "kind": _source(raw),
+        # A sheet of the tiling lists only the cells someone has taken. Any other cell of
+        # it is free and has no row. On a hand-made sheet a cell with no row is not offered.
+        "made": "grid" if raw.get("made") == "grid" else "hand",
         "cols": cols,
         "rows": rows,
         "pipeline": _short(raw.get("pipeline")),
         "problem": "",
     }
+
+
+def _open_record(raw: object) -> dict[str, object] | None:
+    """One sheet from the queue, or None when it is not an open sheet this page can draw."""
+    if not isinstance(raw, dict) or raw.get("state") != "open":
+        return None
+    done, total = raw.get("done"), raw.get("total")
+    if isinstance(done, bool) or isinstance(total, bool) or not isinstance(done, int) or not isinstance(total, int):
+        return None
+    if done >= total:
+        return None
+    return _sheet_record(raw)
 
 
 def _any_free(cells: object) -> bool:
@@ -877,20 +1244,41 @@ class _Known:
     outside it, because a check can take a while and must not stall the page.
     """
 
-    def __init__(self, builder: Builder, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        builder: Builder,
+        clock: Callable[[], float] = time.monotonic,
+        installing: Callable[[], bool] | None = None,
+    ) -> None:
         self._builder = builder
         self._clock = clock
+        # While the tools are fetched nothing is worked out either: asking about the tools
+        # starts a child that imports PyTorch, and it would hold files pip is writing.
+        self._installing = installing
         self._lock = threading.Lock()
         self._machine: tuple[dict[str, object], float] | None = None
         self._tools: tuple[str, dict[str, object], float] | None = None
         self._cesium: tuple[dict[str, object], float] | None = None
         self._price: tuple[dict[str, object], float] | None = None
         self._sheet: tuple[dict[str, object], float] | None = None
+        # The sheet of a cell the person chose by its code. It is the page's sheet until they
+        # ask for the next free cell: the search for an open sheet does not replace it.
+        self._chosen: dict[str, object] | None = None
+
+    def choose_sheet(self, record: dict[str, object] | None) -> None:
+        """The person chose a cell on this sheet (None: back to the first open one)."""
+        with self._lock:
+            self._chosen = dict(record) if record is not None else None
 
     def forget_cesium(self) -> None:
         """The person pasted a token. The next state asks Cesium again."""
         with self._lock:
             self._cesium = None
+
+    def forget_tools(self) -> None:
+        """A fetch has ended. The next state asks which tools are there now."""
+        with self._lock:
+            self._tools = None
 
     def parts(self) -> dict[str, object]:
         sheet = self.sheet()
@@ -958,6 +1346,9 @@ class _Known:
         running = self._running()
         with self._lock:
             hit = self._sheet
+            chosen = self._chosen
+        if chosen is not None:
+            return chosen
         if hit is not None and (running or self._clock() - hit[1] < _SHEET_SECONDS):
             return hit[0]
         if running:
@@ -1005,6 +1396,8 @@ class _Known:
         return found
 
     def _running(self) -> bool:
+        if self._installing is not None and self._installing():
+            return True
         phase = self._builder.job_state().get("phase")
         return isinstance(phase, str) and phase in _RUNNING
 
@@ -1064,16 +1457,22 @@ def _public_cells(cols: int, rows: int, cells: object) -> list[list[object]]:
     return kept
 
 
-def _is_free(cells: list[object], col: int, row: int) -> bool:
+def _is_free(cells: list[object], col: int, row: int, rowless_is_free: bool = False) -> bool:
+    """True when the cell may be taken. A cell with no row is free only on a sheet of the tiling."""
     for cell in cells:
         if not isinstance(cell, list) or len(cell) < 3:
             continue
         found_col, found_row, state = cell[0], cell[1], cell[2]
         if isinstance(found_col, bool) or isinstance(found_row, bool):
             continue
-        if found_col == col and found_row == row and state == "fri":
-            return True
-    return False
+        if found_col == col and found_row == row:
+            return state == "fri"
+    return rowless_is_free
+
+
+# A cell's code as the map of cells gives it: the sheet's id, a space, and col_row.
+_CODE_MAX = 100
+_CODE = re.compile(rf"({config.SHEET_ID.pattern})\s+(\d{{1,4}})_(\d{{1,4}})")
 
 
 def _sheet_id(sheet: dict[str, object]) -> str:
@@ -1114,13 +1513,30 @@ def _scrub(text: str) -> str:
     except (OSError, KeyError, ImportError):
         # Which of these a system without a user name raises depends on the Python.
         pass
+    # The same folder written as an address: file:///C:/Users/Ebba%20Ek/...
+    for spelled in {urllib.parse.quote(home.as_posix()), urllib.parse.quote(home.as_posix(), safe="/:"), urllib.parse.quote(str(home))}:
+        if spelled and spelled != "/":
+            text = text.replace(spelled, "~")
+    for name in list(names):
+        names.add(urllib.parse.quote(name))
+    # Windows also writes a long or spaced folder name short: C:\Users\EBBAEK~1\...
+    text = re.sub(r"(?i)(\busers[\\/])[^\\/\s\"']*~\d+", r"\1user", text)
     text = _replace_names(text, names)
     for secret in _secrets():
         text = text.replace(secret, "[removed]")
+        if len(secret) >= 24:
+            # A line is cut to a length before it is kept, so a token may stand there
+            # without its end. Its beginning is enough to know it by.
+            text = re.sub(re.escape(secret[:16]) + r"[A-Za-z0-9._~+/=-]*…?", "[removed]", text)
     return text
 
 
-def _report(machine_info: dict[str, object], builder: Builder) -> str:
+def _report(
+    machine_info: dict[str, object],
+    builder: Builder,
+    install: dict[str, object] | None = None,
+    install_lines: list[str] | None = None,
+) -> str:
     card = machine_info.get("card")
     card_gb = machine_info.get("card_gb")
     if isinstance(card, str) and card and isinstance(card_gb, int) and not isinstance(card_gb, bool):
@@ -1146,15 +1562,26 @@ def _report(machine_info: dict[str, object], builder: Builder) -> str:
     problem_text = problem if isinstance(problem, str) and problem else "none"
     held = "yes" if job.get("held") is True else "no"
     lines = [f"  {line}" for line in builder.job_lines()]
+    driver = machine_info.get("driver")
+    driver_line = f"driver: {driver}" if isinstance(driver, str) and driver else "driver: unknown"
+    installed = config.app_install()
+    # A clone has no installer version. Its code is named by the rutor line above.
+    app_line = f"app: {api.one_line(installed['version'], 20)}" if installed is not None else "app: none"
+    fetch = install or {}
+    fetch_phase = fetch.get("phase")
+    fetch_problem = fetch.get("problem")
+    fetch_lines = [f"  {line}" for line in install_lines or []]
     # The host name is left out on purpose: a report is pasted into an issue.
     text = "\n".join(
         [
-            "Pixelbygget app report",
+            "Tech Embassy Pixel report",
             f"rutor: {__version__}",
+            app_line,
             f"pipeline: {pipeline.PIPELINE}",
             f"system: {platform.system()} {platform.release()} {platform.machine()}",
             f"python: {platform.python_version()}",
             card_line,
+            driver_line,
             memory_line,
             f"disk: {free_gb} GB free",
             cell_line,
@@ -1163,6 +1590,10 @@ def _report(machine_info: dict[str, object], builder: Builder) -> str:
             f"held: {held}",
             "lines:",
             *lines,
+            f"install: {fetch_phase if isinstance(fetch_phase, str) and fetch_phase else 'idle'}",
+            f"install problem: {fetch_problem if isinstance(fetch_problem, str) and fetch_problem else 'none'}",
+            "install lines:",
+            *fetch_lines,
         ]
     )
     return _scrub(text)
@@ -1171,9 +1602,30 @@ def _report(machine_info: dict[str, object], builder: Builder) -> str:
 class AppServer:
     """The build page behind the shell every page on this machine has: see `localpage`."""
 
-    def __init__(self, builder: Builder | None = None) -> None:
+    def __init__(
+        self,
+        builder: Builder | None = None,
+        releases: ReleaseFetch | None = None,
+        installer: app_install.Installer | None = None,
+        idle_exit: float | None = None,
+    ) -> None:
         self._builder = builder if builder is not None else Builder()
-        self._known = _Known(self._builder)
+        # Seconds without a page, a job or a fetch after which the app ends by itself. None
+        # for a start from a terminal, which Ctrl-C ends.
+        self._idle_exit = idle_exit
+        self._idle_seconds = 0.0
+        self._ending = threading.Lock()
+        self._ended = False
+        self._installer = (
+            installer
+            if installer is not None
+            else app_install.Installer(app_jobs.start_process, app_install.fetch_url, commands._free_gb)
+        )
+        # A cell and a fetch never run together. Whichever is started looks, under this
+        # lock, that the other is not running.
+        self._start_lock = threading.Lock()
+        self._install_thread: threading.Thread | None = None
+        self._known = _Known(self._builder, installing=self._installing)
         self._page = LocalPage("app", self._get, self._post)
         self.key = self._page.key
         self.port = self._page.port
@@ -1181,6 +1633,31 @@ class AppServer:
         self._timer_stop = threading.Event()
         self._timer: threading.Thread | None = None
         self._timer_lock = threading.Lock()
+        # GitHub is asked once, on a thread of its own, so the page is up before it answers.
+        self._releases = releases
+        self._app: dict[str, object] = dict(_BLANK_APP)
+        self._app_lock = threading.Lock()
+        self._app_thread: threading.Thread | None = None
+
+    def _ensure_version(self) -> None:
+        """Start the one thread that asks GitHub. Repeated calls start nothing."""
+        with self._app_lock:
+            if self._app_thread is not None:
+                return
+            thread = threading.Thread(target=self._read_version, daemon=True)
+            self._app_thread = thread
+        thread.start()
+
+    def _read_version(self) -> None:
+        try:
+            found = app_version(self._releases)
+        except Exception as exc:  # noqa: BLE001 - the last stop on this thread
+            # Whatever broke, the page has no news. The kind of fault goes to the terminal,
+            # never its message: an answer from outside is data.
+            print(f"app: {type(exc).__name__} while reading the app version", file=sys.stderr)
+            found = dict(_BLANK_APP)
+        with self._app_lock:
+            self._app = found
 
     def _ensure_timer(self) -> None:
         with self._timer_lock:
@@ -1194,16 +1671,59 @@ class AppServer:
         # A fault in one tick must not end the timer: the page is still open.
         while not self._timer_stop.wait(TICK_SECONDS):
             try:
+                # Looked at before the tick, which may be what stops the job.
+                working = self._installing() or self._builder.busy()
+                quiet = self._builder.quiet_for()
+                # Only a job is stopped for a page that has gone silent. A fetch holds no card
+                # and no lock, and a tab that the browser put to sleep is not a closed one:
+                # it goes on until it is done, stopped from the page, or the app is closed.
                 self._builder.tick()
+                if self._idle_exit is not None and self._idle(working, quiet):
+                    self._end_soon()
             except Exception as exc:
                 print(f"app: {type(exc).__name__} in tick", file=sys.stderr)
 
+    def _idle(self, working: bool, quiet: float) -> bool:
+        """Whether the app has been without a page and without work for long enough to end.
+
+        The time is counted from the later of the page's last request and the last moment
+        something ran, so the app never ends under a job, and a page that comes back after
+        its job was stopped still finds the app.
+        """
+        if working:
+            self._idle_seconds = quiet
+            return False
+        limit = self._idle_exit if self._idle_exit is not None else 0.0
+        if quiet < self._idle_seconds:
+            # The page asked again since the work ended.
+            self._idle_seconds = 0.0
+        return quiet - self._idle_seconds > limit
+
+    def end_serving(self) -> None:
+        """Make serve_forever return, from another thread."""
+        self._page.end_serving()
+
+    def _end_soon(self) -> None:
+        """End the serving once, a moment from now, so that an answer on its way gets out."""
+        with self._ending:
+            if self._ended:
+                return
+            self._ended = True
+
+        def end() -> None:
+            time.sleep(QUIT_PAUSE_SECONDS)
+            self._page.end_serving()
+
+        threading.Thread(target=end, daemon=True).start()
+
     def start(self) -> None:
         self._ensure_timer()
+        self._ensure_version()
         self._page.start()
 
     def serve_forever(self) -> None:
         self._ensure_timer()
+        self._ensure_version()
         self._page.serve_forever()
 
     def stop(self) -> None:
@@ -1215,6 +1735,11 @@ class AppServer:
             timer.join(timeout=130)
         # No new request gets in, and then anything the page started is stopped.
         self._page.stop()
+        self._installer.stop()
+        with self._start_lock:
+            fetching = self._install_thread
+        if fetching is not None and fetching is not threading.current_thread():
+            fetching.join(timeout=30)
         self._builder.shutdown()
 
     def _get(self, rest: str) -> Reply | None:
@@ -1223,10 +1748,14 @@ class AppServer:
             return Reply(200, page[1], (PAGE_DIR / page[0]).read_bytes())
         if rest == "api/state":
             return json_reply(200, self._state())
+        if rest == "api/alive":
+            # For a second start that wants to know whether this one is up. It costs
+            # nothing and does not count as the page being there.
+            return json_reply(200, {"app": "pixelbygget"})
         if rest == "api/grid":
             return json_reply(200, self._grid())
         if rest == "api/report":
-            text = _report(self._known.machine(), self._builder)
+            text = _report(self._known.machine(), self._builder, self._installer.state(), self._installer.lines())
             return Reply(200, "text/plain; charset=utf-8", text.encode("utf-8"))
         return None
 
@@ -1243,7 +1772,32 @@ class AppServer:
             return json_reply(200, self._cell(raw))
         if rest == "api/build":
             _body(raw)
-            self._builder.build()
+            with self._start_lock:
+                if self._installing():
+                    raise Refusal(409, "the tools are being fetched", "busy")
+                if app_install.is_app() and self._installer.state().get("whole") is not True:
+                    # The tools may answer while the model is half fetched. The redraw
+                    # would then fetch the rest in silence, under a locked cell.
+                    raise Refusal(409, "the drawing tools are not all fetched", "not_ready")
+                sheet = self._known.sheet()
+                refuse_old_pipeline(sheet if isinstance(sheet, dict) else {})
+                self._builder.build()
+            return json_reply(200, {"ok": True})
+        if rest == "api/install":
+            _body(raw)
+            self._install()
+            return json_reply(200, {"ok": True})
+        if rest == "api/quit":
+            _body(raw)
+            # Whatever runs is stopped first, lock and all. Then the answer, then the end.
+            self._installer.stop()
+            self._builder.stop()
+            self._end_soon()
+            return json_reply(200, {"ok": True})
+        if rest == "api/install/stop":
+            _body(raw)
+            # The child is told to end, and the page reads how it went in the state.
+            self._installer.stop()
             return json_reply(200, {"ok": True})
         if rest == "api/stop":
             _body(raw)
@@ -1258,6 +1812,8 @@ class AppServer:
         sheet = parts["sheet"]
         if not isinstance(sheet, dict):
             sheet = _no_sheet("network")
+        with self._app_lock:
+            app = dict(self._app)
         return {
             "machine": parts["machine"],
             "tools": parts["tools"],
@@ -1268,8 +1824,48 @@ class AppServer:
             "sheet": sheet,
             "cell": self._builder.chosen(),
             "job": self._builder.job_state(),
-            "version": version(sheet),
+            "install": {**self._installer.state(), "app": app_install.is_app()},
+            "version": {**version(sheet), "app": app},
         }
+
+    def _installing(self) -> bool:
+        thread = self._install_thread
+        return thread is not None and thread.is_alive()
+
+    def _install(self) -> None:
+        """Start fetching the tools, on a thread of its own."""
+        if not app_install.is_app():
+            # An install made by hand is the person's own. The page installs nothing into it.
+            raise Refusal(409, "tools are fetched only into an app install", "not_an_app")
+        with self._start_lock:
+            if self._installing() or self._builder.busy():
+                raise Refusal(409, "this machine is busy with a cell or a fetch", "busy")
+            # Asked now and not from memory, like a build: nothing large is fetched to a
+            # machine that cannot draw, or before the terms are accepted.
+            if not machine()["ok"] or not self._builder.terms_accepted():
+                raise Refusal(409, "the machine check and the terms come first", "not_ready")
+            missing = tools(_kind_of(self._known.sheet())).get("missing")
+            redo: list[str] = []
+            for name in missing if isinstance(missing, list) else []:
+                phase = _PHASE_OF_TOOL.get(name) if isinstance(name, str) else None
+                if phase is not None and phase not in redo:
+                    redo.append(phase)
+            # Starting counts as the page being here.
+            self._builder.seen()
+            thread = threading.Thread(target=self._run_install, args=(tuple(redo),), daemon=True)
+            self._install_thread = thread
+            thread.start()
+
+    def _run_install(self, redo: tuple[str, ...]) -> None:
+        try:
+            self._installer.run(redo=redo)
+        except Refusal:
+            # Nothing was started. The state says so.
+            pass
+        except Exception as exc:  # noqa: BLE001 - the last stop on this thread
+            print(f"app: {type(exc).__name__} while fetching the tools", file=sys.stderr)
+        finally:
+            self._known.forget_tools()
 
     def _grid(self) -> dict[str, object]:
         sheet = self._known.sheet()
@@ -1288,6 +1884,7 @@ class AppServer:
             "sheet": {
                 "id": sheet_id,
                 "name": sheet.get("name") if isinstance(sheet.get("name"), str) else "",
+                "made": "grid" if sheet.get("made") == "grid" else "hand",
                 "cols": cols,
                 "rows": rows,
                 "pipeline": sheet.get("pipeline") if isinstance(sheet.get("pipeline"), str) else "",
@@ -1315,9 +1912,46 @@ class AppServer:
 
     def _cell(self, raw: bytes) -> dict[str, object]:
         body = _body(raw)
+        if "code" in body:
+            return self._cell_coded(body.get("code"))
         if body.get("next") is True:
             return self._cell_next()
         return self._cell_named(body)
+
+    def _cell_coded(self, code: object) -> dict[str, object]:
+        """A cell by its code from the map: any sheet, also one this page was not looking at.
+
+        The code is text a person pasted. It is taken apart by shape before anything is
+        asked, it is never said back, and the sheet's size comes from the service.
+        """
+        bad = Refusal(400, "the code names no cell", "bad_code")
+        if not isinstance(code, str) or len(code) > _CODE_MAX:
+            raise bad
+        found = _CODE.fullmatch(code.strip())
+        if found is None:
+            raise bad
+        sheet_id, col, row = found.group(1), int(found.group(2)), int(found.group(3))
+        try:
+            _status, body = api.get(f"/v1/grid/{sheet_id}", token=config.read_token())
+        except RutorError as exc:
+            if exc.code == 2:
+                # The service has no sheet by that name.
+                raise bad from exc
+            raise
+        raw = body.get("sheet") if isinstance(body, dict) else None
+        cells = body.get("cells") if isinstance(body, dict) else None
+        record = _sheet_record(raw)
+        if record is None or record["id"] != sheet_id or not isinstance(cells, list):
+            raise bad
+        if _coord(col, record["cols"]) is None or _coord(row, record["rows"]) is None:
+            raise bad
+        is_open = isinstance(raw, dict) and raw.get("state") == "open"
+        if not is_open or not _is_free(cells, col, row, record["made"] == "grid"):
+            raise Refusal(409, "that cell is not free", "taken")
+        # Refused here while a cell is being built, before the page's sheet is changed.
+        self._builder.choose(sheet_id, col, row, _kind_of(record))
+        self._known.choose_sheet(record)
+        return {"sheet": sheet_id, "col": col, "row": row}
 
     def _open(self) -> dict[str, object]:
         sheet = self._known.sheet_for_choice()
@@ -1326,6 +1960,10 @@ class AppServer:
         return sheet
 
     def _cell_next(self) -> dict[str, object]:
+        if self._builder.busy():
+            raise Refusal(409, "a cell is being built", "busy")
+        # "The next free cell" is asked of the first open sheet, not of one chosen by a code.
+        self._known.choose_sheet(None)
         sheet = self._open()
         sheet_id = _sheet_id(sheet)
         cells = _service_grid(sheet_id)
@@ -1336,7 +1974,7 @@ class AppServer:
                 raise
             # The last free cell went since the page last looked. The page has a word for that.
             raise Refusal(409, "no cell is free", "none_free") from exc
-        self._builder.choose(sheet_id, col, row)
+        self._builder.choose(sheet_id, col, row, _kind_of(sheet))
         return {"sheet": sheet_id, "col": col, "row": row}
 
     def _cell_named(self, body: dict[str, object]) -> dict[str, object]:
@@ -1346,32 +1984,327 @@ class AppServer:
         row = _coord(body.get("row"), sheet.get("rows"))
         if body.get("sheet") != sheet_id or col is None or row is None:
             raise bad_input("the body names no cell")
-        if not _is_free(_service_grid(sheet_id), col, row):
+        if not _is_free(_service_grid(sheet_id), col, row, sheet.get("made") == "grid"):
             raise Refusal(409, "that cell is not free", "taken")
-        self._builder.choose(sheet_id, col, row)
+        self._builder.choose(sheet_id, col, row, _kind_of(sheet))
         return {"sheet": sheet_id, "col": col, "row": row}
 
 
-def cmd_app(args: argparse.Namespace) -> int:
+# ---- one app at a time, with or without a terminal
+
+
+# The address of a page this program serves: this machine, a port and the page's long key.
+_PAGE_URL = re.compile(r"http://127\.0\.0\.1:\d{1,5}/[A-Za-z0-9_-]{20,100}/")
+ALIVE_SECONDS = 3.0
+ALIVE_TRIES = 4
+RACE_SECONDS = 5.0
+# How long a running app gets to stop its job, give the lock back and end.
+QUIT_SECONDS = 150.0
+LOG_MAX_BYTES = 256_000
+
+
+def running_path() -> Path:
+    return config.home() / "app-running.json"
+
+
+def log_path() -> Path:
+    return config.home() / "app.log"
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process with this number exists. It may be another program than the app."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # os.kill is no question on Windows: with any signal number it ends the process.
+        import ctypes
+
+        # A handle of this function's own, so that the types set here are not everybody's.
+        kernel = ctypes.WinDLL("kernel32")  # type: ignore[attr-defined]
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+        kernel.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+        kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+        # PROCESS_QUERY_LIMITED_INFORMATION. 259 is STILL_ACTIVE.
+        handle = kernel.OpenProcess(0x1000, 0, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            kernel.CloseHandle(handle)
     try:
-        server = AppServer()
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # It exists and is somebody else's.
+        return True
+    return True
+
+
+def _answers(url: str) -> str:
+    """Whether the app page at this address says that it is one: "yes", "no" or "slow".
+
+    "slow" is a port that took the connection and did not answer in time, which is an app
+    that is busy, not one that is gone. No proxy sees the address.
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    try:
+        with opener.open(f"{url}api/alive", timeout=ALIVE_SECONDS) as response:
+            found = json.loads(response.read(1000).decode("utf-8"))
+    except TimeoutError:
+        return "slow"
+    except urllib.error.URLError as exc:
+        return "slow" if isinstance(exc.reason, TimeoutError) else "no"
+    except Exception:
+        # Refused, or not JSON: there is no app page there.
+        return "no"
+    return "yes" if isinstance(found, dict) and found.get("app") == "pixelbygget" else "no"
+
+
+def running_page() -> str | None:
+    """The address of an app page that is already up on this machine, or None.
+
+    The file is only a note. It counts when its process is alive and the page answers at
+    its address. A note that is stale, or that is not such a note, is removed.
+    """
+    path = running_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    try:
+        found = json.loads(text)
+    except ValueError:
+        found = None
+    if isinstance(found, dict):
+        pid, url = found.get("pid"), found.get("url")
+        if (
+            isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and isinstance(url, str)
+            # Only an address of the page's own shape is ever asked: the file is data.
+            and _PAGE_URL.fullmatch(url)
+            and _alive(pid)
+        ):
+            for _attempt in range(ALIVE_TRIES):
+                answer = _answers(url)
+                if answer == "yes":
+                    return url
+                if answer == "no":
+                    break
+                time.sleep(0.5)
+            else:
+                # Alive, listening and slow every time: a machine that is busy drawing. It is
+                # still the app, and a second one beside it would be worse than a slow page.
+                return url
+    with contextlib.suppress(OSError):
+        path.unlink()
+    return None
+
+
+def _write_running(url: str) -> bool:
+    """Note that this process serves the page. False when another start got there first."""
+    path = running_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps({"pid": os.getpid(), "url": url}).encode("utf-8")
+    for _attempt in range(2):
+        try:
+            # The address holds the page's key, so the note is the owner's alone.
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            if running_page() is not None:
+                return False
+            # The note was stale and is gone now.
+            continue
+        try:
+            os.write(descriptor, body)
+        finally:
+            os.close(descriptor)
+        os.chmod(path, 0o600)
+        return True
+    return False
+
+
+def _remove_running() -> None:
+    """Take the note away, if it is this process's own."""
+    path = running_path()
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(found, dict) and found.get("pid") == os.getpid():
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+class _Log:
+    """The fault log of an app without a terminal: each line with its time, nothing else."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        try:
+            if path.stat().st_size > LOG_MAX_BYTES:
+                flags |= os.O_TRUNC
+        except OSError:
+            pass
+        self._file = os.fdopen(os.open(path, flags, 0o600), "a", encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
+        self._lock = threading.Lock()
+        self._rest = ""
+
+    def write(self, text: str) -> int:
+        with self._lock:
+            *lines, self._rest = (self._rest + text).split("\n")
+            for line in lines:
+                if line.strip():
+                    self._file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {api.one_line(line, 300)}\n")
+            self._file.flush()
+        return len(text)
+
+    def flush(self) -> None:
+        with self._lock:
+            self._file.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            self._file.close()
+
+
+def _fault_line(kind: type[BaseException] | None, trace: object) -> str:
+    """The kind of a fault and where, never its message: this process holds a login."""
+    frames = traceback.extract_tb(trace) if trace is not None else []  # type: ignore[arg-type]
+    where = f" at {Path(frames[-1].filename).name}:{frames[-1].lineno}" if frames else ""
+    return f"app: {kind.__name__ if kind is not None else 'fault'}{where}"
+
+
+@contextlib.contextmanager
+def _quietly() -> Iterator[None]:
+    """Print nothing. Fault lines go to the log, and a fault nobody caught goes there by its kind."""
+    log = _Log(log_path())
+    nowhere = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 - closed below
+    saved = (sys.stdout, sys.stderr, sys.excepthook, threading.excepthook)
+
+    def on_thread(args: threading.ExceptHookArgs) -> None:
+        log.write(_fault_line(args.exc_type, args.exc_traceback) + "\n")
+
+    sys.stdout, sys.stderr = nowhere, log  # type: ignore[assignment]
+    sys.excepthook = lambda kind, _value, trace: log.write(_fault_line(kind, trace) + "\n")
+    threading.excepthook = on_thread
+    try:
+        yield
+    except RutorError as exc:
+        # The command's own sentence, which a terminal would have shown.
+        log.write(f"error: {exc.message}\n")
+        raise
+    except Exception as exc:
+        log.write(_fault_line(type(exc), exc.__traceback__) + "\n")
+        raise
+    finally:
+        sys.stdout, sys.stderr, sys.excepthook, threading.excepthook = saved
+        nowhere.close()
+        log.close()
+
+
+def _show(url: str, args: argparse.Namespace) -> None:
+    print(f"url: {url}", flush=True)
+    if not args.no_open:
+        webbrowser.open(url)
+
+
+def _serve(args: argparse.Namespace, quiet: bool) -> int:
+    found = running_page()
+    if found is not None:
+        # The app is up already. Its page is shown, and no second one is started.
+        _show(found, args)
+        return 0
+    try:
+        server = AppServer(idle_exit=IDLE_EXIT_SECONDS if quiet else None)
     except OSError as exc:
         raise environment(f"could not open a port on this machine ({exc.strerror})") from exc
-    print(f"url: {server.url}", flush=True)
-    print("Ctrl-C closes the page.", flush=True)
-    if not args.no_open:
-        webbrowser.open(server.url)
+    if not _write_running(server.url):
+        # Another start wrote its note between the look above and here. That one wins.
+        server.stop()
+        deadline = time.monotonic() + RACE_SECONDS
+        while True:
+            found = running_page()
+            if found is not None:
+                _show(found, args)
+                return 0
+            if time.monotonic() >= deadline:
+                raise environment("another Tech Embassy Pixel was starting and did not come up; start it again")
+            time.sleep(0.2)
     try:
+        _show(server.url, args)
+        print("Ctrl-C closes the page.", flush=True)
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.stop()
+        _remove_running()
     print("closed")
     return 0
+
+
+def _quit_running() -> int:
+    """End the app that is running, the way its own page ends it. For the installer.
+
+    The installer replaces files the app holds open, so it asks first. Nothing running is
+    no fault.
+    """
+    path = running_path()
+    url = running_page()
+    if url is None:
+        return 0
+    try:
+        noted = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        noted = {}
+    pid = noted.get("pid") if isinstance(noted, dict) else None
+    request = urllib.request.Request(
+        f"{url}api/quit", data=b"{}", headers={"Content-Type": "application/json"}, method="POST"
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    try:
+        # The answer comes when the job is stopped and its lock is given back.
+        with opener.open(request, timeout=QUIT_SECONDS) as response:
+            response.read(1000)
+    except Exception as exc:
+        raise environment("the running Tech Embassy Pixel did not answer; close it and try again") from exc
+    deadline = time.monotonic() + QUIT_SECONDS
+    while time.monotonic() < deadline:
+        # Gone when the page is, and, for another process than this one, when it has ended:
+        # only then are its files free.
+        other = isinstance(pid, int) and not isinstance(pid, bool) and pid != os.getpid()
+        if _answers(url) == "no" and not (other and _alive(pid)):
+            return 0
+        time.sleep(0.2)
+    raise environment("the running Tech Embassy Pixel did not end; close it and try again")
+
+
+def cmd_app(args: argparse.Namespace) -> int:
+    quiet = bool(getattr(args, "quiet", False))
+    work = _quit_running if getattr(args, "quit", False) else (lambda: _serve(args, quiet))
+    if not quiet:
+        return work()
+    with _quietly():
+        return work()
 
 
 def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     app_parser = sub.add_parser("app", aliases=["bygg"], help="open the page for building a cell")
     app_parser.add_argument("--no-open", action="store_true", help="print the address and do not open a browser")
+    app_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="print nothing, write faults to app.log, and end after ten minutes without a page",
+    )
+    app_parser.add_argument("--quit", action="store_true", help="end the app that is running, if one is")
     app_parser.set_defaults(func=cmd_app)

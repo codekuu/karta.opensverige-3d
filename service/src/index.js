@@ -18,6 +18,8 @@
    Public reads (/v1/sheets, /v1/cities, /v1/grid/*) are kept in memory per isolate for
    PUBLIC_CACHE_SECONDS (default 60), so a busy map page does not read every cell from D1 on
    every hit. The Cache API does not work on workers.dev, so this is the cache we have.
+   /v1/place is not kept: every point is its own answer, and a stream of them would push
+   the grids out of the 64 places. It reads four rows at most.
 
    CORS: GET answers carry Access-Control-Allow-Origin for an origin in ALLOWED_ORIGINS, so
    the build page can read the grid. Other methods are CLI calls and get no CORS headers. */
@@ -27,7 +29,7 @@ import { isCachedAdmin, requireUser } from './auth.js';
 import { error, json, nowIso } from './db.js';
 import { claimRoute, releaseRoute } from './cells.js';
 import { runCron } from './cron.js';
-import { citiesRoute, gridRoute, openSheetRoute, seedRoute, sheetsRoute } from './sheets.js';
+import { citiesRoute, gridRoute, openSheetRoute, placeRoute, seedRoute, sheetsRoute } from './sheets.js';
 import { inkorgRoute, uploadRoute } from './upload.js';
 
 /**
@@ -56,6 +58,7 @@ const routes = [
   ['GET', /^\/v1\/sheets$/, sheetsRoute],
   ['GET', /^\/v1\/cities$/, citiesRoute],
   ['GET', /^\/v1\/grid\/(?<sheet>[a-z0-9-]+)$/, gridRoute],
+  ['GET', /^\/v1\/place$/, placeRoute],
   ['POST', /^\/v1\/claim$/, claimRoute],
   ['POST', /^\/v1\/release$/, releaseRoute],
   ['PUT', /^\/v1\/upload\/(?<sheet>[a-z0-9-]+)\/(?<col>\d+)_(?<row>\d+)$/, uploadRoute],
@@ -105,7 +108,9 @@ async function cachedPublic(pathname, env, run) {
   const hit = publicCache.get(pathname);
   if (hit && hit.until > Date.now()) return new Response(hit.body, { status: hit.status, headers: hit.headers });
   const response = await run();
-  if (response.status !== 200) return response;
+  // An answer that says no-store is not kept: the grid of a sheet nobody has made yet. There
+  // are thousands of those ids, and the claim that makes the sheet changes the answer.
+  if (response.status !== 200 || (response.headers.get('Cache-Control') || '').includes('no-store')) return response;
   const body = await response.text();
   const headers = [...response.headers.entries()];
   if (publicCache.size >= PUBLIC_CACHE_MAX) publicCache.delete(publicCache.keys().next().value);

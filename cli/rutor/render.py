@@ -77,12 +77,12 @@ def camera_for(
 def render_cell(sheet: dict[str, object], col: int, row: int, out: Path) -> None:
     from rutor import renderer
     from rutor.renderer import google
-    from rutor.renderer.sources import sheet_kind
+    from rutor.renderer.sources import kind_of
 
     sheet_id = sheet.get("id")
     if not isinstance(sheet_id, str) or not sheet_id:
         raise bad_input("sheet is missing id")
-    if sheet_kind(sheet_id) == "google":
+    if kind_of(sheet) == "google":
         google.render_google(sheet, col, row, out)
     else:
         renderer.render(sheet, col, row, out)

@@ -231,11 +231,19 @@ export const uploadRoute = requireUser(async (request, env, ctx, params, now, us
   const sha = await sha256Hex(bytes);
   if (sha !== manifest.sha256) return error(422, 'sha_mismatch', 'The file does not match the sha256 in the manifest.');
   const key = inboxKey(sheet, col, row, sha);
-  await env.INKORG.put(`${key}.png`, bytes, { httpMetadata: { contentType: 'image/png' } });
-  await env.INKORG.put(`${key}.json`, JSON.stringify({ ...manifest, sheet, col, row, login: user.login, github_id: user.github_id, uploadedAt: now }), {
-    httpMetadata: { contentType: 'application/json' },
-  });
   const state = user.trusted ? 'godkand' : 'vantar';
+  try {
+    await env.INKORG.put(`${key}.png`, bytes, { httpMetadata: { contentType: 'image/png' } });
+    await env.INKORG.put(`${key}.json`, JSON.stringify({ ...manifest, sheet, col, row, login: user.login, github_id: user.github_id, uploadedAt: now }), {
+      httpMetadata: { contentType: 'application/json' },
+    });
+  } catch (e) {
+    // No cell points at these objects, so nothing would ever take them away. Only a write
+    // that failed is undone here: once the cell is asked to change state, a call that
+    // throws may still have changed it, and the cell must not point at nothing.
+    await env.INKORG.delete([`${key}.png`, `${key}.json`]).catch(() => undefined);
+    throw e;
+  }
   // The lock may have expired or been freed while the file was written: the cell changes
   // state only if it is still this user's live lock, otherwise our objects go again.
   const result = await env.DB.prepare(

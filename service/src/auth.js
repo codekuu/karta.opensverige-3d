@@ -11,6 +11,35 @@ import { error, nowIso } from './db.js';
 
 const GITHUB_USER = 'https://api.github.com/user';
 const CACHE_TTL = 600;
+// A token GitHub refused is remembered here for a minute, by its hash, so that a caller who
+// repeats it does not make this service ask GitHub once per request. In memory only: it costs
+// no storage writes, and a new isolate simply asks once more.
+const BAD_SECONDS = 60;
+const BAD_MAX = 5000;
+/** @type {Map<string, number>} */
+const refused = new Map();
+
+/**
+ * @param {string} key
+ * @param {string} now
+ * @returns {boolean}
+ */
+function knownBad(key, now) {
+  const until = refused.get(key);
+  if (until === undefined) return false;
+  if (until > Date.parse(now)) return true;
+  refused.delete(key);
+  return false;
+}
+
+/**
+ * @param {string} key
+ * @param {string} now
+ */
+function rememberBad(key, now) {
+  if (refused.size >= BAD_MAX) refused.clear();
+  refused.set(key, Date.parse(now) + BAD_SECONDS * 1000);
+}
 
 /**
  * Hex sha256 of a string.
@@ -135,16 +164,25 @@ export async function resolveUser(request, env, now) {
   const token = bearer(request);
   if (!token) return error(401, 'no_token', 'Log in first: rutor login.');
   const key = 'gh:' + (await sha256Hex(token));
-  let identity = await env.GH.get(key, 'json');
+  const refusal = () => error(401, 'bad_token', 'GitHub does not accept this token. Log in again: rutor login.');
+  if (knownBad(key, now)) return refusal();
+  // The cache is a saving, not a gate: when it does not answer, GitHub is asked.
+  let identity = await env.GH.get(key, 'json').catch(() => null);
   let fresh = false;
   if (!identity) {
     const secret = String(env.GITHUB_CLIENT_SECRET || '');
     const clientId = String(env.GITHUB_CLIENT_ID || '');
-    const looked = secret && clientId ? await lookupOwnApp(token, clientId, secret) : await lookupGithub(token);
-    if (looked === 'bad') return error(401, 'bad_token', 'GitHub does not accept this token. Log in again: rutor login.');
+    // The secret means "our own logins only". Without the app's id that cannot be asked, and
+    // falling back to "any GitHub token" would quietly undo it.
+    if (secret && !clientId) return error(503, 'misconfigured', 'The service is set up wrongly. Try again later.', { 'Retry-After': '300' });
+    const looked = secret ? await lookupOwnApp(token, clientId, secret) : await lookupGithub(token);
+    if (looked === 'bad') {
+      rememberBad(key, now);
+      return refusal();
+    }
     if (looked === 'down') return error(503, 'github_down', 'GitHub did not answer. Try again in a minute.', { 'Retry-After': '60' });
     identity = looked;
-    await env.GH.put(key, JSON.stringify(identity), { expirationTtl: CACHE_TTL });
+    await env.GH.put(key, JSON.stringify(identity), { expirationTtl: CACHE_TTL }).catch(() => undefined);
     fresh = true;
   }
   // The row is written when GitHub was just asked, or when it is missing: not on every request,

@@ -4,7 +4,8 @@
  * @typedef {{ id: string, city: string, name: string, cols: number, rows: number,
  *   origin_lat: number, origin_lon: number, x_meters: number, y_meters: number,
  *   ground_height: number, dzi_levels: number, pipeline: string,
- *   state: 'queued'|'open'|'done', queue_order: number, rev: number }} Sheet
+ *   state: 'queued'|'open'|'done', queue_order: number, rev: number,
+ *   kind: 'open'|'google', made: 'hand'|'grid' }} Sheet
  */
 
 /**
@@ -24,7 +25,8 @@
 /**
  * @typedef {{ DB: D1Database, INKORG: R2Bucket, GH: KVNamespace,
  *   TAKT: { limit(options: { key: string }): Promise<{ success: boolean }> },
- *   ADMIN_GITHUB_ID: string, PIXELBYGGET_STANGD: string, ALLOWED_ORIGINS: string }} Env
+ *   ADMIN_GITHUB_ID: string, PIXELBYGGET_STANGD: string, ALLOWED_ORIGINS: string,
+ *   PIPELINE_NOW: string }} Env
  */
 
 /**

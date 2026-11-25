@@ -8,10 +8,13 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +25,7 @@ from rutor.manifest import build_manifest, encode_manifest, png_size, sha256_fil
 from rutor.check import problems as check_problems
 from rutor.render import render_cell
 from rutor.renderer import google
-from rutor.renderer.sources import SHEET_KINDS, ortho_source, osm_date, sheet_kind
+from rutor.renderer.sources import SHEET_KINDS, kind_of, ortho_source, osm_date
 from rutor.terrain import terrain_label
 
 
@@ -115,6 +118,20 @@ def pick_next(sheet: dict[str, object], cells: list[object]) -> tuple[int, int]:
             parsed.append((col, row, state))
     by_pos = {(col, row): state for col, row, state in parsed}
     free = [(col, row) for col, row, state in parsed if state == "fri"]
+    if sheet.get("made") == "grid":
+        # A sheet of the tiling lists only the cells someone has taken: every other cell is
+        # free and has no row. "Next" is then a free cell beside one that has a row, so what
+        # is drawn grows outwards from where someone started.
+        around = {(col + d_col, row + d_row) for col, row in by_pos for d_col in (-1, 0, 1) for d_row in (-1, 0, 1)}
+        free = sorted(
+            (col, row)
+            for col, row in around
+            if 0 <= col < cols and 0 <= row < rows and by_pos.get((col, row), "fri") == "fri"
+        )
+        if not free:
+            raise refused(
+                f"refused: no_free_cell: nothing is drawn on {sheet.get('id')} yet, so there is no cell to build beside: name a cell, or use --at."
+            )
     if not free:
         # Every cell here is on the map already, or nobody can build what is left yet.
         raise refused(f"refused: no_free_cell: no cell on {sheet.get('id')} is free. rutor cities shows where there are free cells.")
@@ -137,36 +154,148 @@ def pick_next(sheet: dict[str, object], cells: list[object]) -> tuple[int, int]:
     return pool[0]
 
 
+def _source_ready(sheet: dict[str, object], sheet_id: str) -> str:
+    """The source the sheet is drawn from, once this machine is known to be able to render it.
+
+    Without Node, the renderer and a token Cesium ion accepts, a Google render fails with the
+    cell already taken from everyone else. A sheet with no source decided raises here too.
+    """
+    kind = kind_of(sheet)
+    if kind == "google":
+        problem = google.not_ready()
+        if problem is not None:
+            raise environment(f"this machine cannot render {sheet_id} yet: {problem}")
+    return kind
+
+
 def cell_url(sheet: str, col: int, row: int) -> str:
     """Where a person sees the cell on the map. The service's upload answer uses the same address."""
     return f"{config.MAP_URL}#{sheet}/{col}_{row}"
 
 
+_DEGREES = r"-?\d{1,3}(?:\.\d{1,9})?"
+_POINT = re.compile(rf"\s*({_DEGREES})\s*,\s*({_DEGREES})\s*")
+
+
+def parse_point(text: str) -> tuple[str, str]:
+    """Latitude and longitude out of `--at`, as the digits the person wrote."""
+    found = _POINT.fullmatch(text)
+    if found is None or abs(float(found.group(1))) > 90 or abs(float(found.group(2))) > 180:
+        raise bad_input(f"--at must be latitude,longitude in decimal degrees, like 56.0465,12.6945, not {text!r}")
+    return found.group(1), found.group(2)
+
+
+# OpenStreetMap's own search. Its policy asks for at most one request a second and a name for
+# the program that asks: rutor asks once per claim, and names itself, never the person.
+NOMINATIM = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_SECONDS = 15
+NOMINATIM_BYTES = 200_000
+
+
+def _open_url(request: urllib.request.Request, timeout: float):  # type: ignore[no-untyped-def]
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _nominatim(name: str) -> object:
+    """What OpenStreetMap's search answers for a name in Sweden: a list of at most one place."""
+    from rutor import __version__
+
+    query = urllib.parse.urlencode({"q": name, "format": "jsonv2", "limit": 1, "countrycodes": "se"})
+    request = urllib.request.Request(
+        f"{NOMINATIM}?{query}",
+        headers={"User-Agent": f"rutor/{__version__} (+https://github.com/opensverige/karta.opensverige-3d)", "Accept": "application/json"},
+    )
+    try:
+        with _open_url(request, NOMINATIM_SECONDS) as answer:
+            raw = answer.read(NOMINATIM_BYTES + 1)
+    except (urllib.error.URLError, OSError) as exc:
+        raise network(f"could not reach OpenStreetMap's search ({exc.__class__.__name__})") from exc
+    if len(raw) > NOMINATIM_BYTES:
+        raise network("OpenStreetMap's search sent more than a place")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise network("OpenStreetMap's search did not answer JSON") from exc
+
+
+def find_place(name: str) -> tuple[str, str, str]:
+    """Latitude, longitude and the full name of a town, street or landmark in Sweden."""
+    cleaned = " ".join(name.split())
+    if not 2 <= len(cleaned) <= 200:
+        raise bad_input("--plats takes the name of a place, like Eslöv or \"Stortorget Helsingborg\"")
+    hits = _nominatim(cleaned)
+    hit = hits[0] if isinstance(hits, list) and hits and isinstance(hits[0], dict) else None
+    if hit is None:
+        raise bad_input(f"OpenStreetMap knows no place called {api.one_line(cleaned, 80)!r} in Sweden. Try a town or a street.")
+    lat, lon = str(hit.get("lat", "")), str(hit.get("lon", ""))
+    try:
+        lat, lon = parse_point(f"{float(lat):.6f},{float(lon):.6f}")
+    except (ValueError, RutorError) as exc:
+        raise network("OpenStreetMap's search answered no point") from exc
+    label = hit.get("display_name")
+    return lat.rstrip("0").rstrip("."), lon.rstrip("0").rstrip("."), api.one_line(label if isinstance(label, str) else cleaned, 120)
+
+
+def _place(lat: str, lon: str) -> tuple[dict[str, object], int, int]:
+    """The sheet and cell the service says a point belongs to. Public: it needs no login."""
+    _status, body = api.get(f"/v1/place?lat={lat}&lon={lon}", token=config.read_token())
+    payload = _object(body, "object")
+    sheet = _object(payload.get("sheet"), "sheet")
+    sheet_id, col, row = sheet.get("id"), payload.get("col"), payload.get("row")
+    if not isinstance(sheet_id, str) or config.SHEET_ID.fullmatch(sheet_id) is None:
+        raise network("service answer names no sheet")
+    for value in (col, row):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise network("service answer names no cell")
+    assert isinstance(col, int) and isinstance(row, int)
+    return sheet, col, row
+
+
 def cmd_claim(args: argparse.Namespace) -> int:
-    if bool(args.next) == bool(args.cell):
-        raise bad_input("Pass a cell like 64_59, or --next, and not both.")
+    at = getattr(args, "at", None)
+    name = getattr(args, "plats", None)
+    if at is not None or name is not None:
+        if args.sheet or args.cell or args.next or (at is not None and name is not None):
+            raise bad_input("Pass one of: a place name with --plats, a point with --at, or a sheet and a cell.")
+        if at is not None:
+            lat, lon = parse_point(at)
+    elif not args.sheet or bool(args.next) == bool(args.cell):
+        raise bad_input("Pass a sheet and a cell like 64_59, or a sheet and --next, or a place with --plats or --at.")
     # A lock holds the cell for 48 hours, so a machine that cannot build one does not take one.
     # The machine is asked before the login: on one that cannot build, "log in" is no next step.
     problem = _gpu_missing()
     if problem is not None:
         raise environment(f"this machine cannot build a cell: {problem}")
-    # The same for a Google sheet: without Node, the renderer and a token Cesium ion accepts,
-    # the render fails with the cell already taken from everyone else.
-    if SHEET_KINDS.get(args.sheet) == "google":
-        problem = google.not_ready()
-        if problem is not None:
-            raise environment(f"this machine cannot render {args.sheet} yet: {problem}")
-    token = require_token()
-    if args.next:
-        _status, body = api.get(f"/v1/grid/{args.sheet}", token=token)
-        payload = _object(body, "object")
-        col, row = pick_next(_object(payload.get("sheet"), "sheet"), _rows(payload.get("cells"), "cells"))
+    # The sheet's row says which source it is drawn from. The place and the grid are public, so
+    # this needs no login, and a sheet with no source decided stops here with nothing claimed.
+    if name is not None:
+        lat, lon, found = find_place(name)
+        print(f"found: {found}")
+        at = f"{lat},{lon}"
+    if at is not None:
+        sheet, col, row = _place(lat, lon)
+        sheet_id = str(sheet.get("id"))
+        print(f"place: {sheet_id} {col}_{row}")
+        kind = _source_ready(sheet, sheet_id)
+        token = require_token()
     else:
-        col, row = parse_cell(str(args.cell))
-    _status, claimed = api.post("/v1/claim", {"sheet": args.sheet, "col": col, "row": row}, token)
+        sheet_id = args.sheet
+        _status, body = api.get(f"/v1/grid/{sheet_id}", token=config.read_token())
+        payload = _object(body, "object")
+        sheet = _object(payload.get("sheet"), "sheet")
+        kind = _source_ready(sheet, sheet_id)
+        token = require_token()
+        if args.next:
+            col, row = pick_next(sheet, _rows(payload.get("cells"), "cells"))
+        else:
+            col, row = parse_cell(str(args.cell))
+    # The claim says the source this rutor will draw from. On a sheet of the tiling the service
+    # refuses a claim that names none: that is how it stops a rutor from before, which would
+    # lock the cell and then not know how to draw it.
+    _status, claimed = api.post("/v1/claim", {"sheet": sheet_id, "col": col, "row": row, "kind": kind}, token)
     expires = _object(claimed, "object").get("expires_at")
-    print(f"claimed: {args.sheet} {col}_{row} expires {expires}")
-    print(f"url: {cell_url(args.sheet, col, row)}")
+    print(f"claimed: {sheet_id} {col}_{row} expires {expires}")
+    print(f"url: {cell_url(sheet_id, col, row)}")
     return 0
 
 
@@ -241,6 +370,44 @@ def _nvidia_cards() -> list[tuple[str, int]]:
         except ValueError:
             continue
     return cards
+
+
+# The lowest NVIDIA driver for Windows that can run the CUDA 12 libraries inside the cu128
+# wheels of PyTorch: "CUDA 12.x >= 528.33" in the table "CUDA Toolkit and Minimum Required
+# Driver Version for CUDA Minor Version Compatibility" of NVIDIA's CUDA 12.8 release notes,
+# https://docs.nvidia.com/cuda/archive/12.8.0/cuda-toolkit-release-notes/index.html
+# (read 2026-11-24). The same notes name 570.65 as the driver CUDA 12.8 ships with; a
+# driver between the two runs what was built for 12.x, so it is not refused. Linux drivers
+# are numbered differently (525.60.13 there), and this number is not used for them.
+DRIVER_MIN: tuple[int, int] = (528, 33)
+
+
+def _nvidia_driver() -> str:
+    """The driver version nvidia-smi reports, or "" when it does not answer."""
+    tool = shutil.which("nvidia-smi")
+    if tool is None:
+        return ""
+    try:
+        done = subprocess.run(
+            [tool, "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    # One line for each card, all with the same driver.
+    lines = [line.strip() for line in done.stdout.splitlines() if line.strip()]
+    return lines[0] if lines else ""
+
+
+def driver_too_old(version: str) -> bool:
+    """Whether a Windows driver version is certainly below DRIVER_MIN. Unreadable is not old."""
+    parts = version.strip().split(".")
+    if len(parts) < 2 or not (parts[0].isascii() and parts[0].isdigit() and parts[1].isascii() and parts[1].isdigit()):
+        return False
+    return (int(parts[0]), int(parts[1])) < DRIVER_MIN
 
 
 def _gpu_missing() -> str | None:
@@ -339,6 +506,24 @@ def _login_missing() -> str | None:
     return "service did not return a login"
 
 
+def _preflight_kind(sheet_id: str) -> tuple[str, str | None]:
+    """The source of the sheet a preflight names, and what is wrong when it cannot be told.
+
+    The two sheets this code knows are answered from its own table, so their preflight works
+    with no service at all, as it did. Any other sheet is asked of the service: its grid is
+    public and needs no login.
+    """
+    if not sheet_id:
+        return "", None
+    known = SHEET_KINDS.get(sheet_id)
+    if known is not None:
+        return known, None
+    try:
+        return kind_of(_sheet_body(config.read_token() or "", sheet_id)), None
+    except RutorError as exc:
+        return "", exc.message
+
+
 def cmd_preflight(args: argparse.Namespace) -> int:
     # The machine first: python, card and disk need nothing installed and no login, so a person
     # learns whether this machine can build a cell before they accept terms or download anything.
@@ -348,7 +533,10 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         ("disk", _disk_missing),
     ]
     # What the sheet's source needs, when a sheet is named. None of it needs a login.
-    if SHEET_KINDS.get(getattr(args, "sheet", None) or "") == "google":
+    kind, unknown = _preflight_kind(getattr(args, "sheet", None) or "")
+    if unknown is not None:
+        checks.append(("sheet", lambda: unknown))
+    if kind == "google":
         checks += [
             ("node", google.node_missing),
             ("google renderer", google.renderer_missing),
@@ -382,12 +570,17 @@ def cmd_render(args: argparse.Namespace) -> int:
     token = require_token()
     col, row = parse_cell(args.cell)
     sheet = _sheet_body(token, args.sheet)
+    if sheet.get("exists") is False:
+        # Nobody has claimed on this sheet, so it has no row: the height and the picture's top
+        # in this answer are stand-ins, and a cell drawn from them would lie off its place.
+        raise refused(f"refused: not_claimed: nothing is claimed on {args.sheet} yet. Run rutor claim {args.sheet} {col}_{row} first.")
     out = config.work_dir(args.sheet) / f"{col}_{row}.src.png"
-    if sheet_kind(args.sheet) == "google":
+    kind = kind_of(sheet)
+    if kind == "google":
         for line in GOOGLE_NOTICE:
             print(f"note: {line}")
     render_cell(sheet, col, row, out)
-    _write_source_info(args.sheet, out)
+    _write_source_info(args.sheet, kind, out)
     print(f"rendered: {args.sheet} {col}_{row} {out}")
     return 0
 
@@ -399,9 +592,9 @@ GOOGLE_NOTICE = (
 )
 
 
-def _write_source_info(sheet_id: str, png: Path) -> None:
+def _write_source_info(sheet_id: str, kind: str, png: Path) -> None:
     """Record what the source PNG was made from, next to the PNG itself."""
-    if sheet_kind(sheet_id) == "google":
+    if kind == "google":
         rendered = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         info = {
             "provider": f"Google Photorealistic 3D Tiles via Cesium ion asset {google.ION_ASSET}",
@@ -745,9 +938,19 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
         help="lock one cell",
         description="Lock one free cell for 48 hours. Refuses on a machine that cannot build or render it, before anything is locked.",
     )
-    claim.add_argument("sheet", help="the sheet, such as stockholm-norr")
+    claim.add_argument("sheet", nargs="?", help="the sheet, such as stockholm-norr")
     claim.add_argument("cell", nargs="?", help="the cell as col_row, such as 74_20")
     claim.add_argument("--next", action="store_true", help="take the free cell beside the map that is nearest the middle of the sheet")
+    claim.add_argument(
+        "--at",
+        metavar="LAT,LON",
+        help="take the cell at this place, such as 56.0465,12.6945: the service says which sheet and cell it is. Instead of a sheet and a cell",
+    )
+    claim.add_argument(
+        "--plats",
+        metavar="NAMN",
+        help='take the cell at a town, street or landmark, such as Eslöv or "Stortorget Helsingborg": OpenStreetMap is asked where it is. Instead of a sheet and a cell',
+    )
     claim.set_defaults(func=cmd_claim)
 
     release = sub.add_parser("release", help="give a lock back")

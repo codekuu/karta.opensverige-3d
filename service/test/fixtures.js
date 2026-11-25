@@ -1,6 +1,7 @@
 /* Test fixtures: a sheet, its cells, a user, and a clean database. */
 
 import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
+import { vi } from 'vitest';
 import worker from '../src/index.js';
 
 export const NOW = '2026-11-17T12:00:00Z';
@@ -36,15 +37,15 @@ export async function clearDb() {
 }
 
 /**
- * Inserts a sheet. Returns the row as inserted.
- * @param {Partial<typeof SHEET>} overrides
+ * Inserts a sheet: open and hand-made unless the overrides say otherwise. Returns the row as inserted.
+ * @param {Partial<typeof SHEET> & { kind?: string, made?: string }} overrides
  */
 export async function insertSheet(overrides = {}) {
-  const s = { ...SHEET, ...overrides };
+  const s = { ...SHEET, kind: 'open', made: 'hand', ...overrides };
   await env.DB.prepare(
-    'INSERT INTO sheets (id, city, name, cols, rows, origin_lat, origin_lon, x_meters, y_meters, ground_height, dzi_levels, pipeline, state, queue_order, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
+    'INSERT INTO sheets (id, city, name, cols, rows, origin_lat, origin_lon, x_meters, y_meters, ground_height, dzi_levels, pipeline, state, queue_order, rev, kind, made) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)',
   )
-    .bind(s.id, s.city, s.name, s.cols, s.rows, s.origin_lat, s.origin_lon, s.x_meters, s.y_meters, s.ground_height, s.dzi_levels, s.pipeline, s.state, s.queue_order)
+    .bind(s.id, s.city, s.name, s.cols, s.rows, s.origin_lat, s.origin_lon, s.x_meters, s.y_meters, s.ground_height, s.dzi_levels, s.pipeline, s.state, s.queue_order, s.kind, s.made)
     .run();
   return s;
 }
@@ -77,6 +78,18 @@ export async function setCell(sheet, col, row, fields) {
     .run();
 }
 
+/** Inserts one cell row. */
+export async function insertCell(sheet, col, row, state = 'fri') {
+  await env.DB.prepare('INSERT INTO cells (sheet, col, row, state, updated_at) VALUES (?, ?, ?, ?, ?)').bind(sheet, col, row, state, NOW).run();
+}
+
+/** How many sheet rows and cell rows there are: to show that a read wrote nothing. */
+export async function rowCounts() {
+  const sheets = await env.DB.prepare('SELECT COUNT(*) AS n FROM sheets').first();
+  const cells = await env.DB.prepare('SELECT COUNT(*) AS n FROM cells').first();
+  return { sheets: sheets.n, cells: cells.n };
+}
+
 export async function getCell(sheet, col, row) {
   return env.DB.prepare('SELECT * FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet, col, row).first();
 }
@@ -102,4 +115,27 @@ export async function call(request, overrides = {}) {
   const response = await worker.fetch(request, { ...env, TAKT: allow, ...overrides }, ctx);
   await waitOnExecutionContext(ctx);
   return response;
+}
+
+/**
+ * Stands in for the two services outside: GitHub answers that the caller is klang, and the
+ * elevation service answers `metres` for any point. `metres` may also be 'down' (no answer),
+ * a status code (an error answer) or a string (that body, as it is). Returns the list of
+ * elevation requests made, so a test can say what was asked and how often.
+ * @param {number | 'down' | string} [metres]
+ * @returns {Array<{ url: string, init: RequestInit | undefined }>}
+ */
+export function stubOutside(metres = 38) {
+  const asked = [];
+  vi.stubGlobal('fetch', async (url, init) => {
+    if (String(url).startsWith('https://api.open-meteo.com/')) {
+      asked.push({ url: String(url), init });
+      if (metres === 'down') throw new Error('no answer');
+      if (typeof metres === 'string') return new Response(metres, { status: 200 });
+      if (metres >= 400) return new Response('{}', { status: metres });
+      return new Response(JSON.stringify({ elevation: [metres] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ id: 4242, login: 'klang' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  return asked;
 }

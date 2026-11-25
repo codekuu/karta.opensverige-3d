@@ -36,15 +36,15 @@ It prints three lines: `check: python`, `check: gpu` and `check: disk`. It needs
 
 Volunteers draw what is missing. A cell that is already on the map is lit and cannot be taken. A free cell is built-up ground the map has not drawn yet. `rutor cities` lists the sheets as `sheet: <id> <state> <cells on the map>/<all cells>`, so `8156/8156` means nothing is left to take there. `rutor grid <sheet> --free` lists the free cells. A cell is `fri` (free), `last` (locked), `vantar` (waiting for review), `godkand` (approved), `live` (on the map) or `ute` (not offered).
 
-Today every free cell is on `stockholm-norr`. `goteborg-norr` has none: what is left there lies beyond the city's own orthophoto, and the renderer has no other open photo yet.
+Every sheet but `goteborg-norr` is drawn from Google's 3D tiles: `stockholm-norr`, and the sheet of any place nobody has drawn yet, named like `se-n5602-e1262`. Today every free cell is on such a sheet. `goteborg-norr` has none: what is left there lies beyond the city's own orthophoto, and the renderer has no other open photo yet.
 
-`stockholm-norr` asks three things more of your human. Tell them now, before the terms and before anything large is installed:
+A sheet drawn from Google's tiles asks three things more of your human. Tell them now, before the terms and before anything large is installed:
 
 - **Node 22 or newer** on the machine. They install it themselves if it is missing.
 - **Their own Cesium ion account**, which is free, and a token from it. Do not make the account for them.
 - **A choice.** The sheet is drawn from Google's 3D tiles through that account. Google's policy does not allow deriving new content from its tiles. Show them point 10 of TERMS.md. They decide.
 
-Ask whether they want to go on. If they do not, there is no cell to build today: say so, and offer a code change. This holds also when they named a cell on `stockholm-norr` themselves.
+Ask whether they want to go on. If they do not, there is no cell to build today: say so, and offer a code change. This holds also when they named the cell or the place themselves.
 
 ## 4. Show the terms and get a yes
 
@@ -53,7 +53,7 @@ Show your human the ten lines of [TERMS.md](TERMS.md) and ask them to say yes th
 - It is voluntary and unpaid, on their own machine at their own cost and risk.
 - Their GitHub login is shown publicly on their cells.
 - The redraw model is under the Qwen Research License, for non-commercial research and evaluation only.
-- `stockholm-norr` is drawn from Google's tiles, and Google's policy does not allow that. Every free cell is on that sheet today, so this line applies to them.
+- Every sheet but `goteborg-norr` is drawn from Google's tiles, and Google's policy does not allow that. Every free cell is on such a sheet today, so this line applies to them.
 
 No yes, no login.
 
@@ -77,10 +77,15 @@ No yes, no login.
 The map of cells is at <https://karta.opensverige.se/pixelbygget>. A free cell is marked `Ledig` there and can be clicked. `Tänd` is a cell that is already on the map.
 
 - Your human named a cell: `rutor claim <sheet> <col>_<row>`.
+- Your human named a place that is not drawn yet, a town, a street or a landmark: run `rutor claim --plats "<the place>"`, for example `rutor claim --plats Eslöv` or `rutor claim --plats "Stortorget Helsingborg"`. It asks OpenStreetMap where that is, prints `found:` with the place it found, and then claims as `--at` does. Check that `found:` is the place your human meant before you build; if it is not, release the cell and ask. A town or a landmark is enough: a cell is 256 metres wide, so do not send your human's home address. If you already have coordinates, `rutor claim --at <lat>,<lon>` does the same without the search, for example `rutor claim --at 56.0465,12.6945`. Both print `place: <sheet> <col>_<row>`, the sheet and cell that place belongs to, and then claims it. A cell may lie anywhere in Sweden where Google has 3D tiles. A new place is drawn from Google's tiles, so everything steps 3 and 5 say about `stockholm-norr` holds for it: the preflight for `stockholm-norr` checks the same three things, and `rutor claim --at` asks them again before it takes a cell.
 - Your human said "any", or left it to you: `rutor claim stockholm-norr --next`.
 - It is unclear how many cells: one. Ask before you build more.
 - `refused: taken`: the cell is locked, waiting for review or already on the map. If your human named it, tell them and ask. Otherwise use `--next`.
 - `refused: no_free_cell`: nothing on that sheet is free. Do not look for a way to take a lit cell.
+- `refused: no_free_cell` with `name a cell, or use --at`: nothing is drawn on that sheet yet, so `--next` has no cell to build beside. Use `--at` with the place your human named.
+- `refused: outside`: read the sentence after it, there are two. `That point lies outside Sweden` says what it means. `That cell lies outside the city and is not drawn` means the place is inside the sheet of a drawn city, on ground that sheet does not offer. Tell your human either way.
+- `refused: sheet_closed`: the place is in a city that is finished. `refused: other_sheet`: the ground belongs to the sheet of a drawn city. Tell your human. Do not pick a cell nearby on your own.
+- `refused: update_needed`: this clone is older than the sheet needs. Nothing was locked. Update the clone and install it again, as in step 2, then claim again.
 - `this machine cannot render <sheet> yet`: no cell was taken. Fix what the line names, as in step 5.
 
 `rutor claim` prints `claimed:` and `url:`. Give your human the `url:` line: their login is on that cell on the map within a minute.

@@ -13,6 +13,7 @@ const ORD = {
     mac: "Det här är en Mac. Ritandet kräver ett NVIDIA-kort.",
     no_card: "Inget NVIDIA-kort hittades. Det krävs ett med 12 GB.",
     small_card: "Grafikkortet har för lite minne. Det krävs 12 GB.",
+    old_driver: "Grafikkortets drivrutin är för gammal. Uppdatera den hos NVIDIA.",
     disk: "Disken är för full. Gör plats och kom tillbaka.",
   },
   varning: {
@@ -28,6 +29,7 @@ const ORD = {
   },
   inlogg: {
     expired: "Koden godkändes inte i tid. Hämta en ny.",
+    denied: "Inloggningen blev inte godkänd. Hämta en ny kod.",
     network: "Nätet svarade inte. Försök igen.",
     terms: "Säg ja till villkoren först.",
   },
@@ -41,14 +43,28 @@ const ORD = {
     locks: "Du har redan en låst ruta. Den släpps inom två dygn.",
     waiting: "Fem av dina rutor väntar på granskning. Vänta tills en är granskad.",
     lock_left: "En tidigare ruta är fortfarande låst. Försök igen om en stund.",
+    old_lock: "Du har en låst ruta sedan förut. Tryck Försök igen, så släpps den och den här ritas.",
+    daily: "Du har skickat in 20 rutor i dag. Fortsätt i morgon.",
+    old_app: "Appen är för gammal för kartbladet. Hämta den nya versionen.",
+    quota: "Cesium tar inte emot fler hämtningar från ditt konto just nu. Försök igen senare.",
+    token: "Cesium tog inte emot nyckeln. Byt nyckel i steg 4.",
+  },
+  hamtning: {
+    disk: "Disken blev full. Gör plats och tryck igen.",
+    network: "Nätet svarade inte. Tryck igen så fortsätter hämtningen.",
+    changed: "Det som hämtades stämde inte. Försök igen. Hjälper det inte behöver appen uppdateras.",
+    failed: "Något gick fel med hämtningen. Kopiera felrapporten.",
   },
   svar: {
-    busy: "En ruta ritas redan.",
+    busy: "Datorn är upptagen. Vänta tills det är klart.",
+    not_an_app: "Den här installationen hämtar inget själv.",
     no_cell: "Välj en ruta först.",
     not_ready: "Något saknas i ett tidigare steg. Gå tillbaka och titta.",
+    old_app: "Appen är för gammal för kartbladet. Hämta den nya versionen.",
     terms: "Säg ja till villkoren först.",
     none_free: "Inga rutor är lediga just nu. Titta in senare.",
     taken: "Rutan är inte ledig längre. Välj en annan.",
+    bad_code: "Koden ser inte rätt ut. Kopiera den från kartan igen.",
   },
   blad: {
     none_free: "Inga rutor är lediga just nu. Titta in senare.",
@@ -66,12 +82,23 @@ const VERKTYG = {
 
 const NAMN = ["Klarar datorn det?", "Villkoren", "Logga in", "Cesium-konto", "Ritverktyget", "Välj ruta", "Rita", "Klart"];
 const FASER = ["claim", "render", "redraw", "upload"];
+// The four things the app fetches in step 5, in the order it fetches them.
+const HAMTAR = {
+  stack: "Hämtar PyTorch",
+  node: "Hämtar Node",
+  renderer: "Hämtar kartverktyget",
+  model: "Hämtar ritmodellen",
+};
 
-// The two places the page sends a person to. They are links the person presses. The page
+// The four places the page sends a person to. They are links the person presses. The page
 // itself loads nothing from them.
 const GITHUB_KOD = "https://github.com/login/device";
 const CESIUM_ION = "https://ion.cesium.com";
 const KARTANS_VARD = "karta.opensverige.se";
+const NY_VERSION = "https://github.com/opensverige/karta.opensverige-3d/releases/";
+const SAJTEN = "https://techembassy.se";
+// The map of cells, where a person picks a cell anywhere in the country and copies its code.
+const KARTAN = "https://karta.opensverige.se/pixelbygget";
 
 const FRAGA_SEKUNDER = 2;
 const FRAGA_SEKUNDER_UNDER_JOBB = 1;
@@ -94,10 +121,17 @@ let vald = null;
 
 let nyckelFel = "";
 let bytNyckel = false;
+
+// Closing the app: asked twice while something runs, and final once the app has said yes.
+let stangFraga = false;
+let stangd = false;
 let stegFel = "";
+let kodFel = "";
 let vantaVisad = false;
 let rapportVisad = false;
 let upptagen = false;
+// The step whose heading last got the focus, so that a step the page moves to by itself gets it too.
+let fokuserat = 0;
 
 // ---- small helpers
 
@@ -126,7 +160,7 @@ function gar(s) {
 }
 
 function duger(s) {
-  const delar = ["machine", "tools", "terms", "login", "cesium", "price", "sheet", "job", "version"];
+  const delar = ["machine", "tools", "terms", "login", "cesium", "price", "sheet", "job", "install", "version"];
   return s !== null && typeof s === "object" && delar.every((del) => s[del] !== null && typeof s[del] === "object");
 }
 
@@ -180,7 +214,9 @@ function klara(s) {
     s.terms.accepted === true,
     Boolean(s.login.login),
     s.cesium.ok === true,
-    s.tools.ready === true,
+    // In an app install the fetch has to be whole too: PyTorch answers long before the
+    // model is all there.
+    s.tools.ready === true && (s.install.app !== true || s.install.whole === true),
     Boolean(s.cell),
     klart,
     klart,
@@ -202,16 +238,29 @@ function ga(till) {
   if (mal === visat) return;
   visat = mal;
   stegFel = "";
+  kodFel = "";
   rita();
-  el("rubrik-" + visat).focus();
 }
 
 // ---- drawing the page from what the app says
 
 function rita() {
+  if (stangd) {
+    // The app has ended. Nothing on the page can be pressed any more, and nothing is asked.
+    for (const id of ["tappad", "gammal", "nyversion", "kropp", "fot"]) visa(id, false);
+    el("mobilrad").parentElement.hidden = true;
+    visa("stangd", true);
+    return;
+  }
   visa("tappad", missar >= TAPPAD_EFTER);
   if (!lage) return;
   const s = lage;
+  const arbetar = gar(s) || Object.prototype.hasOwnProperty.call(HAMTAR, s.install.phase);
+  if (!arbetar) stangFraga = false;
+  for (const knapp of document.querySelectorAll("[data-stang]")) {
+    knapp.textContent = stangFraga ? "Stäng ändå. Arbetet avbryts." : "Stäng appen";
+    knapp.disabled = upptagen;
+  }
   const fas = s.job.phase;
   const langst = framme(s);
 
@@ -229,6 +278,19 @@ function rita() {
   forraFas = fas;
 
   visa("gammal", s.version.current === false);
+  el("gammal-lank").setAttribute("href", NY_VERSION);
+
+  // Only a release page under the app's own name is ever a link here, whatever GitHub said.
+  const nyApp = s.version.app;
+  const nyLank =
+    nyApp !== null &&
+    typeof nyApp === "object" &&
+    nyApp.current === false &&
+    typeof nyApp.url === "string" &&
+    nyApp.url.startsWith(NY_VERSION) &&
+    !nyApp.url.includes("..");
+  visa("nyversion", nyLank);
+  el("nyversion-lank").setAttribute("href", nyLank ? nyApp.url : "");
 
   const gjort = klara(s);
   for (const knapp of el("rad").querySelectorAll("button")) {
@@ -248,15 +310,28 @@ function rita() {
 
   for (let n = 1; n <= 8; n += 1) visa("steg-" + n, n === visat);
   STEG[visat - 1](s);
+  // A new step starts at its heading, whoever moved there: the person, or the page when a
+  // drawing started or ended. The button that was pressed is hidden by then, and a keyboard
+  // or a screen reader would otherwise be left nowhere. Not on the first drawing of the page.
+  if (visat !== fokuserat) {
+    if (fokuserat !== 0) el("rubrik-" + visat).focus();
+    fokuserat = visat;
+  }
 }
 
 function steg1(s) {
   const m = s.machine;
   visa("dator-tittar", false);
   visa("dator-rader", true);
-  const kortFel = m.problem === "mac" || m.problem === "no_card" || m.problem === "small_card";
+  const gammal = m.problem === "old_driver";
+  const kortFel = m.problem === "mac" || m.problem === "no_card" || m.problem === "small_card" || gammal;
   const kort = el("dator-kort");
-  text("dator-kort", m.card ? m.card + " · " + m.card_gb + " GB" + (kortFel ? "" : " ✓") : "Inget NVIDIA-kort");
+  // An old driver is named with its number, so the person can see it change after an update.
+  const drivrutin = gammal && m.driver ? " · drivrutin " + m.driver : "";
+  text(
+    "dator-kort",
+    m.card ? m.card + " · " + m.card_gb + " GB" + drivrutin + (kortFel ? "" : " ✓") : "Inget NVIDIA-kort",
+  );
   kort.classList.toggle("nej", kortFel);
   kort.classList.toggle("ok", !kortFel);
   const disk = el("dator-disk");
@@ -357,7 +432,76 @@ function steg4(s) {
   text("nyckel-fel", fel);
 }
 
+function gb(antal) {
+  // Swedish writes the decimal with a comma.
+  return (Math.round(antal * 10) / 10).toFixed(1).replace(".", ",");
+}
+
+function hamtning(s) {
+  // Step 5 in an app install: the app fetches the tools itself, and says how far it is.
+  const t = s.tools;
+  const i = s.install;
+  const klart = t.ready === true && i.whole === true;
+  const gar = Object.prototype.hasOwnProperty.call(HAMTAR, i.phase);
+  const stannat = !klart && !gar && i.phase === "stopped";
+  const fel = !klart && !gar && i.phase === "failed";
+  // Fetched to the end, and a tool is still missing: the fetch cannot put that right alone.
+  const trasigt = !klart && !gar && i.phase === "done";
+  const allt = typeof i.total_gb === "number" && i.total_gb > 0 ? i.total_gb : 0;
+  const hamtat = typeof i.done_gb === "number" ? Math.min(Math.max(i.done_gb, 0), allt) : 0;
+  const hela = Math.max(1, Math.ceil(allt));
+
+  text("rubrik-5", klart ? "Ritverktyget" : gar ? "Ritverktyget hämtas" : "Hämta ritverktyget");
+  if (klart) text("verktyg-ingress", "Allt som behövs finns på datorn.");
+  else if (gar) text("verktyg-ingress", "Det tar en stund. Du kan göra annat under tiden.");
+  else text("verktyg-ingress", hela + " GB, en gång. Det tar en stund.");
+
+  visa("hamta-gar", gar);
+  visa("hamta-rad", gar);
+  if (gar) {
+    const andel = allt > 0 ? Math.round((hamtat / allt) * 100) : 0;
+    el("hamta-matare").style.width = andel + "%";
+    el("hamta-stapel").setAttribute("aria-valuenow", String(andel));
+    text("hamta-fas", HAMTAR[i.phase]);
+    text("hamta-siffror", gb(hamtat) + " av " + hela + " GB");
+  }
+
+  // What is already on the disk is said, so that nobody thinks a second press starts over.
+  const borjat = !klart && !gar && !fel && !trasigt && hamtat >= 0.1;
+  visa("hamta-besked", stannat || borjat);
+  if (stannat) text("hamta-besked", "Hämtningen stannade. Tryck igen så fortsätter den.");
+  else if (borjat) text("hamta-besked", gb(hamtat) + " av " + hela + " GB finns redan på datorn.");
+
+  const felrad = stegFel || (fel ? ord("hamtning", i.problem) : trasigt ? "Verktygen hämtades men svarar inte. Kopiera felrapporten." : "");
+  visa("hamta-fel", Boolean(felrad));
+  text("hamta-fel", felrad);
+  visa("verktyg-saknas", false);
+  visa("verktyg-hjalp", false);
+  visa("verktyg-modell", false);
+
+  // Every stop can be tried again: a file that did not match is already taken away.
+  const igen = !klart && !gar;
+  visa("hamta", igen);
+  el("hamta").disabled = upptagen;
+  text("hamta", stannat || borjat ? "Fortsätt hämta →" : fel || trasigt ? "Försök igen →" : "Hämta →");
+  visa("hamta-avbryt", gar);
+  el("hamta-avbryt").disabled = upptagen;
+  const rapport = fel || trasigt;
+  visa("hamta-kopiera", rapport);
+  visa("hamta-rapport-rad", rapport && rapportVisad);
+  visa("hamta-rapport", rapport && rapportVisad && Boolean(el("hamta-rapport").value));
+  visa("verktyg-vidare", klart);
+}
+
 function steg5(s) {
+  if (s.install.app === true) {
+    hamtning(s);
+    return;
+  }
+  // An install made by hand: the page says what is missing and installs nothing.
+  for (const id of ["hamta-gar", "hamta-rad", "hamta-besked", "hamta-fel", "hamta", "hamta-avbryt", "hamta-kopiera", "hamta-rapport-rad", "hamta-rapport"]) {
+    visa(id, false);
+  }
   const t = s.tools;
   const saknas = Array.isArray(t.missing) ? t.missing : [];
   text("verktyg-ingress", t.ready ? "Allt som behövs finns på datorn." : "Det här saknas på datorn.");
@@ -382,9 +526,15 @@ function steg5(s) {
 function steg6(s) {
   const blad = s.sheet;
   const finns = Boolean(blad.id) && !blad.problem;
+  // A cell by its code can be chosen whatever the sheet above says, also when nothing is free.
+  visa("kod-del", true);
+  visa("kod-fel", Boolean(kodFel));
+  text("kod-fel", kodFel);
+  el("kod-anvand").disabled = upptagen;
+  const synligt = finns && rutnat !== null && rutnat.blad === blad.id && fonster(s) !== null;
   visa("ruta-ingress", finns);
-  visa("ruta-karta", finns && rutnat !== null);
-  visa("ruta-forklaring", finns && rutnat !== null);
+  visa("ruta-karta", synligt);
+  visa("ruta-forklaring", synligt);
   const fel = stegFel || (blad.problem ? ord("blad", blad.problem) : "");
   visa("ruta-fel", Boolean(fel));
   text("ruta-fel", fel);
@@ -420,13 +570,17 @@ function steg7(s) {
   visa("rita-rad", fraga && dyrt);
   visa("rita-avbryt", pagar);
   el("rita-avbryt").disabled = upptagen;
-  visa("slut-igen", slut && j.problem !== "taken");
+  // No "try again" where trying again gets the same answer: the cell is someone else's, the
+  // day's limit is reached, or the app is too old for the sheet.
+  visa("slut-igen", slut && !["taken", "daily", "old_app"].includes(j.problem));
   el("slut-igen").disabled = upptagen;
-  visa("slut-annan", slut);
+  // Nor another cell when the day's limit is reached: it would be drawn and then refused.
+  // Nor when a lock from before stands in the way: it would stand in the way of that cell too.
+  visa("slut-annan", slut && !["daily", "old_lock"].includes(j.problem));
   visa("slut-kopiera", j.phase === "failed");
 
   if (fraga) {
-    text("rubrik-7", "Får datorn rita i ungefär 20 minuter?");
+    text("rubrik-7", "Får datorn rita en stund?");
     text("rita-ruta", s.cell ? rutnamn(s.cell) : "");
     const pris = el("rita-pris");
     text("rita-pris", dyrt ? "högt just nu" : s.price.decision === "RUN" ? "lågt" : "okänt");
@@ -450,17 +604,20 @@ function steg7(s) {
       rad.classList.toggle("gjord", plats < nu);
       rad.classList.toggle("nu", plats === nu);
     }
-    text("fas-rita-tid", s.tools.model_cached === false ? "20 GB hämtas först" : "ungefär 2 min");
-    text("rita-detalj", j.detail || "");
+    text("fas-rita-tid", s.tools.model_cached === false ? "12 GB hämtas först" : "ungefär 2 min");
+    // A stop that came during the upload waits for it: the cell may already be with the service.
+    text("rita-detalj", j.finishing ? "Skickar in klart först. Det tar några sekunder." : j.detail || "");
     return;
   }
 
   const avbrutet = j.phase === "stopped";
   text("rubrik-7", avbrutet ? "Ritandet avbröts" : "Rutan blev inte ritad");
   el("slut-besked").classList.toggle("nejruta", !avbrutet);
-  text("slut-besked", stegFel || (avbrutet ? "Ritandet stannade. Kortet är ledigt igen." : ord("jobb", j.problem)));
+  // A lock from before is named, so that the person knows which cell is given back.
+  const gammalt = j.problem === "old_lock" && j.old ? "Låst sedan förut: " + j.old + ". " : "";
+  text("slut-besked", stegFel || (avbrutet ? "Ritandet stannade. Kortet är ledigt igen." : gammalt + ord("jobb", j.problem)));
   // Where the sentence above already says which cell is locked, or that none was, no more is said.
-  const sagt = ["taken", "locks", "waiting", "lock_left"].includes(j.problem);
+  const sagt = ["taken", "locks", "waiting", "lock_left", "old_lock"].includes(j.problem);
   visa("slut-las", !sagt);
   text("slut-las", j.held ? "Rutan är fortfarande låst. Låset släpps av sig självt inom två dygn." : "Rutan är inte låst. Inget skickades in.");
   visa("slut-rapport-rad", rapportVisad);
@@ -500,8 +657,15 @@ async function hamtaRutnat() {
           rutor.set(rad[0] + "_" + rad[1], rad[2]);
         }
       }
-      rutnat = { blad: String(data.sheet.id), cols: Number(data.sheet.cols) || 0, rows: Number(data.sheet.rows) || 0, rutor: rutor };
-      if (vald !== null && rutor.get(vald.col + "_" + vald.row) !== "fri") vald = null;
+      // On a sheet of the tiling only the cells someone has taken are listed. Any other is free.
+      rutnat = {
+        blad: String(data.sheet.id),
+        cols: Number(data.sheet.cols) || 0,
+        rows: Number(data.sheet.rows) || 0,
+        fritt: data.sheet.made === "grid",
+        rutor: rutor,
+      };
+      if (vald !== null && !ledig(vald.col, vald.row)) vald = null;
     }
   } catch (fel) {
     // The state says so when the service cannot be reached. The old grid stays meanwhile.
@@ -511,30 +675,53 @@ async function hamtaRutnat() {
   if (lage && visat === 6) rita();
 }
 
-function ritaRutnat() {
-  if (rutnat === null || !lage) return;
-  // Only the part of the sheet that is offered is drawn, so each cell gets room.
+function ledig(col, row) {
+  // Free: a listed cell that says so, or on a sheet of the tiling a cell that is not listed.
+  if (rutnat === null) return false;
+  const tillstand = rutnat.rutor.get(col + "_" + row);
+  if (tillstand === undefined) return rutnat.fritt && col >= 0 && row >= 0 && col < rutnat.cols && row < rutnat.rows;
+  return tillstand === "fri";
+}
+
+function fonster(s) {
+  // The part of the sheet that is drawn: the cells that are offered and one cell around
+  // them, so each gets room. On a sheet of the tiling the chosen cell counts too: it may be
+  // the first cell anyone takes there. Null when there is nothing to draw.
+  if (rutnat === null) return null;
   let minC = Infinity;
   let maxC = -Infinity;
   let minR = Infinity;
   let maxR = -Infinity;
-  for (const [plats, tillstand] of rutnat.rutor) {
-    if (tillstand === "ute") continue;
-    const delar = plats.split("_");
-    const c = Number(delar[0]);
-    const r = Number(delar[1]);
+  const med = (c, r) => {
     minC = Math.min(minC, c);
     maxC = Math.max(maxC, c);
     minR = Math.min(minR, r);
     maxR = Math.max(maxR, r);
+  };
+  for (const [plats, tillstand] of rutnat.rutor) {
+    if (tillstand === "ute") continue;
+    const delar = plats.split("_");
+    med(Number(delar[0]), Number(delar[1]));
   }
-  if (minC === Infinity) return;
-  minC = Math.max(0, minC - 1);
-  minR = Math.max(0, minR - 1);
-  maxC = Math.min(rutnat.cols - 1, maxC + 1);
-  maxR = Math.min(rutnat.rows - 1, maxR + 1);
-  const kol = maxC - minC + 1;
-  const rad = maxR - minR + 1;
+  const mal = rutnat.fritt ? malruta(s) : null;
+  if (mal !== null && mal.sheet === rutnat.blad) med(mal.col, mal.row);
+  if (minC === Infinity) return null;
+  return {
+    minC: Math.max(0, minC - 1),
+    minR: Math.max(0, minR - 1),
+    maxC: Math.min(rutnat.cols - 1, maxC + 1),
+    maxR: Math.min(rutnat.rows - 1, maxR + 1),
+  };
+}
+
+function ritaRutnat() {
+  if (rutnat === null || !lage) return;
+  const ram = fonster(lage);
+  if (ram === null) return;
+  const minC = ram.minC;
+  const minR = ram.minR;
+  const kol = ram.maxC - minC + 1;
+  const rad = ram.maxR - minR + 1;
   const sida = Math.max(3, Math.min(28, Math.floor(RUTNAT_BREDD / kol)));
   const skala = window.devicePixelRatio || 1;
 
@@ -559,7 +746,16 @@ function ritaRutnat() {
   penna.setTransform(skala, 0, 0, skala, 0, 0);
   penna.clearRect(0, 0, kol * sida, rad * sida);
   const glipa = sida >= 6 ? 1 : 0;
-  for (const [plats, tillstand] of rutnat.rutor) {
+  const rutor = new Map(rutnat.rutor);
+  if (rutnat.fritt) {
+    // The cells nobody has taken have no row. They are free, and drawn as free.
+    for (let r = ram.minR; r <= ram.maxR; r += 1) {
+      for (let c = minC; c <= ram.maxC; c += 1) {
+        if (!rutor.has(c + "_" + r)) rutor.set(c + "_" + r, "fri");
+      }
+    }
+  }
+  for (const [plats, tillstand] of rutor) {
     if (!Object.prototype.hasOwnProperty.call(farger, tillstand)) continue;
     const delar = plats.split("_");
     const x = (Number(delar[0]) - minC) * sida;
@@ -598,7 +794,7 @@ function klickPaRutnat(handelse) {
   if (kant.width === 0 || kant.height === 0) return;
   const col = rutnatMatt.minC + Math.floor(((handelse.clientX - kant.left) / kant.width) * rutnatMatt.kol);
   const row = rutnatMatt.minR + Math.floor(((handelse.clientY - kant.top) / kant.height) * rutnatMatt.rad);
-  if (rutnat.rutor.get(col + "_" + row) === "fri") {
+  if (ledig(col, row)) {
     vald = { col: col, row: row };
     stegFel = "";
   } else {
@@ -626,7 +822,32 @@ async function farskFraga() {
   await fraga();
 }
 
+async function stang() {
+  if (!lage || upptagen || stangd) return;
+  const arbetar = gar(lage) || Object.prototype.hasOwnProperty.call(HAMTAR, lage.install.phase);
+  if (arbetar && !stangFraga) {
+    // A press by mistake must not end a drawing. The second press does.
+    stangFraga = true;
+    rita();
+    return;
+  }
+  upptagen = true;
+  rita();
+  const svar = await skicka("api/quit", {});
+  upptagen = false;
+  if (svar.ok) {
+    stangd = true;
+    window.clearTimeout(nastaFraga);
+    rita();
+    el("rubrik-stangd").focus();
+    return;
+  }
+  stangFraga = false;
+  await farskFraga();
+}
+
 async function hamtaLage() {
+  if (stangd) return;
   window.clearTimeout(nastaFraga);
   try {
     const svar = await fetch("api/state", { cache: "no-store" });
@@ -638,6 +859,7 @@ async function hamtaLage() {
     missar += 1;
   }
   rita();
+  if (stangd) return;
   const paus = lage && gar(lage) ? FRAGA_SEKUNDER_UNDER_JOBB : FRAGA_SEKUNDER;
   nastaFraga = window.setTimeout(fraga, paus * 1000);
 }
@@ -729,10 +951,32 @@ function koppla() {
     }
   });
   el("ruta-nasta").addEventListener("click", async () => {
+    kodFel = "";
     if ((await gor("api/cell", { next: true }, "svar")) !== null) {
       vald = null;
+      rutnatTid = 0;
       ga(7);
     }
+  });
+  const anvandKod = async () => {
+    // The code is sent as the person pasted it. The app takes it apart, and says only yes or no.
+    kodFel = "";
+    const svar = await gor("api/cell", { code: el("kod").value }, "svar");
+    if (svar !== null) {
+      el("kod").value = "";
+      vald = null;
+      rutnatTid = 0;
+      ga(7);
+    } else if (stegFel) {
+      // The no belongs under the field it is about, not above the map.
+      kodFel = stegFel;
+      stegFel = "";
+      rita();
+    }
+  };
+  el("kod-anvand").addEventListener("click", anvandKod);
+  el("kod").addEventListener("keydown", (handelse) => {
+    if (handelse.key === "Enter") anvandKod();
   });
 
   el("rita-start").addEventListener("click", () => gor("api/build", {}, "svar"));
@@ -742,22 +986,31 @@ function koppla() {
     vantaVisad = true;
     rita();
   });
-  el("slut-kopiera").addEventListener("click", async () => {
-    let rapport = "";
-    try {
-      const svar = await fetch("api/report", { cache: "no-store" });
-      rapport = svar.ok ? await svar.text() : "";
-    } catch (fel) {
-      rapport = "";
-    }
-    const gick = rapport !== "" && (await kopiera(rapport));
-    // When the browser will not copy, the report is shown so that the person can.
-    el("slut-rapport").value = gick ? "" : rapport;
-    rapportVisad = true;
-    text("slut-kopiera", gick ? "Kopierad" : "Kopiera felrapport");
-    window.setTimeout(() => text("slut-kopiera", "Kopiera felrapport"), 2500);
-    rita();
-  });
+  // The same report from both places a thing can fail: the drawing and the fetch.
+  for (const [knapp, ruta] of [["slut-kopiera", "slut-rapport"], ["hamta-kopiera", "hamta-rapport"]]) {
+    el(knapp).addEventListener("click", async () => {
+      let rapport = "";
+      try {
+        const svar = await fetch("api/report", { cache: "no-store" });
+        rapport = svar.ok ? await svar.text() : "";
+      } catch (fel) {
+        rapport = "";
+      }
+      const gick = rapport !== "" && (await kopiera(rapport));
+      // When the browser will not copy, the report is shown so that the person can.
+      el(ruta).value = gick ? "" : rapport;
+      rapportVisad = true;
+      text(knapp, gick ? "Kopierad" : "Kopiera felrapport");
+      window.setTimeout(() => text(knapp, "Kopiera felrapport"), 2500);
+      rita();
+    });
+  }
+
+  for (const knapp of document.querySelectorAll("[data-stang]")) knapp.addEventListener("click", stang);
+  el("syfte-lank").setAttribute("href", SAJTEN);
+  el("kod-karta").setAttribute("href", KARTAN);
+  el("hamta").addEventListener("click", () => gor("api/install", {}, "svar"));
+  el("hamta-avbryt").addEventListener("click", () => gor("api/install/stop", {}, "svar"));
 }
 
 koppla();

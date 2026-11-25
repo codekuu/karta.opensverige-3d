@@ -56,6 +56,8 @@ h2:focus { outline: none; }
 }
 .bar h1 { font-size: 16px; font-weight: 700; }
 .bar .adress { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+/* What the program is for, and where the map is: one quiet line under the name. */
+.bar .syfte { flex-basis: 100%; font-size: 14px; color: var(--ink-soft); }
 
 .banderoll {
   padding: 10px 20px; border-bottom: 1px solid var(--line);
@@ -66,7 +68,7 @@ h2:focus { outline: none; }
 
 /* ---- the rail */
 
-.rad { border-right: 1px solid var(--line); padding: 16px 12px; }
+.rad { border-right: 1px solid var(--line); padding: 16px 12px; display: flex; flex-direction: column; gap: 16px; }
 .rad ol { display: flex; flex-direction: column; gap: 2px; }
 .rad button {
   display: flex; gap: 10px; align-items: center; width: 100%; text-align: left;
@@ -83,6 +85,10 @@ h2:focus { outline: none; }
 }
 .rad button.klar .prick { background: var(--moss); border-color: var(--moss); color: var(--knapp-fg); }
 .rad button[aria-current="step"]:not(.klar) .prick { border-color: var(--moss); color: var(--moss); }
+
+/* Closing the app is the rail's last word, and a quiet one. */
+.rad .stang { margin-top: auto; color: var(--muted); font-size: 14px; }
+.fot { display: none; padding: 0 20px 20px; font-size: 14px; }
 
 .mobilsteg { display: none; padding: 14px 20px 0; flex-direction: column; gap: 8px; }
 .mobilsteg span { font-family: var(--mono); font-size: 12px; color: var(--muted); }
@@ -139,6 +145,8 @@ h2:focus { outline: none; }
 
 /* ---- step 2: the terms, as they are written */
 
+/* The four things said in Swedish above the ten lines. */
+.kort { max-width: 640px; list-style: disc; display: flex; flex-direction: column; gap: 8px; padding-left: 1.2em; }
 .villkor { max-width: 640px; display: flex; flex-direction: column; gap: 10px; }
 .villkor li { color: var(--ink-soft); padding-left: 1.7em; text-indent: -1.7em; overflow-wrap: anywhere; }
 .kryss { display: flex; gap: 10px; align-items: center; font-weight: 500; }
@@ -171,6 +179,20 @@ h2:focus { outline: none; }
 
 .saknas { display: flex; flex-direction: column; border-top: 1px solid var(--line); max-width: 560px; }
 .saknas li { padding: 11px 0; border-bottom: 1px solid var(--line); color: var(--rust); font-weight: 500; }
+
+/* The fetch: one bar for all four downloads, what is being fetched now and how far it is. */
+
+.hamtning { display: flex; flex-direction: column; gap: 10px; max-width: 560px; }
+.matare.stor { height: 10px; border-radius: 5px; }
+.matare.stor i { width: 0; border-radius: 5px; }
+.hamtrad { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between; align-items: baseline; }
+.hamtrad .fas { font-weight: 500; }
+.hamtrad .fas::after {
+  content: "\25D0"; display: inline-block; margin-left: 8px; color: var(--moss);
+  animation: snurr 1.6s linear infinite;
+}
+.hamtrad .varde { font-family: var(--mono); font-size: 13px; color: var(--ink-soft); }
+.banderoll a { color: inherit; font-weight: 700; }
 
 /* ---- step 6: the cells */
 
@@ -222,6 +244,7 @@ h2:focus { outline: none; }
   body { padding-top: 16px; }
   .kropp { grid-template-columns: minmax(0, 1fr); }
   .rad { display: none; }
+  .fot { display: block; }
   .mobilsteg { display: flex; }
   .steg { min-height: 0; padding-top: 24px; }
   .rader li { flex-direction: column; gap: 2px; }

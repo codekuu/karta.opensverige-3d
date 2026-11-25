@@ -16,6 +16,7 @@ export async function expireLocks(db, now) {
     .prepare("SELECT sheet, col, row, owner_id, owner_login, expires_at FROM cells WHERE state = 'last' AND expires_at < ? AND uploaded_at IS NULL")
     .bind(now)
     .all();
+  let freed = 0;
   for (const cell of results) {
     const r = await db
       .prepare(
@@ -25,10 +26,11 @@ export async function expireLocks(db, now) {
       .bind(now, cell.sheet, cell.col, cell.row, cell.owner_id, cell.expires_at, now)
       .run();
     if (r.meta.changes === 1) {
+      freed += 1;
       await logEvent(db, { at: now, github_id: cell.owner_id, login: cell.owner_login, action: 'expired', sheet: cell.sheet, col: cell.col, row: cell.row });
     }
   }
-  return results.length;
+  return freed;
 }
 
 /**

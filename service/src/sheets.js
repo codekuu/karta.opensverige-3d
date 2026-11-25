@@ -4,6 +4,7 @@
 import { requireAdmin } from './auth.js';
 import { logEvent } from './cells.js';
 import { error, json } from './db.js';
+import { cellAt, gridRow, owns, ownedCellAt, sheetById } from './tiling.js';
 
 const BATCH = 500;
 const SHEET_FIELDS = [
@@ -22,11 +23,13 @@ const SHEET_FIELDS = [
   ['queue_order', (v) => Number.isInteger(v)],
   ['state', (v) => ['queued', 'open', 'done'].includes(v)],
 ];
+export const KINDS = ['open', 'google'];
 
 /**
  * Inserts a sheet and all its cells: fri inside the mask, ute outside. Nothing is written on
  * refusal. A sheet that exists with fewer cells than cols × rows (a run that broke half way)
- * is resumed: the missing cells are written and the answer says resumed.
+ * is resumed: the missing cells are written and the answer says resumed. `kind` is the sheet's
+ * source and may be left out: a sheet is then open.
  * @param {D1Database} db
  * @param {object} body
  * @param {string} now
@@ -38,6 +41,8 @@ export async function openSheet(db, body, now) {
     if (!valid(body[field])) return { ok: false, status: 400, code: 'bad_body', field };
   }
   const { cols, rows } = body;
+  const kind = body.kind === undefined ? 'open' : body.kind;
+  if (!KINDS.includes(kind)) return { ok: false, status: 400, code: 'bad_body', field: 'kind' };
   if (!Array.isArray(body.mask)) return { ok: false, status: 400, code: 'bad_body', field: 'mask' };
   const inMask = new Set();
   for (const entry of body.mask) {
@@ -60,9 +65,9 @@ export async function openSheet(db, body, now) {
     statements.push(
       db
         .prepare(
-          'INSERT INTO sheets (id, city, name, cols, rows, origin_lat, origin_lon, x_meters, y_meters, ground_height, dzi_levels, pipeline, state, queue_order, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
+          "INSERT INTO sheets (id, city, name, cols, rows, origin_lat, origin_lon, x_meters, y_meters, ground_height, dzi_levels, pipeline, state, queue_order, rev, kind, made) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'hand')",
         )
-        .bind(body.id, body.city, body.name, cols, rows, body.origin_lat, body.origin_lon, body.x_meters, body.y_meters, body.ground_height, body.dzi_levels, body.pipeline, body.state, body.queue_order),
+        .bind(body.id, body.city, body.name, cols, rows, body.origin_lat, body.origin_lon, body.x_meters, body.y_meters, body.ground_height, body.dzi_levels, body.pipeline, body.state, body.queue_order, kind),
     );
   }
   const insert = db.prepare('INSERT OR IGNORE INTO cells (sheet, col, row, state, updated_at) VALUES (?, ?, ?, ?, ?)');
@@ -134,6 +139,7 @@ export const seedRoute = requireAdmin(async (request, env, ctx, params, now, adm
 });
 
 const GRID_CACHE = { 'Cache-Control': 'public, max-age=60' };
+const NOT_KEPT = { 'Cache-Control': 'no-store' };
 
 /**
  * Every sheet with how many cells are live (done) and how many count at all (total:
@@ -155,18 +161,29 @@ export async function listSheets(db) {
 
 /**
  * The sheet and all its cells as compact rows [col, row, state, owner_login, updated_at].
+ * A live cell the admin took down is free in the table but nobody may claim it until its
+ * tiles are blanked, so it is shown as locked: a client that takes "the next free cell"
+ * must not be handed one that answers being_removed.
+ * A sheet of the tiling that nobody has claimed on yet has no row: it is answered as the
+ * tiling computes it, with no cells. A cell with no row is free there.
  * @param {D1Database} db
  * @param {string} sheetId
+ * @param {string} [pipeline] the pipeline a sheet of the tiling would be made with
  * @returns {Promise<{ sheet: import('./db.js').Sheet, cells: Array<[number, number, string, string|null, string]> } | null>}
  */
-export async function getGrid(db, sheetId) {
+export async function getGrid(db, sheetId, pipeline = '') {
   const sheet = await db.prepare('SELECT * FROM sheets WHERE id = ?').bind(sheetId).first();
-  if (!sheet) return null;
+  if (!sheet) {
+    const tile = sheetById(sheetId);
+    // exists false: this is not a row. Its height and picture top are stand-ins until the
+    // first claim asks for the real height, so nothing may be drawn from it.
+    return tile ? { sheet: { ...gridRow(tile, pipeline), exists: false }, cells: [] } : null;
+  }
   const { results } = await db
-    .prepare('SELECT col, row, state, owner_login, updated_at FROM cells WHERE sheet = ? ORDER BY row, col')
+    .prepare('SELECT col, row, state, owner_login, updated_at, removed_at FROM cells WHERE sheet = ? ORDER BY row, col')
     .bind(sheetId)
     .all();
-  return { sheet, cells: results.map((c) => [c.col, c.row, c.state, c.owner_login, c.updated_at]) };
+  return { sheet, cells: results.map((c) => [c.col, c.row, c.removed_at && c.state === 'fri' ? 'last' : c.state, c.owner_login, c.updated_at]) };
 }
 
 /** GET /v1/sheets */
@@ -191,7 +208,82 @@ export async function citiesRoute(request, env) {
 
 /** GET /v1/grid/:sheet */
 export async function gridRoute(request, env, ctx, params) {
-  const grid = await getGrid(env.DB, params.sheet);
+  const grid = await getGrid(env.DB, params.sheet, env.PIPELINE_NOW);
   if (!grid) return error(404, 'no_sheet', `No sheet named ${params.sheet}.`);
-  return json(200, grid, GRID_CACHE);
+  // A sheet with no row is never kept, here or on the way: the claim that makes the row
+  // changes the answer, and the renderer reads it seconds later.
+  return json(200, grid, grid.sheet.exists === false ? NOT_KEPT : GRID_CACHE);
+}
+
+/**
+ * The state of a cell as the grid shows it. A cell with no row is free on a sheet of the
+ * tiling, whose cells are made when they are first taken, and not offered on a hand-made one.
+ * @param {D1Database} db
+ * @param {import('./db.js').Sheet} sheet
+ * @param {number} col
+ * @param {number} row
+ * @returns {Promise<string>}
+ */
+async function shownState(db, sheet, col, row) {
+  const cell = await db.prepare('SELECT state, removed_at FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet.id, col, row).first();
+  if (!cell) {
+    if (sheet.made !== 'grid') return 'ute';
+    // Ground near the line to the next box that the next sheet owns is not offered here.
+    const tile = sheetById(sheet.id);
+    return tile && owns(tile, col, row) ? 'fri' : 'ute';
+  }
+  return cell.removed_at && cell.state === 'fri' ? 'last' : cell.state;
+}
+
+/**
+ * The sheet and cell a point on the earth belongs to, or null outside Sweden. A point inside
+ * a hand-made sheet's picture belongs to that sheet: what is drawn is not gridded again.
+ * Anywhere else the tiling decides, and the sheet may be one nobody has made yet
+ * (exists false). Reads only.
+ * @param {D1Database} db
+ * @param {string} pipeline the pipeline a new sheet would be drawn with
+ * @param {number} lat
+ * @param {number} lon
+ * @returns {Promise<{ sheet: import('./db.js').Sheet & { exists: boolean }, col: number, row: number, state: string } | null>}
+ */
+export async function placeAt(db, pipeline, lat, lon) {
+  const { results: hand } = await db.prepare("SELECT * FROM sheets WHERE made = 'hand' ORDER BY queue_order, id").all();
+  for (const sheet of hand) {
+    const cell = cellAt(sheet, lat, lon);
+    if (cell) return { sheet: { ...sheet, exists: true }, ...cell, state: await shownState(db, sheet, cell.col, cell.row) };
+  }
+  // Where two boxes meet, the cell is the one a claim would accept: owned by its sheet.
+  const found = ownedCellAt(lat, lon);
+  if (!found) return null;
+  const { tile, col, row } = found;
+  const stored = await db.prepare('SELECT * FROM sheets WHERE id = ?').bind(tile.id).first();
+  const sheet = stored || gridRow(tile, pipeline);
+  return { sheet: { ...sheet, exists: Boolean(stored) }, col, row, state: stored ? await shownState(db, sheet, col, row) : 'fri' };
+}
+
+const DEGREES = /^-?\d{1,3}(\.\d{1,9})?$/;
+
+/**
+ * One coordinate out of a query: plain decimal degrees, given once.
+ * @param {URLSearchParams} query
+ * @param {string} name
+ * @param {number} limit
+ * @returns {number | null}
+ */
+function degrees(query, name, limit) {
+  const all = query.getAll(name);
+  if (all.length !== 1 || !DEGREES.test(all[0])) return null;
+  const value = Number(all[0]);
+  return Math.abs(value) <= limit ? value : null;
+}
+
+/** GET /v1/place?lat=..&lon=.. */
+export async function placeRoute(request, env) {
+  const query = new URL(request.url).searchParams;
+  const lat = degrees(query, 'lat', 90);
+  const lon = degrees(query, 'lon', 180);
+  if (lat === null || lon === null) return error(400, 'bad_query', 'Send lat and lon as decimal degrees, like ?lat=56.0465&lon=12.6945.');
+  const place = await placeAt(env.DB, env.PIPELINE_NOW, lat, lon);
+  if (!place) return error(404, 'outside', 'That point lies outside Sweden.');
+  return json(200, place, GRID_CACHE);
 }
