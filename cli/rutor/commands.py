@@ -12,7 +12,9 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -183,6 +185,57 @@ def parse_point(text: str) -> tuple[str, str]:
     return found.group(1), found.group(2)
 
 
+# OpenStreetMap's own search. Its policy asks for at most one request a second and a name for
+# the program that asks: rutor asks once per claim, and names itself, never the person.
+NOMINATIM = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_SECONDS = 15
+NOMINATIM_BYTES = 200_000
+
+
+def _open_url(request: urllib.request.Request, timeout: float):  # type: ignore[no-untyped-def]
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _nominatim(name: str) -> object:
+    """What OpenStreetMap's search answers for a name in Sweden: a list of at most one place."""
+    from rutor import __version__
+
+    query = urllib.parse.urlencode({"q": name, "format": "jsonv2", "limit": 1, "countrycodes": "se"})
+    request = urllib.request.Request(
+        f"{NOMINATIM}?{query}",
+        headers={"User-Agent": f"rutor/{__version__} (+https://github.com/opensverige/karta.opensverige-3d)", "Accept": "application/json"},
+    )
+    try:
+        with _open_url(request, NOMINATIM_SECONDS) as answer:
+            raw = answer.read(NOMINATIM_BYTES + 1)
+    except (urllib.error.URLError, OSError) as exc:
+        raise network(f"could not reach OpenStreetMap's search ({exc.__class__.__name__})") from exc
+    if len(raw) > NOMINATIM_BYTES:
+        raise network("OpenStreetMap's search sent more than a place")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise network("OpenStreetMap's search did not answer JSON") from exc
+
+
+def find_place(name: str) -> tuple[str, str, str]:
+    """Latitude, longitude and the full name of a town, street or landmark in Sweden."""
+    cleaned = " ".join(name.split())
+    if not 2 <= len(cleaned) <= 200:
+        raise bad_input("--plats takes the name of a place, like Eslöv or \"Stortorget Helsingborg\"")
+    hits = _nominatim(cleaned)
+    hit = hits[0] if isinstance(hits, list) and hits and isinstance(hits[0], dict) else None
+    if hit is None:
+        raise bad_input(f"OpenStreetMap knows no place called {api.one_line(cleaned, 80)!r} in Sweden. Try a town or a street.")
+    lat, lon = str(hit.get("lat", "")), str(hit.get("lon", ""))
+    try:
+        lat, lon = parse_point(f"{float(lat):.6f},{float(lon):.6f}")
+    except (ValueError, RutorError) as exc:
+        raise network("OpenStreetMap's search answered no point") from exc
+    label = hit.get("display_name")
+    return lat.rstrip("0").rstrip("."), lon.rstrip("0").rstrip("."), api.one_line(label if isinstance(label, str) else cleaned, 120)
+
+
 def _place(lat: str, lon: str) -> tuple[dict[str, object], int, int]:
     """The sheet and cell the service says a point belongs to. Public: it needs no login."""
     _status, body = api.get(f"/v1/place?lat={lat}&lon={lon}", token=config.read_token())
@@ -200,12 +253,14 @@ def _place(lat: str, lon: str) -> tuple[dict[str, object], int, int]:
 
 def cmd_claim(args: argparse.Namespace) -> int:
     at = getattr(args, "at", None)
-    if at is not None:
-        if args.sheet or args.cell or args.next:
-            raise bad_input("Pass a place with --at, or a sheet and a cell, and not both.")
-        lat, lon = parse_point(at)
+    name = getattr(args, "plats", None)
+    if at is not None or name is not None:
+        if args.sheet or args.cell or args.next or (at is not None and name is not None):
+            raise bad_input("Pass one of: a place name with --plats, a point with --at, or a sheet and a cell.")
+        if at is not None:
+            lat, lon = parse_point(at)
     elif not args.sheet or bool(args.next) == bool(args.cell):
-        raise bad_input("Pass a sheet and a cell like 64_59, or a sheet and --next, or a place with --at.")
+        raise bad_input("Pass a sheet and a cell like 64_59, or a sheet and --next, or a place with --plats or --at.")
     # A lock holds the cell for 48 hours, so a machine that cannot build one does not take one.
     # The machine is asked before the login: on one that cannot build, "log in" is no next step.
     problem = _gpu_missing()
@@ -213,6 +268,10 @@ def cmd_claim(args: argparse.Namespace) -> int:
         raise environment(f"this machine cannot build a cell: {problem}")
     # The sheet's row says which source it is drawn from. The place and the grid are public, so
     # this needs no login, and a sheet with no source decided stops here with nothing claimed.
+    if name is not None:
+        lat, lon, found = find_place(name)
+        print(f"found: {found}")
+        at = f"{lat},{lon}"
     if at is not None:
         sheet, col, row = _place(lat, lon)
         sheet_id = str(sheet.get("id"))
@@ -886,6 +945,11 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
         "--at",
         metavar="LAT,LON",
         help="take the cell at this place, such as 56.0465,12.6945: the service says which sheet and cell it is. Instead of a sheet and a cell",
+    )
+    claim.add_argument(
+        "--plats",
+        metavar="NAMN",
+        help='take the cell at a town, street or landmark, such as Eslöv or "Stortorget Helsingborg": OpenStreetMap is asked where it is. Instead of a sheet and a cell',
     )
     claim.set_defaults(func=cmd_claim)
 

@@ -75,7 +75,7 @@ Run the tool from `cli/` with `python -m rutor`, or install it into the virtuale
 rutor preflight --machine     # python, the NVIDIA card and the disk: before anything else
 rutor login                   # prints the terms and asks you to accept them
 rutor preflight --sheet stockholm-norr   # everything, once the install and the login are done
-rutor claim stockholm-norr --next
+rutor claim --plats Eslöv           # or: rutor claim stockholm-norr --next
 rutor render stockholm-norr 74_20
 rutor redraw stockholm-norr 74_20
 rutor upload stockholm-norr 74_20

@@ -15,7 +15,7 @@ from unittest.mock import patch
 from rutor import commands
 from rutor.__main__ import main
 from rutor.config import write_token
-from rutor.errors import RutorError
+from rutor.errors import RutorError, network
 from rutor.renderer import google, sources
 from tests.fake_service import FakeService
 from tests.png import minimal_png
@@ -469,6 +469,94 @@ class SourceFromTheServiceTests(_ServiceCase):
         code, out, _err = self.run_cmd(["preflight", "--machine", "--sheet", "no-such-sheet"])
         self.assertEqual(code, 3)
         self.assertIn("check: sheet missing ", out)
+
+
+class ClaimByNameTests(_ServiceCase):
+    """rutor claim --plats: a town or a landmark by name, looked up in OpenStreetMap."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ready = patch.object(google, "not_ready", return_value=None)
+        ready.start()
+        self.addCleanup(ready.stop)
+        row = _new_sheet()
+        self.svc.state["sheets"] = {str(row["id"]): row}
+        self.svc.state["cells"] = {}
+        self.svc.state["place"] = {"sheet": {**row, "exists": False}, "col": 47, "row": 16, "state": "fri"}
+        self.looked: list[str] = []
+
+    def lookup(self, answer: object):  # type: ignore[no-untyped-def]
+        def fake(name: str) -> object:
+            self.looked.append(name)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        return patch("rutor.commands._nominatim", side_effect=fake)
+
+    def test_a_name_is_looked_up_and_claimed_as_the_cell_there(self) -> None:
+        hit = [{"lat": "55.8392", "lon": "13.3034", "display_name": "Eslöv, Eslövs kommun, Skåne län, Sverige"}]
+        with self.lookup(hit):
+            code, out, err = self.run_cmd(["claim", "--plats", "Eslöv"])
+        self.assertEqual((code, err), (0, ""))
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "found: Eslöv, Eslövs kommun, Skåne län, Sverige")
+        self.assertEqual(lines[1], f"place: {NEW_SHEET} 47_16")
+        self.assertTrue(lines[2].startswith(f"claimed: {NEW_SHEET} 47_16"))
+        self.assertEqual(self.looked, ["Eslöv"])
+        self.assertEqual([str(r.get("path")) for r in self.svc.requests if str(r.get("path")).startswith("/v1/place")], ["/v1/place?lat=55.8392&lon=13.3034"])
+
+    def test_a_name_nobody_knows_takes_nothing(self) -> None:
+        with self.lookup([]):
+            code, out, err = self.run_cmd(["claim", "--plats", "Xyzzyby"])
+        self.assertEqual(code, 1)
+        self.assertIn("Xyzzyby", err)
+        self.assertNotIn("claimed:", out)
+        self.assertEqual([r for r in self.svc.requests if r.get("path") == "/v1/claim"], [])
+
+    def test_no_answer_from_openstreetmap_is_the_network(self) -> None:
+        with self.lookup(network("could not reach OpenStreetMap")):
+            code, _out, _err = self.run_cmd(["claim", "--plats", "Eslöv"])
+        self.assertEqual(code, 4)
+
+    def test_a_name_and_a_point_or_a_cell_are_not_both_given(self) -> None:
+        for argv in (["claim", "--plats", "Eslöv", "--at", "56.0,12.6"], ["claim", NEW_SHEET, "47_16", "--plats", "Eslöv"]):
+            with self.subTest(argv=argv), self.lookup([]):
+                code, _out, _err = self.run_cmd(argv)
+                self.assertEqual(code, 1)
+                self.assertEqual(self.looked, [])
+
+    def test_the_lookup_asks_sweden_only_and_says_who_asks_without_a_person(self) -> None:
+        seen: dict[str, object] = {}
+
+        class Answer:
+            def __enter__(self):  # type: ignore[no-untyped-def]
+                return self
+
+            def __exit__(self, *_a: object) -> None:
+                return None
+
+            def read(self, _n: int = -1) -> bytes:
+                return b'[{"lat": "55.8392", "lon": "13.3034", "display_name": "Esl\\u00f6v"}]'
+
+        def opener(request, timeout):  # type: ignore[no-untyped-def]
+            seen["url"] = request.full_url
+            seen["agent"] = request.get_header("User-agent")
+            seen["timeout"] = timeout
+            return Answer()
+
+        with patch("rutor.commands._open_url", side_effect=opener):
+            from rutor import commands
+
+            hits = commands._nominatim("Stortorget Helsingborg")
+        self.assertEqual(hits, [{"lat": "55.8392", "lon": "13.3034", "display_name": "Eslöv"}])
+        url = str(seen["url"])
+        self.assertTrue(url.startswith("https://nominatim.openstreetmap.org/search?"))
+        self.assertIn("countrycodes=se", url)
+        self.assertIn("limit=1", url)
+        self.assertIn("q=Stortorget+Helsingborg", url)
+        self.assertRegex(str(seen["agent"]), r"^rutor/\S+ \(\+https://github\.com/opensverige/karta\.opensverige-3d\)$")
+        self.assertNotIn("@", str(seen["agent"]))
 
 
 class ClaimAtTests(_ServiceCase):
