@@ -39,7 +39,7 @@ from rutor import __version__, api, app_install, app_jobs, commands, config, log
 from rutor.errors import RutorError, bad_input, environment, network
 from rutor.localpage import LocalPage, Refusal, Reply, json_reply
 from rutor.renderer import google
-from rutor.renderer.sources import SHEET_KINDS
+from rutor.renderer.sources import SHEET_KINDS, kind_of
 
 if TYPE_CHECKING:
     # For the type of one argument only. See price() for why it is not loaded here.
@@ -544,6 +544,9 @@ class Builder:
         self._sheet = ""
         self._col = 0
         self._row = 0
+        # The source of the chosen sheet, as the page was told it. None: nobody said, and the
+        # two sheets the code knows are looked up when the build starts.
+        self._kind: str | None = None
         self._phase = "idle"
         self._detail = ""
         self._job_problem = ""
@@ -693,8 +696,11 @@ class Builder:
 
     # ---- the job: one cell, claimed, drawn and uploaded
 
-    def choose(self, sheet: str, col: int, row: int) -> None:
-        """Note the cell the person picked. This takes no lock and starts nothing."""
+    def choose(self, sheet: str, col: int, row: int, kind: str | None = None) -> None:
+        """Note the cell the person picked, and the source its sheet is drawn from.
+
+        This takes no lock and starts nothing.
+        """
         with self._lock:
             if self._busy():
                 raise Refusal(409, "a cell is being built", "busy")
@@ -707,6 +713,7 @@ class Builder:
             self._sheet = sheet
             self._col = col
             self._row = row
+            self._kind = kind
             self._phase = "idle"
             self._detail = ""
             self._job_problem = ""
@@ -726,13 +733,14 @@ class Builder:
             if self._busy():
                 raise Refusal(409, "a cell is being built", "busy")
             sheet, col, row = self._sheet, self._col, self._row
+            told = self._kind
             done = self._phase == "done"
         if not sheet or done:
             # A cell that has gone in is not built twice: the service would call it taken.
             raise Refusal(409, "choose a cell first", "no_cell")
         # The machine, the tools, the login and the token are asked here: they read the
         # disk and, for a stored login, the service. None of that happens under the lock.
-        kind = SHEET_KINDS.get(sheet, "")
+        kind = told if told is not None else SHEET_KINDS.get(sheet, "")
         if not machine()["ok"]:
             raise Refusal(409, "this machine cannot draw a cell yet", "not_ready")
         if not tools(kind)["ready"]:
@@ -1149,6 +1157,14 @@ def _size(value: object) -> int | None:
     return value
 
 
+def _source(sheet: dict[str, object]) -> str:
+    """The source the service's row names for a sheet, or "" when none is decided."""
+    try:
+        return kind_of(sheet)
+    except RutorError:
+        return ""
+
+
 def _open_record(raw: object) -> dict[str, object] | None:
     """One sheet from the queue, or None when it is not an open sheet this page can draw."""
     if not isinstance(raw, dict):
@@ -1169,7 +1185,7 @@ def _open_record(raw: object) -> dict[str, object] | None:
     return {
         "id": sheet_id,
         "name": _short(raw.get("name")),
-        "kind": SHEET_KINDS.get(sheet_id, ""),
+        "kind": _source(raw),
         "cols": cols,
         "rows": rows,
         "pipeline": _short(raw.get("pipeline")),
@@ -1891,7 +1907,7 @@ class AppServer:
                 raise
             # The last free cell went since the page last looked. The page has a word for that.
             raise Refusal(409, "no cell is free", "none_free") from exc
-        self._builder.choose(sheet_id, col, row)
+        self._builder.choose(sheet_id, col, row, _kind_of(sheet))
         return {"sheet": sheet_id, "col": col, "row": row}
 
     def _cell_named(self, body: dict[str, object]) -> dict[str, object]:
@@ -1903,7 +1919,7 @@ class AppServer:
             raise bad_input("the body names no cell")
         if not _is_free(_service_grid(sheet_id), col, row):
             raise Refusal(409, "that cell is not free", "taken")
-        self._builder.choose(sheet_id, col, row)
+        self._builder.choose(sheet_id, col, row, _kind_of(sheet))
         return {"sheet": sheet_id, "col": col, "row": row}
 
 

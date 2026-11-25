@@ -94,6 +94,10 @@ TREE_FILTERS = (
 # Which renderer draws a sheet. "open" is the orthophoto and OpenStreetMap renderer in this
 # package; "google" is Google's Photorealistic 3D Tiles through Cesium ion, with the
 # contributor's own token. A sheet has one kind, so neighbouring cells share a source.
+#
+# The service says the kind in the sheet's row (kind_of). These two lines are what the two
+# sheets were before the service said it, and they answer only when the row does not.
+KINDS = frozenset({"open", "google"})
 SHEET_KINDS: dict[str, str] = {
     "goteborg-norr": "open",
     "stockholm-norr": "google",
@@ -105,6 +109,20 @@ def sheet_kind(sheet_id: str) -> str:
     if found is None:
         raise environment(f"no source decided for sheet {sheet_id} yet")
     return found
+
+
+def kind_of(sheet: dict[str, object]) -> str:
+    """The source a sheet is drawn from, as its row from the service says it.
+
+    A sheet nobody opened by hand is in no table here, so the row is the only word there is
+    for it. A row with no source and an id this code does not know is refused: a cell is
+    never claimed or drawn on a guess about where its picture comes from.
+    """
+    kind = sheet.get("kind")
+    if isinstance(kind, str) and kind in KINDS:
+        return kind
+    sheet_id = sheet.get("id")
+    return sheet_kind(sheet_id if isinstance(sheet_id, str) else "")
 
 
 def ortho_source(sheet_id: str) -> OrthoSource:

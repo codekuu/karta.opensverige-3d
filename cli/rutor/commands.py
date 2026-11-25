@@ -22,7 +22,7 @@ from rutor.manifest import build_manifest, encode_manifest, png_size, sha256_fil
 from rutor.check import problems as check_problems
 from rutor.render import render_cell
 from rutor.renderer import google
-from rutor.renderer.sources import SHEET_KINDS, ortho_source, osm_date, sheet_kind
+from rutor.renderer.sources import SHEET_KINDS, kind_of, ortho_source, osm_date
 from rutor.terrain import terrain_label
 
 
@@ -137,6 +137,18 @@ def pick_next(sheet: dict[str, object], cells: list[object]) -> tuple[int, int]:
     return pool[0]
 
 
+def _refuse_unready(sheet: dict[str, object], sheet_id: str) -> None:
+    """Stop before a claim on a sheet this machine cannot render.
+
+    Without Node, the renderer and a token Cesium ion accepts, a Google render fails with the
+    cell already taken from everyone else. A sheet with no source decided raises here too.
+    """
+    if kind_of(sheet) == "google":
+        problem = google.not_ready()
+        if problem is not None:
+            raise environment(f"this machine cannot render {sheet_id} yet: {problem}")
+
+
 def cell_url(sheet: str, col: int, row: int) -> str:
     """Where a person sees the cell on the map. The service's upload answer uses the same address."""
     return f"{config.MAP_URL}#{sheet}/{col}_{row}"
@@ -150,17 +162,15 @@ def cmd_claim(args: argparse.Namespace) -> int:
     problem = _gpu_missing()
     if problem is not None:
         raise environment(f"this machine cannot build a cell: {problem}")
-    # The same for a Google sheet: without Node, the renderer and a token Cesium ion accepts,
-    # the render fails with the cell already taken from everyone else.
-    if SHEET_KINDS.get(args.sheet) == "google":
-        problem = google.not_ready()
-        if problem is not None:
-            raise environment(f"this machine cannot render {args.sheet} yet: {problem}")
+    # The sheet's row says which source it is drawn from. The grid is public, so this needs no
+    # login, and a sheet with no source decided stops here with nothing claimed.
+    _status, body = api.get(f"/v1/grid/{args.sheet}", token=config.read_token())
+    payload = _object(body, "object")
+    sheet = _object(payload.get("sheet"), "sheet")
+    _refuse_unready(sheet, args.sheet)
     token = require_token()
     if args.next:
-        _status, body = api.get(f"/v1/grid/{args.sheet}", token=token)
-        payload = _object(body, "object")
-        col, row = pick_next(_object(payload.get("sheet"), "sheet"), _rows(payload.get("cells"), "cells"))
+        col, row = pick_next(sheet, _rows(payload.get("cells"), "cells"))
     else:
         col, row = parse_cell(str(args.cell))
     _status, claimed = api.post("/v1/claim", {"sheet": args.sheet, "col": col, "row": row}, token)
@@ -377,6 +387,24 @@ def _login_missing() -> str | None:
     return "service did not return a login"
 
 
+def _preflight_kind(sheet_id: str) -> tuple[str, str | None]:
+    """The source of the sheet a preflight names, and what is wrong when it cannot be told.
+
+    The two sheets this code knows are answered from its own table, so their preflight works
+    with no service at all, as it did. Any other sheet is asked of the service: its grid is
+    public and needs no login.
+    """
+    if not sheet_id:
+        return "", None
+    known = SHEET_KINDS.get(sheet_id)
+    if known is not None:
+        return known, None
+    try:
+        return kind_of(_sheet_body(config.read_token() or "", sheet_id)), None
+    except RutorError as exc:
+        return "", exc.message
+
+
 def cmd_preflight(args: argparse.Namespace) -> int:
     # The machine first: python, card and disk need nothing installed and no login, so a person
     # learns whether this machine can build a cell before they accept terms or download anything.
@@ -386,7 +414,10 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         ("disk", _disk_missing),
     ]
     # What the sheet's source needs, when a sheet is named. None of it needs a login.
-    if SHEET_KINDS.get(getattr(args, "sheet", None) or "") == "google":
+    kind, unknown = _preflight_kind(getattr(args, "sheet", None) or "")
+    if unknown is not None:
+        checks.append(("sheet", lambda: unknown))
+    if kind == "google":
         checks += [
             ("node", google.node_missing),
             ("google renderer", google.renderer_missing),
@@ -421,11 +452,12 @@ def cmd_render(args: argparse.Namespace) -> int:
     col, row = parse_cell(args.cell)
     sheet = _sheet_body(token, args.sheet)
     out = config.work_dir(args.sheet) / f"{col}_{row}.src.png"
-    if sheet_kind(args.sheet) == "google":
+    kind = kind_of(sheet)
+    if kind == "google":
         for line in GOOGLE_NOTICE:
             print(f"note: {line}")
     render_cell(sheet, col, row, out)
-    _write_source_info(args.sheet, out)
+    _write_source_info(args.sheet, kind, out)
     print(f"rendered: {args.sheet} {col}_{row} {out}")
     return 0
 
@@ -437,9 +469,9 @@ GOOGLE_NOTICE = (
 )
 
 
-def _write_source_info(sheet_id: str, png: Path) -> None:
+def _write_source_info(sheet_id: str, kind: str, png: Path) -> None:
     """Record what the source PNG was made from, next to the PNG itself."""
-    if sheet_kind(sheet_id) == "google":
+    if kind == "google":
         rendered = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         info = {
             "provider": f"Google Photorealistic 3D Tiles via Cesium ion asset {google.ION_ASSET}",

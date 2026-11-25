@@ -10,8 +10,13 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+from unittest.mock import patch
+
+from rutor import commands
 from rutor.__main__ import main
 from rutor.config import write_token
+from rutor.errors import RutorError
+from rutor.renderer import google, sources
 from tests.fake_service import FakeService
 from tests.png import minimal_png
 
@@ -27,7 +32,7 @@ def _cell(col: int, row: int, state: str, login: str | None = None, expires: str
     }
 
 
-class CommandTests(unittest.TestCase):
+class _ServiceCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.svc = FakeService()
@@ -52,6 +57,8 @@ class CommandTests(unittest.TestCase):
             code = main(argv)
         return code, stdout.getvalue(), stderr.getvalue()
 
+
+class CommandTests(_ServiceCase):
     def open_sheet(self, cells: dict[str, dict[str, object]], **overrides: object) -> None:
         sheet: dict[str, object] = {
             "id": "goteborg-norr",
@@ -179,6 +186,9 @@ class CommandTests(unittest.TestCase):
         # The lists are public; taking a cell is not.
         code, _out, err = self.run_cmd(["cities"])
         self.assertEqual((code, err), (0, ""))
+        # The sheet is there to be read: a claim reads its row, which is public, before it asks
+        # for the login.
+        self.open_sheet({"goteborg-norr/0_0": _cell(0, 0, "fri")})
         code, _out, err = self.run_cmd(["claim", "goteborg-norr", "0_0"])
         self.assertEqual(code, 3)
         self.assertIn("not logged in: run rutor login", err)
@@ -270,3 +280,156 @@ class CommandTests(unittest.TestCase):
         code, _out, err = self.run_cmd(["approve", "goteborg-norr", "0_0"])
         self.assertEqual(code, 2)
         self.assertIn("refused: not_admin:", err)
+
+
+NEW_SHEET = "se-n5602-e1262"
+
+
+def _new_sheet(**overrides: object) -> dict[str, object]:
+    """A sheet of the tiling as the service answers it: the drawing code has no line for its id."""
+    sheet: dict[str, object] = {
+        "id": NEW_SHEET,
+        "name": "N 56,02 E 12,62",
+        "state": "open",
+        "done": 0,
+        "total": 0,
+        "cols": 61,
+        "rows": 47,
+        "origin_lat": 56.025,
+        "origin_lon": 12.625,
+        "x_meters": -7808,
+        "y_meters": 6064.08,
+        "ground_height": 68,
+        "pipeline": "2026.11-a",
+        "kind": "google",
+        "made": "grid",
+    }
+    sheet.update(overrides)
+    return sheet
+
+
+class KindOfTests(unittest.TestCase):
+    def test_the_sheet_row_says_the_source(self) -> None:
+        self.assertEqual(sources.kind_of({"id": NEW_SHEET, "kind": "google"}), "google")
+        self.assertEqual(sources.kind_of({"id": "any-town", "kind": "open"}), "open")
+        # The row is the service's word, and it wins over the line the code still carries.
+        self.assertEqual(sources.kind_of({"id": "stockholm-norr", "kind": "open"}), "open")
+
+    def test_a_row_from_a_service_that_says_no_source_falls_back_on_the_two_known_sheets(self) -> None:
+        self.assertEqual(sources.kind_of({"id": "stockholm-norr"}), "google")
+        self.assertEqual(sources.kind_of({"id": "goteborg-norr"}), "open")
+        self.assertEqual(sources.kind_of({"id": "stockholm-norr", "kind": "bing"}), "google")
+        self.assertEqual(sources.kind_of({"id": "stockholm-norr", "kind": 7}), "google")
+
+    def test_no_source_at_all_is_refused_by_name(self) -> None:
+        for sheet in ({"id": NEW_SHEET}, {"id": NEW_SHEET, "kind": "bing"}, {"id": NEW_SHEET, "kind": None}, {}):
+            with self.subTest(sheet=sheet), self.assertRaises(RutorError) as caught:
+                sources.kind_of(sheet)
+            self.assertEqual(caught.exception.code, 3)
+        with self.assertRaises(RutorError) as caught:
+            sources.kind_of({"id": NEW_SHEET})
+        self.assertIn(f"no source decided for sheet {NEW_SHEET} yet", caught.exception.message)
+
+
+class SourceFromTheServiceTests(_ServiceCase):
+    """The source of a sheet is the service's to say, so a sheet nobody wrote into the code can be drawn."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # A render writes under the repository's work folder. Here that is the temp folder.
+        root = patch("rutor.config.repo_root", return_value=Path(self.tmp.name))
+        root.start()
+        self.addCleanup(root.stop)
+
+    def claims(self) -> list[dict[str, object]]:
+        return [r for r in self.svc.requests if r.get("method") == "POST" and r.get("path") == "/v1/claim"]
+
+    def put(self, sheet: dict[str, object]) -> None:
+        self.svc.state["sheets"] = {str(sheet["id"]): sheet}
+        self.svc.state["cells"] = {f"{sheet['id']}/3_4": _cell(3, 4, "fri")}
+
+    def test_a_google_sheet_with_an_unknown_id_renders_through_the_google_path(self) -> None:
+        self.put(_new_sheet())
+        seen: list[tuple[object, int, int]] = []
+
+        def fake_google(sheet: dict[str, object], col: int, row: int, out: Path) -> None:
+            seen.append((sheet.get("id"), col, row))
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            Path(out).write_bytes(minimal_png(1536, 1536))
+
+        with patch.object(google, "render_google", side_effect=fake_google), patch(
+            "rutor.renderer.render", side_effect=AssertionError("the open renderer was asked")
+        ):
+            code, out, err = self.run_cmd(["render", NEW_SHEET, "3_4"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(seen, [(NEW_SHEET, 3, 4)])
+        self.assertIn("note: This sheet is drawn from Google Photorealistic 3D Tiles", out)
+        info = json.loads((Path(self.tmp.name) / "work" / NEW_SHEET / "3_4.src.json").read_text(encoding="utf-8"))
+        self.assertTrue(info["provider"].startswith("Google Photorealistic 3D Tiles"), info)
+
+    def test_a_sheet_with_no_source_is_not_claimed(self) -> None:
+        self.put(_new_sheet(kind=None))
+        code, out, err = self.run_cmd(["claim", NEW_SHEET, "3_4"])
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn(f"no source decided for sheet {NEW_SHEET} yet", err)
+        self.assertEqual(self.claims(), [])
+        code, _out, err = self.run_cmd(["claim", NEW_SHEET, "--next"])
+        self.assertEqual(code, 3)
+        self.assertEqual(self.claims(), [])
+
+    def test_a_sheet_with_no_source_is_not_rendered(self) -> None:
+        self.put(_new_sheet(kind=None))
+        with patch.object(commands, "render_cell", side_effect=AssertionError("a renderer was asked")):
+            code, _out, err = self.run_cmd(["render", NEW_SHEET, "3_4"])
+        self.assertEqual(code, 3)
+        self.assertIn("no source decided", err)
+
+    def test_stockholm_is_google_also_when_the_service_does_not_say(self) -> None:
+        self.put(_new_sheet(id="stockholm-norr", kind=None))
+        with patch.object(google, "not_ready", return_value="CESIUM_ION_TOKEN is not set."):
+            code, _out, err = self.run_cmd(["claim", "stockholm-norr", "3_4"])
+        self.assertEqual(code, 3)
+        self.assertIn("this machine cannot render stockholm-norr yet: CESIUM_ION_TOKEN is not set", err)
+        self.assertEqual(self.claims(), [])
+
+    def test_a_google_sheet_with_an_unknown_id_is_not_claimed_on_a_machine_that_cannot_render_it(self) -> None:
+        self.put(_new_sheet())
+        with patch.object(google, "not_ready", return_value="the Google renderer is not installed."):
+            code, _out, err = self.run_cmd(["claim", NEW_SHEET, "3_4"])
+        self.assertEqual(code, 3)
+        self.assertIn(f"this machine cannot render {NEW_SHEET} yet: the Google renderer is not installed", err)
+        self.assertEqual(self.claims(), [])
+        with patch.object(google, "not_ready", return_value=None):
+            code, out, err = self.run_cmd(["claim", NEW_SHEET, "3_4"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"claimed: {NEW_SHEET} 3_4", out)
+        self.assertEqual(len(self.claims()), 1)
+
+    def test_an_open_sheet_asks_nothing_of_google(self) -> None:
+        self.put(_new_sheet(id="any-town", kind="open"))
+        with patch.object(google, "not_ready", side_effect=AssertionError("google was asked")):
+            code, _out, err = self.run_cmd(["claim", "any-town", "3_4"])
+        self.assertEqual((code, err), (0, ""))
+
+    def test_preflight_asks_the_service_which_source_an_unknown_sheet_has(self) -> None:
+        self.put(_new_sheet())
+        machine_ok = (
+            patch("rutor.commands._python_missing", return_value=None),
+            patch("rutor.commands._disk_missing", return_value=None),
+            patch.object(google, "node_missing", return_value=None),
+            patch.object(google, "renderer_missing", return_value=None),
+            patch.object(google, "token_unusable", return_value="CESIUM_ION_TOKEN is not set"),
+        )
+        for p in machine_ok:
+            p.start()
+            self.addCleanup(p.stop)
+        code, out, err = self.run_cmd(["preflight", "--machine", "--sheet", NEW_SHEET])
+        self.assertEqual((code, err), (3, ""))
+        self.assertEqual(
+            out.splitlines()[3:],
+            ["check: node ok", "check: google renderer ok", "check: cesium token missing CESIUM_ION_TOKEN is not set"],
+        )
+        # A sheet nobody knows the source of is said, not passed over.
+        code, out, _err = self.run_cmd(["preflight", "--machine", "--sheet", "no-such-sheet"])
+        self.assertEqual(code, 3)
+        self.assertIn("check: sheet missing ", out)

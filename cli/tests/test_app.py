@@ -1194,6 +1194,25 @@ class JobTests(_OwnHome):
                 patcher.stop()
             wait_until(lambda: self._state(builder)["phase"] == "done")
 
+    def test_the_source_the_page_names_decides_what_a_build_asks(self) -> None:
+        # A sheet of the tiling has no line in the drawing code. The page hands its source over.
+        builder, fake = self._builder()
+        builder.choose("se-n5602-e1262", 3, 4, "google")
+        with patch("rutor.app.tools", return_value={"ready": True, "missing": []}) as tools:
+            with patch("rutor.app.cesium", return_value={"set": True, "ok": False, "problem": "refused"}):
+                with self.assertRaises(Refusal) as caught:
+                    builder.build()
+        self.assertEqual((caught.exception.status, caught.exception.code), (409, "not_ready"))
+        tools.assert_called_once_with("google")
+        self.assertEqual(self._started(fake), ["login"])
+        # The same cell on a sheet said to be open data asks no Cesium.
+        builder.choose("any-town", 3, 4, "open")
+        self.SHEET, self.CELL = "any-town", "3_4"
+        self._script_ok(fake)
+        with patch("rutor.app.cesium", side_effect=AssertionError("cesium was asked")):
+            builder.build()
+        wait_until(lambda: self._state(builder)["phase"] == "done")
+
     def test_rita_with_no_cell_is_refused(self) -> None:
         builder, fake = self._builder()
         with self.assertRaises(Refusal) as caught:
@@ -1783,6 +1802,41 @@ class AppServerTests(_OwnHome):
         for rest in ("app.py", "../app.py"):
             status, _headers, _body = self.call("GET", f"{self.base}/{rest}")
             self.assertEqual(status, 404, rest)
+
+    def _put_new_sheet(self, kind: object) -> None:
+        self._put_sheet([(0, 0, "fri", None)])
+        sheets = self.svc.state["sheets"]
+        cells = self.svc.state["cells"]
+        assert isinstance(sheets, dict) and isinstance(cells, dict)
+        sheet = dict(sheets.pop("stockholm-norr"))
+        sheet["id"] = "se-n5602-e1262"
+        if kind is not None:
+            sheet["kind"] = kind
+        sheets["se-n5602-e1262"] = sheet
+        cells["se-n5602-e1262/0_0"] = cells.pop("stockholm-norr/0_0")
+
+    def test_the_sheet_says_its_own_source(self) -> None:
+        # No line in the drawing code names this sheet: the service's row does.
+        self._put_new_sheet("google")
+        sheet = self._state()["sheet"]
+        self.assertEqual((sheet["id"], sheet["kind"]), ("se-n5602-e1262", "google"))
+
+    def test_a_sheet_with_no_source_has_none_on_the_page(self) -> None:
+        for kind in (None, "bing", 7):
+            with self.subTest(kind=kind):
+                self._put_new_sheet(kind)
+                self.assertEqual(app._open_record(dict(self.svc.state["sheets"]["se-n5602-e1262"]))["kind"], "")
+
+    def test_a_build_on_a_new_google_sheet_asks_cesium(self) -> None:
+        self._put_new_sheet("google")
+        self.builder.accept_terms()
+        self.fake.script("claim", [], hold=True)
+        status, _headers, body = self.call("POST", f"{self.base}/api/cell", {"next": True})
+        self.assertEqual((status, json.loads(body)), (200, {"sheet": "se-n5602-e1262", "col": 0, "row": 0}))
+        self.ask.reset_mock()
+        status, _headers, body = self.call("POST", f"{self.base}/api/build", {})
+        self.assertEqual(status, 200, body)
+        self.ask.assert_called()
 
     def test_the_state_has_every_part_the_page_draws(self) -> None:
         found = self._state()

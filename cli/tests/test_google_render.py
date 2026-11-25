@@ -257,6 +257,24 @@ class DispatchTests(unittest.TestCase):
         called.assert_called_once()
         open_render.assert_not_called()
 
+    def test_the_sheet_row_decides_not_the_id(self) -> None:
+        with patch.object(google, "render_google") as called, patch("rutor.renderer.render") as open_render:
+            render_cell({**_sheet("se-n5602-e1262"), "kind": "google"}, 10, 12, Path("out.png"))
+        called.assert_called_once()
+        open_render.assert_not_called()
+        with patch.object(google, "render_google") as called, patch("rutor.renderer.render") as open_render:
+            render_cell({**_sheet("any-town"), "kind": "open"}, 10, 12, Path("out.png"))
+        called.assert_not_called()
+        open_render.assert_called_once()
+
+    def test_a_sheet_with_no_source_is_drawn_by_nobody(self) -> None:
+        with patch.object(google, "render_google") as called, patch("rutor.renderer.render") as open_render:
+            with self.assertRaises(RutorError) as caught:
+                render_cell(_sheet("se-n5602-e1262"), 10, 12, Path("out.png"))
+        self.assertEqual(caught.exception.code, 3)
+        called.assert_not_called()
+        open_render.assert_not_called()
+
     def test_an_open_sheet_never_calls_cesium(self) -> None:
         with patch.object(google, "render_google") as called, patch("rutor.renderer.render") as open_render:
             render_cell(_sheet("goteborg-norr"), 10, 12, Path("out.png"))
