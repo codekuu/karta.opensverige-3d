@@ -4,7 +4,8 @@
  * @typedef {{ id: string, city: string, name: string, cols: number, rows: number,
  *   origin_lat: number, origin_lon: number, x_meters: number, y_meters: number,
  *   ground_height: number, dzi_levels: number, pipeline: string,
- *   state: 'queued'|'open'|'done', queue_order: number, rev: number }} Sheet
+ *   state: 'queued'|'open'|'done', queue_order: number, rev: number,
+ *   kind: 'open'|'google', made: 'hand'|'grid' }} Sheet
  */
 
 /**

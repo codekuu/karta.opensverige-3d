@@ -22,11 +22,13 @@ const SHEET_FIELDS = [
   ['queue_order', (v) => Number.isInteger(v)],
   ['state', (v) => ['queued', 'open', 'done'].includes(v)],
 ];
+export const KINDS = ['open', 'google'];
 
 /**
  * Inserts a sheet and all its cells: fri inside the mask, ute outside. Nothing is written on
  * refusal. A sheet that exists with fewer cells than cols × rows (a run that broke half way)
- * is resumed: the missing cells are written and the answer says resumed.
+ * is resumed: the missing cells are written and the answer says resumed. `kind` is the sheet's
+ * source and may be left out: a sheet is then open.
  * @param {D1Database} db
  * @param {object} body
  * @param {string} now
@@ -38,6 +40,8 @@ export async function openSheet(db, body, now) {
     if (!valid(body[field])) return { ok: false, status: 400, code: 'bad_body', field };
   }
   const { cols, rows } = body;
+  const kind = body.kind === undefined ? 'open' : body.kind;
+  if (!KINDS.includes(kind)) return { ok: false, status: 400, code: 'bad_body', field: 'kind' };
   if (!Array.isArray(body.mask)) return { ok: false, status: 400, code: 'bad_body', field: 'mask' };
   const inMask = new Set();
   for (const entry of body.mask) {
@@ -60,9 +64,9 @@ export async function openSheet(db, body, now) {
     statements.push(
       db
         .prepare(
-          'INSERT INTO sheets (id, city, name, cols, rows, origin_lat, origin_lon, x_meters, y_meters, ground_height, dzi_levels, pipeline, state, queue_order, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
+          "INSERT INTO sheets (id, city, name, cols, rows, origin_lat, origin_lon, x_meters, y_meters, ground_height, dzi_levels, pipeline, state, queue_order, rev, kind, made) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'hand')",
         )
-        .bind(body.id, body.city, body.name, cols, rows, body.origin_lat, body.origin_lon, body.x_meters, body.y_meters, body.ground_height, body.dzi_levels, body.pipeline, body.state, body.queue_order),
+        .bind(body.id, body.city, body.name, cols, rows, body.origin_lat, body.origin_lon, body.x_meters, body.y_meters, body.ground_height, body.dzi_levels, body.pipeline, body.state, body.queue_order, kind),
     );
   }
   const insert = db.prepare('INSERT OR IGNORE INTO cells (sheet, col, row, state, updated_at) VALUES (?, ?, ?, ?, ?)');

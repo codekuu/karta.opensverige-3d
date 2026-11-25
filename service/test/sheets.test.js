@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { getGrid, listSheets } from '../src/sheets.js';
-import { NOW, call, clearDb, insertCells, insertSheet, setCell } from './fixtures.js';
+import { getGrid, listSheets, openSheet } from '../src/sheets.js';
+import { NOW, SHEET, call, clearDb, insertCells, insertSheet, setCell } from './fixtures.js';
 
 beforeEach(clearDb);
 
@@ -64,5 +64,52 @@ describe('routes', () => {
     expect(cities[0].sheets.map((s) => s.id)).toEqual(['stockholm-norr', 'stockholm-soder']);
     const list = await call(new Request('https://x/v1/sheets'));
     expect((await list.json()).sheets).toHaveLength(3);
+  });
+});
+
+describe('the source of a sheet', () => {
+  const body = { ...SHEET, cols: 2, rows: 1, mask: [[0, 0]] };
+
+  it('is open and hand-made unless said otherwise, and the grid shows both', async () => {
+    await insertSheet({ cols: 1, rows: 1 });
+    const r = await call(new Request('https://x/v1/grid/goteborg-norr'));
+    expect((await r.json()).sheet).toMatchObject({ id: 'goteborg-norr', kind: 'open', made: 'hand' });
+  });
+
+  it('the migration marks stockholm-norr google and leaves goteborg-norr open', async () => {
+    await insertSheet({ id: 'stockholm-norr', city: 'stockholm', name: 'Stockholm', queue_order: 0 });
+    await insertSheet();
+    // The migration ran on an empty table at setup. Its data statements are run again here, on rows.
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith('0004'));
+    const updates = migration.queries.filter((q) => /UPDATE sheets/i.test(q));
+    expect(updates).toHaveLength(1);
+    for (const q of updates) await env.DB.prepare(q).run();
+    const kinds = await env.DB.prepare('SELECT id, kind FROM sheets ORDER BY id').all();
+    expect(kinds.results).toEqual([
+      { id: 'goteborg-norr', kind: 'open' },
+      { id: 'stockholm-norr', kind: 'google' },
+    ]);
+  });
+
+  it('openSheet stores the kind it is given', async () => {
+    expect((await openSheet(env.DB, { ...body, kind: 'google' }, NOW)).ok).toBe(true);
+    const row = await env.DB.prepare("SELECT kind, made FROM sheets WHERE id = 'goteborg-norr'").first();
+    expect(row).toEqual({ kind: 'google', made: 'hand' });
+  });
+
+  it('openSheet without a kind makes an open sheet', async () => {
+    expect((await openSheet(env.DB, body, NOW)).ok).toBe(true);
+    expect((await env.DB.prepare("SELECT kind FROM sheets WHERE id = 'goteborg-norr'").first()).kind).toBe('open');
+  });
+
+  it('openSheet refuses a kind that is not a source and writes nothing', async () => {
+    expect(await openSheet(env.DB, { ...body, kind: 'x' }, NOW)).toMatchObject({ ok: false, status: 400, code: 'bad_body', field: 'kind' });
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM sheets').first()).n).toBe(0);
+  });
+
+  it('the table refuses a kind or a maker outside the two words', async () => {
+    await insertSheet();
+    await expect(env.DB.prepare("UPDATE sheets SET kind = 'bing'").run()).rejects.toThrow(/CHECK/);
+    await expect(env.DB.prepare("UPDATE sheets SET made = 'magic'").run()).rejects.toThrow(/CHECK/);
   });
 });

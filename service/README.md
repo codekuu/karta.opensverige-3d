@@ -83,9 +83,11 @@ All under `/v1`. Errors are `{ "error": "<code>", "message": "..." }`.
 | GET | `/queue?state=vantar\|godkand\|removed` | admin | cells in that state with their eight neighbours; `removed` = live cells taken down, for the intake to blank |
 | POST | `/live` `{sheet, cells, rev}` | admin (the intake) | 200 `{live}`; all or nothing: 409 `not_approved` (a listed cell was not approved; nothing changed), 409 `stale_rev` (rev must be greater than the sheet's), 400 `duplicate_cells`, 400 `bad_body` (no cells, or `rev` not a whole number from 1) |
 | POST | `/blanked` `{sheet, cells}` | admin (the intake) | 200 `{blanked}`: removed cells whose tiles are blank again; drops their inbox objects |
-| POST | `/sheets` (sheet fields + `mask`) | admin | 201 (`resumed: true` when a half-written sheet was completed); 409 `exists`, 400 `bad_body` |
+| POST | `/sheets` (sheet fields + `mask`, and `kind` when the sheet is not `open`) | admin | 201 (`resumed: true` when a half-written sheet was completed); 409 `exists`, 400 `bad_body` |
 | POST | `/seed` `{sheet, cells, login, github_id}` | admin | 200; 422 `seed_outside_mask` |
 
 Everything answers 503 `closed` when the service is closed (GET excepted), 429 `rate_limited` over 60 requests a minute per client, and 500 `internal` when storage fails. The admin's token, once GitHub has vouched for it, passes the rate limit on admin routes.
+
+A sheet row says which source it is drawn from in `kind`: `open` (orthophoto and OpenStreetMap) or `google` (Google's 3D tiles through the builder's own Cesium ion account). The CLI reads it from `/grid/{sheet}`, so a new sheet needs no line in the drawing code. `made` says how the row came to be: `hand` by the admin through `POST /sheets`, `grid` by the tiling.
 
 States of a cell: `ute` (not offered: outside the built-up area, or no source to draw it from yet), `fri`, `last` (locked), `vantar` (uploaded, waiting for review), `godkand`, `live`. A live cell credited to `opensverige` is one the map showed before Pixelbygget.
