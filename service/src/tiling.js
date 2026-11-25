@@ -199,6 +199,54 @@ export function cellCentre(tile, col, row) {
   };
 }
 
+/**
+ * Whether a sheet of the tiling offers this cell. Pictures of neighbouring boxes overlap at
+ * the line between them, so a piece of ground near the line lies in two pictures. It belongs
+ * to the sheet whose box holds the middle of the cell, and that sheet alone offers it: no
+ * ground is drawn twice. The same rule is asked by a claim and by /v1/place.
+ * @param {Tile} tile
+ * @param {number} col
+ * @param {number} row
+ * @returns {boolean}
+ */
+export function owns(tile, col, row) {
+  if (!(col >= 0 && row >= 0 && col < tile.cols && row < tile.rows)) return false;
+  const m = cellCentre(tile, col, row);
+  const box = sheetAt(m.lat, m.lon);
+  return Boolean(box) && box.id === tile.id;
+}
+
+/**
+ * The owned cell that shows a point, looking at the point's own box and the eight around it.
+ * Where a thin strip at a line between boxes is shown by no owned cell, the nearest owned cell
+ * of the point's own box answers. Null outside Sweden.
+ * @param {number} lat
+ * @param {number} lon
+ * @returns {{ tile: Tile, col: number, row: number } | null}
+ */
+export function ownedCellAt(lat, lon) {
+  const own = sheetAt(lat, lon);
+  if (!own) return null;
+  for (let a = 0; a <= 2; a += 1) {
+    for (let b = 0; b <= 2; b += 1) {
+      // The point's own box first, then its neighbours.
+      const da = [0, -1, 1][a];
+      const db = [0, -1, 1][b];
+      const tile = da || db ? sheetAt(own.origin_lat + da * LAT_STEP, own.origin_lon + db * LON_STEP) : own;
+      const cell = tile && cellAt(tile, lat, lon);
+      if (cell && owns(tile, cell.col, cell.row)) return { tile, ...cell };
+    }
+  }
+  let { col, row } = nearestCell(own, lat, lon);
+  const midCol = Math.floor(own.cols / 2);
+  const midRow = Math.floor(own.rows / 2);
+  for (let step = 0; step < own.cols + own.rows && !owns(own, col, row); step += 1) {
+    if (col !== midCol) col += Math.sign(midCol - col);
+    if (row !== midRow && !owns(own, col, row)) row += Math.sign(midRow - row);
+  }
+  return { tile: own, col, row };
+}
+
 const ELEVATION_URL = 'https://api.open-meteo.com/v1/elevation';
 /** The sea level the elevation service counts from lies about this far above the ellipsoid in Sweden. */
 const GEOID_METERS = 30;

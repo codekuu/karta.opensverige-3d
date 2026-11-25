@@ -4,7 +4,7 @@
 import { requireAdmin } from './auth.js';
 import { logEvent } from './cells.js';
 import { error, json } from './db.js';
-import { cellAt, gridRow, nearestCell, sheetAt, sheetById } from './tiling.js';
+import { cellAt, gridRow, owns, ownedCellAt, sheetById } from './tiling.js';
 
 const BATCH = 500;
 const SHEET_FIELDS = [
@@ -226,7 +226,12 @@ export async function gridRoute(request, env, ctx, params) {
  */
 async function shownState(db, sheet, col, row) {
   const cell = await db.prepare('SELECT state, removed_at FROM cells WHERE sheet = ? AND col = ? AND row = ?').bind(sheet.id, col, row).first();
-  if (!cell) return sheet.made === 'grid' ? 'fri' : 'ute';
+  if (!cell) {
+    if (sheet.made !== 'grid') return 'ute';
+    // Ground near the line to the next box that the next sheet owns is not offered here.
+    const tile = sheetById(sheet.id);
+    return tile && owns(tile, col, row) ? 'fri' : 'ute';
+  }
   return cell.removed_at && cell.state === 'fri' ? 'last' : cell.state;
 }
 
@@ -247,12 +252,13 @@ export async function placeAt(db, pipeline, lat, lon) {
     const cell = cellAt(sheet, lat, lon);
     if (cell) return { sheet: { ...sheet, exists: true }, ...cell, state: await shownState(db, sheet, cell.col, cell.row) };
   }
-  const tile = sheetAt(lat, lon);
-  if (!tile) return null;
+  // Where two boxes meet, the cell is the one a claim would accept: owned by its sheet.
+  const found = ownedCellAt(lat, lon);
+  if (!found) return null;
+  const { tile, col, row } = found;
   const stored = await db.prepare('SELECT * FROM sheets WHERE id = ?').bind(tile.id).first();
   const sheet = stored || gridRow(tile, pipeline);
-  const cell = nearestCell(sheet, lat, lon);
-  return { sheet: { ...sheet, exists: Boolean(stored) }, ...cell, state: stored ? await shownState(db, sheet, cell.col, cell.row) : 'fri' };
+  return { sheet: { ...sheet, exists: Boolean(stored) }, col, row, state: stored ? await shownState(db, sheet, col, row) : 'fri' };
 }
 
 const DEGREES = /^-?\d{1,3}(\.\d{1,9})?$/;

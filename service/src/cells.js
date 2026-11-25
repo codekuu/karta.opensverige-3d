@@ -3,7 +3,7 @@
 
 import { requireUser } from './auth.js';
 import { error, json } from './db.js';
-import { cellAt, cellCentre, gridRow, groundHeight, sheetById } from './tiling.js';
+import { cellAt, cellCentre, gridRow, groundHeight, owns, sheetAt, sheetById } from './tiling.js';
 
 export const LOCK_HOURS = 48;
 /** How many uploads of a builder who is not trusted may wait for review at once. */
@@ -56,6 +56,12 @@ function plusHours(now, hours) {
  * @returns {Promise<{ ok: true } | { ok: false, status: number, code: string, message?: string }>}
  */
 async function makeGridCell(db, env, user, tile, sheetMissing, col, row, now) {
+  // Where two boxes meet, a cell belongs to the sheet whose box holds its middle.
+  if (!owns(tile, col, row)) {
+    const m = cellCentre(tile, col, row);
+    const other = sheetAt(m.lat, m.lon);
+    return { ok: false, status: 409, code: 'other_sheet', message: `That ground belongs to the sheet ${other ? other.id : 'next to it'}. Ask /v1/place for its cell there.` };
+  }
   // What is drawn by hand is not gridded again: that ground belongs to its own sheet.
   const centre = cellCentre(tile, col, row);
   const { results: hand } = await db.prepare("SELECT * FROM sheets WHERE made = 'hand'").all();
