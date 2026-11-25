@@ -10,7 +10,7 @@ A code change needs none of the list below: any machine with Python 3.11 will do
 
 - An NVIDIA GPU with CUDA and 12 GB of memory or more.
 - Time. One cell takes about two minutes on an RTX 5070 or an L4.
-- 25 GB of free disk, and about 1 GB more for `stockholm-norr`. The model download is about 20 GB.
+- 25 GB of free disk, and about 1 GB more for `stockholm-norr`. The downloads are about 16 GB in all, 12 of them the model.
 - Windows or Linux for the redraw. A Mac can change the code and run the tests. It cannot redraw, so do not claim a cell on a Mac.
 - Python 3.11 or newer, and a GitHub account.
 - The source render comes from the sheet's source. Today every free cell is on `stockholm-norr`. `goteborg-norr` is open data: Göteborgs Stad orthophoto and terrain model (both CC0) and OpenStreetMap (ODbL). `stockholm-norr` is Google's tiles through your own Cesium ion token, Node 22 and `npm ci` in `cli/google-render`. Google's terms bind that token, and Google can ask for those cells to be taken down.
