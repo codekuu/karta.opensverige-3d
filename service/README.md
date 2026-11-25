@@ -69,7 +69,7 @@ All under `/v1`. Errors are `{ "error": "<code>", "message": "..." }`.
 | GET | `/health` | anyone | 200 |
 | GET | `/sheets` | anyone | sheets with `done` and `total` |
 | GET | `/cities` | anyone | sheets grouped by city |
-| GET | `/grid/{sheet}` | anyone | sheet and cells `[col, row, state, login, updated]`; 404 `no_sheet` |
+| GET | `/grid/{sheet}` | anyone | sheet and cells `[col, row, state, login, updated]`; 404 `no_sheet`. A live cell the admin took down is shown as `last` until its tiles are blanked: it cannot be claimed |
 | GET | `/me` | user | login, counts, locks |
 | POST | `/claim` `{sheet, col, row}` | user | 201 `expires_at`; 409 `taken` `being_removed`, 403 `sheet_closed` `too_many_locks` `too_many_waiting` (five uploads of a builder who is not trusted already wait for review), 422 `outside`. A lock past its expiry can be taken |
 | POST | `/release` `{sheet, col, row}` | user | 200; 403 `not_yours`, 409 `already_uploaded` |
@@ -77,9 +77,9 @@ All under `/v1`. Errors are `{ "error": "<code>", "message": "..." }`.
 | GET | `/inkorg/{sheet}/{col}_{row}.png` · `.json` | admin | the cell's current upload; header `X-Inbox-Key` |
 | POST | `/approve` `{sheet, col, row}` | admin | 200; 409 `not_waiting` |
 | POST | `/reject` `{sheet, col, row, comment}` | admin | 200; 409 `nothing_to_reject` `changed_meanwhile`. The cell goes back to free; its upload is purged after 30 days (a live cell: kept until `/blanked`) |
-| POST | `/trust` `{login or github_id, trusted}` · `/block` `{login or github_id, blocked}` | admin | 200; 404 `no_user`, 409 `ambiguous_login` (two rows share it: send `github_id`). Login matches regardless of case |
+| POST | `/trust` `{login or github_id, trusted}` · `/block` `{login or github_id, blocked}` | admin | 200; 404 `no_user`, 409 `ambiguous_login` (two rows share it: send `github_id`). Login matches regardless of case. A block frees the cell that builder holds; what they uploaded stays in the queue |
 | GET | `/queue?state=vantar\|godkand\|removed` | admin | cells in that state with their eight neighbours; `removed` = live cells taken down, for the intake to blank |
-| POST | `/live` `{sheet, cells, rev}` | admin (the intake) | 200 `{live}`; all or nothing: 409 `not_approved` (a listed cell was not approved; nothing changed), 409 `stale_rev` (rev must be greater than the sheet's), 400 `duplicate_cells` |
+| POST | `/live` `{sheet, cells, rev}` | admin (the intake) | 200 `{live}`; all or nothing: 409 `not_approved` (a listed cell was not approved; nothing changed), 409 `stale_rev` (rev must be greater than the sheet's), 400 `duplicate_cells`, 400 `bad_body` (no cells, or `rev` not a whole number from 1) |
 | POST | `/blanked` `{sheet, cells}` | admin (the intake) | 200 `{blanked}`: removed cells whose tiles are blank again; drops their inbox objects |
 | POST | `/sheets` (sheet fields + `mask`) | admin | 201 (`resumed: true` when a half-written sheet was completed); 409 `exists`, 400 `bad_body` |
 | POST | `/seed` `{sheet, cells, login, github_id}` | admin | 200; 422 `seed_outside_mask` |

@@ -155,6 +155,9 @@ export async function listSheets(db) {
 
 /**
  * The sheet and all its cells as compact rows [col, row, state, owner_login, updated_at].
+ * A live cell the admin took down is free in the table but nobody may claim it until its
+ * tiles are blanked, so it is shown as locked: a client that takes "the next free cell"
+ * must not be handed one that answers being_removed.
  * @param {D1Database} db
  * @param {string} sheetId
  * @returns {Promise<{ sheet: import('./db.js').Sheet, cells: Array<[number, number, string, string|null, string]> } | null>}
@@ -163,10 +166,10 @@ export async function getGrid(db, sheetId) {
   const sheet = await db.prepare('SELECT * FROM sheets WHERE id = ?').bind(sheetId).first();
   if (!sheet) return null;
   const { results } = await db
-    .prepare('SELECT col, row, state, owner_login, updated_at FROM cells WHERE sheet = ? ORDER BY row, col')
+    .prepare('SELECT col, row, state, owner_login, updated_at, removed_at FROM cells WHERE sheet = ? ORDER BY row, col')
     .bind(sheetId)
     .all();
-  return { sheet, cells: results.map((c) => [c.col, c.row, c.state, c.owner_login, c.updated_at]) };
+  return { sheet, cells: results.map((c) => [c.col, c.row, c.removed_at && c.state === 'fri' ? 'last' : c.state, c.owner_login, c.updated_at]) };
 }
 
 /** GET /v1/sheets */

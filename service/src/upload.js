@@ -231,18 +231,25 @@ export const uploadRoute = requireUser(async (request, env, ctx, params, now, us
   const sha = await sha256Hex(bytes);
   if (sha !== manifest.sha256) return error(422, 'sha_mismatch', 'The file does not match the sha256 in the manifest.');
   const key = inboxKey(sheet, col, row, sha);
-  await env.INKORG.put(`${key}.png`, bytes, { httpMetadata: { contentType: 'image/png' } });
-  await env.INKORG.put(`${key}.json`, JSON.stringify({ ...manifest, sheet, col, row, login: user.login, github_id: user.github_id, uploadedAt: now }), {
-    httpMetadata: { contentType: 'application/json' },
-  });
   const state = user.trusted ? 'godkand' : 'vantar';
-  // The lock may have expired or been freed while the file was written: the cell changes
-  // state only if it is still this user's live lock, otherwise our objects go again.
-  const result = await env.DB.prepare(
-    "UPDATE cells SET state = ?, uploaded_at = ?, bytes = ?, sha256 = ?, inbox_key = ?, approved_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'last' AND owner_id = ? AND expires_at > ?",
-  )
-    .bind(state, now, bytes.length, sha, key, user.trusted ? now : null, now, sheet, col, row, user.github_id, now)
-    .run();
+  let result;
+  try {
+    await env.INKORG.put(`${key}.png`, bytes, { httpMetadata: { contentType: 'image/png' } });
+    await env.INKORG.put(`${key}.json`, JSON.stringify({ ...manifest, sheet, col, row, login: user.login, github_id: user.github_id, uploadedAt: now }), {
+      httpMetadata: { contentType: 'application/json' },
+    });
+    // The lock may have expired or been freed while the file was written: the cell changes
+    // state only if it is still this user's live lock, otherwise our objects go again.
+    result = await env.DB.prepare(
+      "UPDATE cells SET state = ?, uploaded_at = ?, bytes = ?, sha256 = ?, inbox_key = ?, approved_at = ?, updated_at = ? WHERE sheet = ? AND col = ? AND row = ? AND state = 'last' AND owner_id = ? AND expires_at > ?",
+    )
+      .bind(state, now, bytes.length, sha, key, user.trusted ? now : null, now, sheet, col, row, user.github_id, now)
+      .run();
+  } catch (e) {
+    // No cell points at these objects, so nothing would ever take them away.
+    await env.INKORG.delete([`${key}.png`, `${key}.json`]).catch(() => undefined);
+    throw e;
+  }
   if (result.meta.changes !== 1) {
     // The key is this request's own, so nobody else's upload can be under it.
     await env.INKORG.delete([`${key}.png`, `${key}.json`]);

@@ -3,7 +3,7 @@
 
 import { requireAdmin } from './auth.js';
 import { logEvent, readCellBody } from './cells.js';
-import { error, json } from './db.js';
+import { error, json, nowIso } from './db.js';
 
 const COMMENT_MAX = 500;
 const PURGE_DAYS = 30;
@@ -130,11 +130,24 @@ export async function setTrust(db, who, trusted) {
  * @param {D1Database} db
  * @param {{ login?: string, github_id?: number }} who
  * @param {0|1} blocked
+ * @param {string} [now]
  */
-export async function setBlock(db, who, blocked) {
+export async function setBlock(db, who, blocked, now = nowIso()) {
   const found = await findUser(db, who);
   if (!found.ok) return found;
-  await db.prepare('UPDATE users SET blocked = ? WHERE github_id = ?').bind(blocked, found.github_id).run();
+  const statements = [db.prepare('UPDATE users SET blocked = ? WHERE github_id = ?').bind(blocked, found.github_id)];
+  if (blocked) {
+    // A blocked builder cannot release, so their open lock would hold a cell for two days.
+    // What they have uploaded stays where it is, for the reviewer.
+    statements.push(
+      db
+        .prepare(
+          "UPDATE cells SET state = 'fri', owner_id = NULL, owner_login = NULL, locked_at = NULL, expires_at = NULL, updated_at = ? WHERE owner_id = ? AND state = 'last' AND uploaded_at IS NULL",
+        )
+        .bind(now, found.github_id),
+    );
+  }
+  await db.batch(statements);
   return { ok: true };
 }
 
@@ -275,7 +288,7 @@ function flagRoute(field, apply) {
     const body = await request.json().catch(() => null);
     const who = body && Number.isInteger(body.github_id) ? { github_id: body.github_id } : body && typeof body.login === 'string' ? { login: body.login } : null;
     if (!who || ![0, 1].includes(body[field])) return error(400, 'bad_body', `Send JSON with login or github_id, and ${field} as 0 or 1.`);
-    const r = await apply(env.DB, who, body[field]);
+    const r = await apply(env.DB, who, body[field], now);
     if (!r.ok) return fail(r);
     await logEvent(env.DB, { at: now, github_id: admin.github_id, login: admin.login, action: field, detail: `${who.github_id ?? who.login}=${body[field]}` });
     return json(200, { ok: true });
@@ -295,7 +308,11 @@ export const queueRoute = requireAdmin(async (request, env) => {
 export const liveRoute = requireAdmin(async (request, env, ctx, params, now, admin) => {
   const body = await request.json().catch(() => null);
   const cellsOk = body && Array.isArray(body.cells) && body.cells.every((c) => Array.isArray(c) && c.length === 2 && Number.isInteger(c[0]) && Number.isInteger(c[1]));
-  if (!cellsOk || typeof body.sheet !== 'string' || !Number.isInteger(body.rev)) return error(400, 'bad_body', 'Send JSON with sheet, cells as [[col,row],...] and rev.');
+  // An empty list would move the revision with no cell, and a revision beyond what a whole
+  // number can hold would leave no later one to follow it.
+  if (!cellsOk || body.cells.length === 0 || typeof body.sheet !== 'string' || !Number.isSafeInteger(body.rev) || body.rev < 1) {
+    return error(400, 'bad_body', 'Send JSON with sheet, at least one cell as [[col,row],...] and rev as a whole number.');
+  }
   const r = await markLive(env.DB, body.sheet, body.cells, body.rev, now);
   if (!r.ok) return fail(r);
   await logEvent(env.DB, { at: now, github_id: admin.github_id, login: admin.login, action: 'live', sheet: body.sheet, detail: `${r.live} cells, rev ${body.rev}` });
