@@ -67,7 +67,13 @@ def cmd_cities(args: argparse.Namespace) -> int:
         return 0
     for sheet in _rows(_object(body, "object").get("sheets"), "sheets"):
         fields = _object(sheet, "sheet")
-        print(f"sheet: {fields.get('id')} {fields.get('state')} {fields.get('done')}/{fields.get('total')}")
+        line = f"sheet: {fields.get('id')} {fields.get('state')} {fields.get('done')}/{fields.get('total')}"
+        cols, rows, total = fields.get("cols"), fields.get("rows"), fields.get("total")
+        if fields.get("made") == "grid" and isinstance(cols, int) and isinstance(rows, int) and isinstance(total, int):
+            # A sheet of the tiling counts only the cells someone has taken, so 1/1 would read
+            # as a finished sheet. Every other cell of it can be named and claimed.
+            line += f" taken, {cols * rows - total} more can be claimed"
+        print(line)
     return 0
 
 
@@ -90,12 +96,25 @@ def cmd_grid(args: argparse.Namespace) -> int:
         print(json.dumps(body))
         return 0
     payload = _object(body, "object")
+    cells = _rows(payload.get("cells"), "cells")
     printed = 0
-    for cell in _rows(payload.get("cells"), "cells"):
+    for cell in cells:
         line = _cell_line(cell, args.free)
         if line is not None:
             print(line)
             printed += 1
+    sheet = payload.get("sheet")
+    cols = sheet.get("cols") if isinstance(sheet, dict) else None
+    rows = sheet.get("rows") if isinstance(sheet, dict) else None
+    if isinstance(sheet, dict) and sheet.get("made") == "grid" and isinstance(cols, int) and isinstance(rows, int):
+        # A sheet of the tiling lists only the cells someone has taken. An empty list, or
+        # "free: none", would say the opposite of what is true: the rest can be claimed.
+        print(
+            f"note: {args.sheet} lists only the cells someone has taken, {len(cells)} so far. "
+            f"Any other cell from 0_0 to {cols - 1}_{rows - 1} can be claimed by name: "
+            f"rutor claim {args.sheet} <col>_<row>."
+        )
+        return 0
     if args.free and not printed:
         # An empty answer reads like a failure. Every cell here is on the map or not offered.
         print(f"free: none on {args.sheet}")
@@ -579,10 +598,35 @@ def cmd_render(args: argparse.Namespace) -> int:
     if kind == "google":
         for line in GOOGLE_NOTICE:
             print(f"note: {line}")
-    render_cell(sheet, col, row, out)
+    measured = render_cell(sheet, col, row, out)
     _write_source_info(args.sheet, kind, out)
+    if kind == "google" and sheet.get("made") == "grid" and not args.flat_ok:
+        _refuse_flat(args.sheet, f"{col}_{row}", measured, out)
     print(f"rendered: {args.sheet} {col}_{row} {out}")
     return 0
+
+
+def _refuse_flat(sheet_id: str, cell: str, measured: object, out: Path) -> None:
+    """Stop a cell of a new place where nothing stands up from the ground.
+
+    Google has 3D buildings in some places only. Elsewhere its tiles are a photo laid on the
+    ground, and the redraw of that is a smoothed photo, not a drawn town: the first cell an
+    agent built on its own, in 2026-11, was one. Open water and fields measure the same, so
+    this asks a person rather than deciding. A hand-made sheet is not asked: its cells were
+    picked from a map that is drawn already.
+    """
+    try:
+        share = float(measured.get("rising", "")) if isinstance(measured, dict) else None
+    except ValueError:
+        share = None
+    if share is None or share >= google.FLAT_SHARE:
+        return
+    raise check_failed(
+        f"flat: {share:.0%} of this cell rises above the ground. Either it is open water or fields, "
+        "or Google has no 3D buildings here and the houses are a photo on flat ground, which does not "
+        f"redraw into a drawn town. The picture is {out}. Give the cell back: rutor release {sheet_id} {cell}. "
+        "Only if a person has looked at the picture and wants it drawn: run the render again with --flat-ok."
+    )
 
 
 GOOGLE_NOTICE = (
@@ -631,7 +675,8 @@ def _se3_main() -> Callable[..., int]:
 def _report_pins() -> None:
     unset = [name for name, pin in pipeline.PINS.items() if not pin]
     if unset:
-        print("pin: unset " + ", ".join(unset))
+        # Said so that a reviewer can see it, and worded so that an agent does not stop at it.
+        print("pin: none set for " + ", ".join(unset) + ": nothing to compare, the redraw goes on")
     found: dict[str, str] = {}
     try:
         found["diffusers_version"] = importlib.metadata.version("diffusers")
@@ -972,6 +1017,11 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     render = sub.add_parser("render", help="render one cell to a source PNG")
     render.add_argument("sheet")
     render.add_argument("cell")
+    render.add_argument(
+        "--flat-ok",
+        action="store_true",
+        help="draw a cell of a new place although nothing in it rises above the ground",
+    )
     render.set_defaults(func=cmd_render)
 
     redraw = sub.add_parser("redraw", help="redraw a source PNG into pixel art")

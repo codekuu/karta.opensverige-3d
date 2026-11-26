@@ -27,6 +27,8 @@ python -m pip install -e "cli[render]"
 rutor preflight --machine
 ```
 
+If each of your commands runs in a shell of its own, activating does nothing for the next one. Call the programs by path instead: `.venv/bin/python` and `.venv/bin/rutor`, on Windows `.venv\Scripts\python` and `.venv\Scripts\rutor`.
+
 It prints three lines: `check: python`, `check: gpu` and `check: disk`. It needs no login and nothing heavy installed.
 
 - Any line says `missing`: stop. Tell your human that line. Do not install the model stack on a machine that fails, and do not claim a cell from it. `rutor claim` refuses there anyway.
@@ -34,7 +36,7 @@ It prints three lines: `check: python`, `check: gpu` and `check: disk`. It needs
 
 ## 3. Say what today's cells need, and get a yes
 
-Volunteers draw what is missing. A cell that is already on the map is lit and cannot be taken. A free cell is built-up ground the map has not drawn yet. `rutor cities` lists the sheets as `sheet: <id> <state> <cells on the map>/<all cells>`, so `8156/8156` means nothing is left to take there. `rutor grid <sheet> --free` lists the free cells. A cell is `fri` (free), `last` (locked), `vantar` (waiting for review), `godkand` (approved), `live` (on the map) or `ute` (not offered).
+Volunteers draw what is missing. A cell that is already on the map is lit and cannot be taken. A free cell is built-up ground the map has not drawn yet. `rutor cities` lists the sheets as `sheet: <id> <state> <cells on the map>/<all cells>`, so `8156/8156` means nothing is left to take there. `rutor grid <sheet> --free` lists the free cells. A sheet named like `se-n5602-e1262` is different: it lists only the cells someone has taken, and every other cell of it can be claimed by name. `rutor cities` says so on its line (`0/1 taken, 2913 more can be claimed`), and `rutor grid` ends with a `note:` that says the same. An empty list there does not mean the sheet is closed. A cell is `fri` (free), `last` (locked), `vantar` (waiting for review), `godkand` (approved), `live` (on the map) or `ute` (not offered).
 
 Every sheet but `goteborg-norr` is drawn from Google's 3D tiles: `stockholm-norr`, and the sheet of any place nobody has drawn yet, named like `se-n5602-e1262`. Today every free cell is on such a sheet. `goteborg-norr` has none: what is left there lies beyond the city's own orthophoto, and the renderer has no other open photo yet.
 
@@ -45,6 +47,8 @@ A sheet drawn from Google's tiles asks three things more of your human. Tell the
 - **A choice.** The sheet is drawn from Google's 3D tiles through that account. Google's policy does not allow deriving new content from its tiles. Show them point 10 of TERMS.md. They decide.
 
 Ask whether they want to go on. If they do not, there is no cell to build today: say so, and offer a code change. This holds also when they named the cell or the place themselves.
+
+So a human who wrote only "build cell X" still answers three times before anything is drawn: this choice, the terms in step 4, and the code at GitHub in step 5. Say that at the start, so the questions do not come as a surprise.
 
 ## 4. Show the terms and get a yes
 
@@ -64,20 +68,20 @@ No yes, no login.
    - `python -m pip install -r requirements.txt`
 
    These two lines download about 3 GB. The first redraw downloads about 12 GB of model weights.
-2. For `stockholm-norr`: run `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome, about 1 GB. If `node` is missing or older than 22, ask your human to install Node. Do not install it yourself. When they have, they close and reopen the program you run in, so that your commands find it.
-3. For `stockholm-norr`: your human sets `CESIUM_ION_TOKEN` themselves, where your commands can read it.
+2. For a sheet drawn from Google's tiles: run `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome, about 1 GB. If `node` is missing or older than 22, ask your human to install Node. Do not install it yourself. When they have, they close and reopen the program you run in, so that your commands find it.
+3. For a sheet drawn from Google's tiles: your human sets `CESIUM_ION_TOKEN` themselves, where your commands can read it.
    - Windows: they run `setx CESIUM_ION_TOKEN "<their token>"` in their own PowerShell, then close and reopen the program you run in. A variable set in another window does not reach yours, and a new shell inside a program that was already running does not get it either.
    - Linux: they export it in the shell you run in.
    - Never ask them to paste the token to you, and never read it back.
 4. `rutor login --accept-terms`, only after the yes in step 4. It prints the terms again, then `code:`, `url:` and `waiting:`. Then it keeps running until your human has approved the code, which can take minutes. Start it so that you can read its output while it runs: in the background, or with a time limit of at least 15 minutes. Give the code and the url to your human. Do not stop the command, and do not start a second one. Never open that page or type the code for them.
-5. `rutor preflight --sheet stockholm-norr`. Every line must say `ok`, the lines `check: node`, `check: google renderer` and `check: cesium token` among them. `check: cesium token` asks Cesium ion whether the token works, so `ok` means it does, not only that it is set. `rutor claim` asks again and takes no cell with a token Cesium ion refuses.
+5. `rutor preflight --sheet <sheet>`, with the sheet of the cell you are going to build: `stockholm-norr`, or an id like `se-n5602-e1262`. Every line must say `ok`, the lines `check: node`, `check: google renderer` and `check: cesium token` among them. `check: cesium token` asks Cesium ion whether the token works, so `ok` means it does, not only that it is set. `rutor claim` asks again and takes no cell with a token Cesium ion refuses.
 
 ## 6. Pick a cell
 
 The map of cells is at <https://karta.opensverige.se/pixelbygget>. A free cell is marked `Ledig` there and can be clicked. `Tänd` is a cell that is already on the map.
 
 - Your human named a cell: `rutor claim <sheet> <col>_<row>`.
-- Your human named a place that is not drawn yet, a town, a street or a landmark: run `rutor claim --plats "<the place>"`, for example `rutor claim --plats Eslöv` or `rutor claim --plats "Stortorget Helsingborg"`. It asks OpenStreetMap where that is, prints `found:` with the place it found, and then claims as `--at` does. Check that `found:` is the place your human meant before you build; if it is not, release the cell and ask. A town or a landmark is enough: a cell is 256 metres wide, so do not send your human's home address. If you already have coordinates, `rutor claim --at <lat>,<lon>` does the same without the search, for example `rutor claim --at 56.0465,12.6945`. Both print `place: <sheet> <col>_<row>`, the sheet and cell that place belongs to, and then claims it. A cell may lie anywhere in Sweden where Google has 3D tiles. A new place is drawn from Google's tiles, so everything steps 3 and 5 say about `stockholm-norr` holds for it: the preflight for `stockholm-norr` checks the same three things, and `rutor claim --at` asks them again before it takes a cell.
+- Your human named a place that is not drawn yet, a town, a street or a landmark: run `rutor claim --plats "<the place>"`, for example `rutor claim --plats Eslöv` or `rutor claim --plats "Stortorget Helsingborg"`. It asks OpenStreetMap where that is, prints `found:` with the place it found, and then claims as `--at` does. Check that `found:` is the place your human meant before you build; if it is not, release the cell and ask. A town or a landmark is enough: a cell is 256 metres wide, so do not send your human's home address. If you already have coordinates, `rutor claim --at <lat>,<lon>` does the same without the search, for example `rutor claim --at 56.0465,12.6945`. Both print `place: <sheet> <col>_<row>`, the sheet and cell that place belongs to, and then claims it. A cell may lie anywhere in Sweden where Google has 3D buildings, which is the larger towns and not all of the country. Nothing can tell before the render: `rutor render` measures it and stops a flat cell, as "Stop and tell your human" says. A new place is drawn from Google's tiles, so everything steps 3 and 5 say about `stockholm-norr` holds for it: the preflight for `stockholm-norr` checks the same three things, and `rutor claim --at` asks them again before it takes a cell.
 - Your human said "any", or left it to you: `rutor claim stockholm-norr --next`.
 - It is unclear how many cells: one. Ask before you build more.
 - `refused: taken`: the cell is locked, waiting for review or already on the map. If your human named it, tell them and ask. Otherwise use `--next`.
@@ -123,6 +127,7 @@ Build another cell only if your human asked for more. One at a time. At most fiv
 - A command says `the Google source needs Node 22 or newer`. Ask your human to install Node.
 - A command says `the Google renderer is not installed`. Run `npm ci` in the folder it names.
 - `rutor render` says the Cesium ion quota is used up. Release the cell, or try again tomorrow.
+- `rutor render` says `flat:` and exits 5. Nothing in the cell stands up from the ground: it is open water or fields, or Google has no 3D buildings there, and the houses are a photo on flat ground that does not redraw into a drawn town. Do not redraw it. Release the cell and tell your human, with the picture the line names. `--flat-ok` is for them to ask for after they have looked, not for you to add.
 - The service refuses the same step twice. Report the `error:` line. Do not loop.
 - Exit 4: the network failed. Try once more later, then report it.
 - The redraw fails. Report the last lines. Do not change the redraw to get past it.

@@ -2960,7 +2960,7 @@ class PageFilesTests(unittest.TestCase):
             "missing", "refused", "twice", "no_access", "unreachable", "broken",
             "expired", "network",
             "taken", "machine", "check", "failed", "locks", "waiting", "lock_left",
-            "daily", "old_app", "quota", "token", "old_lock", "denied",
+            "daily", "old_app", "quota", "token", "flat", "old_lock", "denied",
             "memory",
             "busy", "no_cell", "not_ready", "terms", "none_free",
         )
@@ -2992,7 +2992,7 @@ class PageFilesTests(unittest.TestCase):
         for said in ("bekostnad och risk", "för forskning och utvärdering, inte kommersiellt", "Google kan stänga din åtkomst"):
             self.assertIn(said, page)
         # No "try again" where it would get the same answer.
-        self.assertIn('!["taken", "daily", "old_app"].includes(j.problem)', script)
+        self.assertIn('!["taken", "daily", "old_app", "flat"].includes(j.problem)', script)
         # A cell that waits is said to wait, and where it shows.
         self.assertIn("Tills dess syns den som Väntar.", page)
         # And is thanked: every cell is welcome, also one that is not perfect.

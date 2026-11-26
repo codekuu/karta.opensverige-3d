@@ -48,6 +48,17 @@ LIGHT_ENU = (-0.45, -0.55, -0.7)
 LIGHT_INTENSITY = 2.2
 # A render with less spread than this is the black background: no tiles arrived.
 MIN_SPREAD = 4.0
+
+# Telling a place with 3D buildings from a photo on flat ground. render.mjs reads the height of
+# the picture's surface on a grid of points, 16 m apart on the screen. A point "rises" when it
+# lies more than RISE_M above the lowest point within RISE_REACH steps of it: a roof or a crown
+# beside a street does, a gentle slope does not. Measured 2026-11-26 on nine cells: where Google has
+# buildings and trees as shapes, 38 to 80 % of the points rise; open water, fields and a town
+# Google has only a photo of, 0 to 3 %.
+HEIGHT_GRID = 24
+RISE_M = 3.0
+RISE_REACH = 2
+FLAT_SHARE = 0.10
 NODE_TIMEOUT = 900
 # Where Cesium ion says whether a token may read the asset. The render asks the same address.
 ION_ENDPOINT = f"https://api.cesium.com/v1/assets/{ION_ASSET}/endpoint"
@@ -282,6 +293,29 @@ def not_ready(
     return token_missing(env) or node_missing(which, run, env) or renderer_missing(render_dir) or token_refused(env, ask)
 
 
+def rising_share(heights: object) -> float | None:
+    """The share of the measured points that rise above the ground beside them. None: not measured."""
+    count = HEIGHT_GRID * HEIGHT_GRID
+    if not isinstance(heights, list) or len(heights) != count:
+        return None
+    values: list[float] = []
+    for height in heights:
+        if isinstance(height, bool) or not isinstance(height, (int, float)) or not math.isfinite(height):
+            return None
+        values.append(float(height))
+    rising = 0
+    for j in range(HEIGHT_GRID):
+        for i in range(HEIGHT_GRID):
+            lowest = min(
+                values[y * HEIGHT_GRID + x]
+                for y in range(max(0, j - RISE_REACH), min(HEIGHT_GRID, j + RISE_REACH + 1))
+                for x in range(max(0, i - RISE_REACH), min(HEIGHT_GRID, i + RISE_REACH + 1))
+            )
+            if values[j * HEIGHT_GRID + i] - lowest > RISE_M:
+                rising += 1
+    return rising / count
+
+
 def _save_rgb(raw: bytes, out: Path) -> None:
     try:
         import numpy as np
@@ -346,4 +380,8 @@ def render_google(
         reported = {}
     if not isinstance(reported, dict):
         reported = {}
-    return {str(key): str(value) for key, value in reported.items()}
+    said = {str(key): str(value) for key, value in reported.items() if key != "heights"}
+    share = rising_share(reported.get("heights"))
+    if share is not None:
+        said["rising"] = f"{share:.3f}"
+    return said

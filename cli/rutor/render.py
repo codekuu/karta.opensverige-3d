@@ -74,7 +74,7 @@ def camera_for(
     }
 
 
-def render_cell(sheet: dict[str, object], col: int, row: int, out: Path) -> None:
+def render_cell(sheet: dict[str, object], col: int, row: int, out: Path) -> dict[str, str]:
     from rutor import renderer
     from rutor.renderer import google
     from rutor.renderer.sources import kind_of
@@ -83,6 +83,7 @@ def render_cell(sheet: dict[str, object], col: int, row: int, out: Path) -> None
     if not isinstance(sheet_id, str) or not sheet_id:
         raise bad_input("sheet is missing id")
     if kind_of(sheet) == "google":
-        google.render_google(sheet, col, row, out)
-    else:
-        renderer.render(sheet, col, row, out)
+        # What the Google renderer measured comes back with the picture: "rising" among it.
+        return google.render_google(sheet, col, row, out) or {}
+    renderer.render(sheet, col, row, out)
+    return {}

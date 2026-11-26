@@ -80,6 +80,36 @@
     throw new Error("the tiles did not finish loading within " + TILE_WAIT_MS / 1000 + " s");
   }
 
+  /* How high the picture's surface lies, on a grid of HEIGHT_GRID x HEIGHT_GRID points, read
+     from the depth of the frame that was just drawn. rutor uses it to tell a place where
+     Google has 3D buildings from one where the houses are a photo on flat ground. Null where
+     nothing can be read: the caller then leaves the question open. */
+  const HEIGHT_GRID = 24;
+
+  function surfaceHeights(viewer) {
+    const scene = viewer.scene;
+    const canvas = viewer.canvas;
+    if (!scene.pickPositionSupported) return null;
+    const heights = [];
+    for (let j = 0; j < HEIGHT_GRID; j += 1) {
+      for (let i = 0; i < HEIGHT_GRID; i += 1) {
+        const at = new Cesium.Cartesian2(
+          ((i + 0.5) * canvas.width) / HEIGHT_GRID,
+          ((j + 0.5) * canvas.height) / HEIGHT_GRID,
+        );
+        let hit;
+        try {
+          hit = scene.pickPosition(at);
+        } catch (error) {
+          return null;
+        }
+        if (!hit) return null;
+        heights.push(Math.round(Cesium.Cartographic.fromCartesian(hit).height * 10) / 10);
+      }
+    }
+    return heights;
+  }
+
   window.renderCell = async function renderCell(config) {
     const probe = document.createElement("canvas");
     if (!probe.getContext("webgl2")) {
@@ -140,6 +170,7 @@
       width: viewer.canvas.width,
       height: viewer.canvas.height,
       tiles: tiles,
+      heights: surfaceHeights(viewer),
       cesium: Cesium.VERSION,
       heading: Cesium.Math.toDegrees(viewer.camera.heading),
       pitch: Cesium.Math.toDegrees(viewer.camera.pitch),

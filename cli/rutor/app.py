@@ -454,6 +454,7 @@ _SAID_WHY = (
     ("quota is used up", "quota"),
     ("refused the token", "token"),
     ("did not let this token", "token"),
+    ("flat: ", "flat"),
 )
 
 # How long a stop waits for an upload to end by itself before the upload is ended too.

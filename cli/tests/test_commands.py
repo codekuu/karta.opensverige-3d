@@ -94,6 +94,30 @@ class CommandTests(_ServiceCase):
         self.assertTrue(raw.strip().startswith("{"))
         self.assertIn("goteborg-norr", raw)
 
+    def test_a_sheet_of_the_tiling_says_how_many_more_cells_can_be_claimed(self) -> None:
+        self.svc.state["sheets"] = {
+            "se-n5557-e1412": {
+                "id": "se-n5557-e1412", "state": "open", "done": 0, "total": 1, "cols": 62, "rows": 47, "made": "grid",
+            },
+        }
+        code, out, _err = self.run_cmd(["cities"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "sheet: se-n5557-e1412 open 0/1 taken, 2913 more can be claimed\n")
+
+    def test_grid_on_a_sheet_of_the_tiling_never_reads_as_closed(self) -> None:
+        self.open_sheet({"goteborg-norr/32_4": _cell(32, 4, "vantar", "klang")}, made="grid", cols=62, rows=47)
+        note = (
+            "note: goteborg-norr lists only the cells someone has taken, 1 so far. "
+            "Any other cell from 0_0 to 61_46 can be claimed by name: rutor claim goteborg-norr <col>_<row>.\n"
+        )
+        code, out, _err = self.run_cmd(["grid", "goteborg-norr"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "cell: 32_4 vantar klang\n" + note)
+        code, out, _err = self.run_cmd(["grid", "goteborg-norr", "--free"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out, note)
+        self.assertNotIn("free: none", out)
+
     def test_grid_free_filter(self) -> None:
         self.open_sheet(
             {
@@ -366,6 +390,42 @@ class SourceFromTheServiceTests(_ServiceCase):
         self.assertIn("note: This sheet is drawn from Google Photorealistic 3D Tiles", out)
         info = json.loads((Path(self.tmp.name) / "work" / NEW_SHEET / "3_4.src.json").read_text(encoding="utf-8"))
         self.assertTrue(info["provider"].startswith("Google Photorealistic 3D Tiles"), info)
+
+    def _render_measuring(self, rising: str, argv: list[str], **sheet: object) -> tuple[int, str, str]:
+        self.put(_new_sheet(**sheet))
+
+        def fake_google(sheet: dict[str, object], col: int, row: int, out: Path) -> dict[str, str]:
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            Path(out).write_bytes(minimal_png(1536, 1536))
+            return {"tiles": "186", "rising": rising}
+
+        with patch.object(google, "render_google", side_effect=fake_google):
+            return self.run_cmd(argv)
+
+    def test_a_flat_cell_of_a_new_place_is_stopped_and_the_picture_is_kept(self) -> None:
+        code, out, err = self._render_measuring("0.000", ["render", NEW_SHEET, "3_4"])
+        self.assertEqual(code, 5)
+        self.assertNotIn("rendered:", out)
+        self.assertIn("error: flat: 0% of this cell rises above the ground.", err)
+        self.assertIn(f"rutor release {NEW_SHEET} 3_4", err)
+        self.assertIn("--flat-ok", err)
+        self.assertTrue((Path(self.tmp.name) / "work" / NEW_SHEET / "3_4.src.png").exists())
+
+    def test_a_person_who_has_looked_can_have_a_flat_cell_drawn(self) -> None:
+        code, out, err = self._render_measuring("0.000", ["render", NEW_SHEET, "3_4", "--flat-ok"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"rendered: {NEW_SHEET} 3_4", out)
+
+    def test_a_cell_with_buildings_that_stand_up_is_rendered(self) -> None:
+        code, out, err = self._render_measuring("0.380", ["render", NEW_SHEET, "3_4"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"rendered: {NEW_SHEET} 3_4", out)
+
+    def test_a_hand_made_sheet_is_not_asked_about_flat_cells(self) -> None:
+        # Open water in Stockholm is flat and is meant to be drawn: its cells were picked by hand.
+        code, out, err = self._render_measuring("0.000", ["render", NEW_SHEET, "3_4"], made="hand")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"rendered: {NEW_SHEET} 3_4", out)
 
     def test_a_sheet_with_no_source_is_not_claimed(self) -> None:
         self.put(_new_sheet(kind=None))

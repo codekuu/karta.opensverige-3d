@@ -2,6 +2,32 @@
 
 What we tried, what we measured and what we changed. Newest first. One entry per finding, with the number that decided it. Images, renders and raw logs stay outside the repository; this file keeps the conclusions.
 
+## 2026-11-26
+
+### A flat cell is measured and stopped at the render
+The cell below came out as a photo on flat ground. The same day the renderer learned to see that. Measured on the test PC on nine cells: two near that town, two in Helsingborg, five in Stockholm.
+- **Google's tile tree says nothing.** Every cell, flat or not, selected tiles down to depth 25 with a smallest geometric error of 2.006. Where Google has no buildings the tiles are as deep, with a photo on smooth ground.
+- **The height of the surface says it.** On 24 x 24 points of the drawn frame, the share that lies more than 3 m above the lowest point within two steps (32 m on the screen): 38, 59, 64, 77 and 80 % where buildings and trees are shapes; 0, 0, 0 and 3 % for the flat town, a field beside it, open sea at Helsingborg and open water in Stockholm. The limit is 10 %.
+- **Open water measures as the flat town does.** So the render does not decide: on a sheet of the tiling it stops with `flat:` and exit 5, keeps the picture, and `--flat-ok` draws the cell after a person has looked. A hand-made sheet is not asked, since its cells were picked from a drawn map.
+- **`Cesium3DTileset.pick` gave heights 15 km under the ground in Helsingborg.** All 576 rays there hit one plane, with a selected tile of geometric error 262 979 in the set. In the other eight cells the same call was right. `scene.pickPosition`, which reads the depth of the frame, was right in all nine and took 0.17 s for the 576 points; `scene.sampleHeight` agreed and took 1.2 s.
+- **A steep hill counts as rising.** More than 3 m in 32 m is about 9 % of slope. That errs towards drawing the cell.
+- **The headless Chrome draws on the PC's built-in AMD card,** not the NVIDIA one: the `gl` line says so. The render still takes under 20 seconds.
+- **Tried for real:** the flat cell is refused with `flat: 0%`, and Helsingborg 47_16 on a sheet of the tiling renders as before.
+- **Not solved:** nothing says it before the lock. The lock is held for the 20 seconds the render takes and then given back by hand. And the flat cell that was uploaded before this still waits for review.
+
+### An agent given one sentence built a cell from a fresh clone
+On 2026-11-26 an agent got only this: clone the repository, read AGENTS.md, build `se-n5557-e1412 32_4`. It ran on the test PC (RTX 5070, 12 GB) in a new folder, from main at 1dd86b0, and followed AGENTS.md step by step. The cell was uploaded and waits for review.
+- **The procedure held.** No step needed a guess or a way around. About ten minutes from clone to upload: the render under 20 seconds, the redraw 2.5 minutes, the rest installs.
+- **The picture came out flat.** The source render looks like an aerial photo seen straight down, with no height on the houses, and the redraw is a smoothed, greener photo more than pixel art. `check: ok` let it through. This fits the guess in the entry of 2026-11-25 that a place without Google 3D buildings gives flat ground with a photo on it. Whether Google has no 3D buildings there was not looked up.
+- **The check cannot tell a flat cell from a drawn one.** Nothing between the claim and the review says so either. The reviewer is the only stop.
+- **A sheet nobody has drawn on looks closed before the claim.** `rutor grid <sheet>` prints nothing and exits 0, `--free` says `free: none`, and `rutor cities` does not list the sheet. The claim of the named cell then works. A careful agent could stop at `free: none` and tell its human the cell cannot be taken.
+- **The one sentence still means three answers from the human:** the choice about Google's tiles, the terms, and the code at GitHub. That is as intended, but a text that hands people the sentence should say so.
+- **An expired login says what to do.** The PC had a login from days before: `refused: bad_token ... Log in again: rutor login`. Nothing else was needed.
+- **Two printed lines read as faults and are not:** `pin: unset diffusers_version` at the start of the redraw, and torch's `triton not found` warning in the preflight and the redraw.
+- **Small things in AGENTS.md.** Step 5 says `rutor preflight --sheet stockholm-norr` also for another sheet; the sheet's own id works there. `Activate.ps1` does nothing for an agent whose every command is a new shell; it called `.venv\Scripts\rutor` by path.
+- **Fixed in the same branch:** `rutor cities` and `rutor grid` say that every other cell of such a sheet can be claimed; the pin line says the redraw goes on; torch's triton warning is silenced by its logger's level, set before torch is imported; AGENTS.md names the sheet in the preflight, says how to call the programs without activating, and that a named cell takes three answers.
+- **Not tried:** a machine without Node, without a Cesium token and without the weights. All three were already on the PC, so the 16 GB of downloads, the Cesium account and `setx` with a restart of the program were not walked through.
+
 ## 2026-11-25
 
 ### Draw anywhere: the service and the CLI for a cell in any place
