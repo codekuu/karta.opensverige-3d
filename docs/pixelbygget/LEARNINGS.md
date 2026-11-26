@@ -2,6 +2,20 @@
 
 What we tried, what we measured and what we changed. Newest first. One entry per finding, with the number that decided it. Images, renders and raw logs stay outside the repository; this file keeps the conclusions.
 
+## 2026-11-26
+
+### An agent given one sentence built a cell from a fresh clone
+On 2026-11-26 an agent got only this: clone the repository, read AGENTS.md, build `se-n5557-e1412 32_4`. It ran on the test PC (RTX 5070, 12 GB) in a new folder, from main at 1dd86b0, and followed AGENTS.md step by step. The cell was uploaded and waits for review.
+- **The procedure held.** No step needed a guess or a way around. About ten minutes from clone to upload: the render under 20 seconds, the redraw 2.5 minutes, the rest installs.
+- **The picture came out flat.** The source render looks like an aerial photo seen straight down, with no height on the houses, and the redraw is a smoothed, greener photo more than pixel art. `check: ok` let it through. This fits the guess in the entry of 2026-11-25 that a place without Google 3D buildings gives flat ground with a photo on it. Whether Google has no 3D buildings there was not looked up.
+- **The check cannot tell a flat cell from a drawn one.** Nothing between the claim and the review says so either. The reviewer is the only stop.
+- **A sheet nobody has drawn on looks closed before the claim.** `rutor grid <sheet>` prints nothing and exits 0, `--free` says `free: none`, and `rutor cities` does not list the sheet. The claim of the named cell then works. A careful agent could stop at `free: none` and tell its human the cell cannot be taken.
+- **The one sentence still means three answers from the human:** the choice about Google's tiles, the terms, and the code at GitHub. That is as intended, but a text that hands people the sentence should say so.
+- **An expired login says what to do.** The PC had a login from days before: `refused: bad_token ... Log in again: rutor login`. Nothing else was needed.
+- **Two printed lines read as faults and are not:** `pin: unset diffusers_version` at the start of the redraw, and torch's `triton not found` warning in the preflight and the redraw.
+- **Small things in AGENTS.md.** Step 5 says `rutor preflight --sheet stockholm-norr` also for another sheet; the sheet's own id works there. `Activate.ps1` does nothing for an agent whose every command is a new shell; it called `.venv\Scripts\rutor` by path.
+- **Not tried:** a machine without Node, without a Cesium token and without the weights. All three were already on the PC, so the 16 GB of downloads, the Cesium account and `setx` with a restart of the program were not walked through.
+
 ## 2026-11-25
 
 ### Draw anywhere: the service and the CLI for a cell in any place
