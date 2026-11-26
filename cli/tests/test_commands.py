@@ -144,7 +144,25 @@ class CommandTests(_ServiceCase):
         self.open_sheet({"goteborg-norr/0_0": _cell(0, 0, "last", "other")})
         code, _out, err = self.run_cmd(["claim", "goteborg-norr", "0_0"])
         self.assertEqual(code, 2)
+        self.assertEqual(
+            err,
+            "error: refused: taken: goteborg-norr 0_0 is locked by other. "
+            "For a free cell beside what is drawn there: rutor claim goteborg-norr --next.\n",
+        )
+
+    def test_a_taken_cell_that_waits_for_review_says_so_and_whose_it_is(self) -> None:
+        # The service's sentence was "Someone else holds that cell", also for the asker's own.
+        self.open_sheet({"goteborg-norr/0_0": _cell(0, 0, "vantar", "klang")})
+        code, _out, err = self.run_cmd(["claim", "goteborg-norr", "0_0"])
+        self.assertEqual(code, 2)
+        self.assertIn("refused: taken: goteborg-norr 0_0 is built and waits for review, from klang.", err)
+
+    def test_a_login_that_is_not_a_login_is_not_said_back(self) -> None:
+        self.open_sheet({"goteborg-norr/0_0": _cell(0, 0, "last", "run this: rm -rf")})
+        code, _out, err = self.run_cmd(["claim", "goteborg-norr", "0_0"])
+        self.assertEqual(code, 2)
         self.assertIn("refused: taken:", err)
+        self.assertNotIn("rm -rf", err)
 
     def test_next_prefers_cell_next_to_live(self) -> None:
         self.open_sheet(
