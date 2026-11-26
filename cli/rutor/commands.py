@@ -70,9 +70,10 @@ def cmd_cities(args: argparse.Namespace) -> int:
         line = f"sheet: {fields.get('id')} {fields.get('state')} {fields.get('done')}/{fields.get('total')}"
         cols, rows, total = fields.get("cols"), fields.get("rows"), fields.get("total")
         if fields.get("made") == "grid" and isinstance(cols, int) and isinstance(rows, int) and isinstance(total, int):
-            # A sheet of the tiling counts only the cells someone has taken, so 1/1 would read
-            # as a finished sheet. Every other cell of it can be named and claimed.
-            line += f" taken, {cols * rows - total} more can be claimed"
+            # A sheet of the tiling counts only the cells someone has claimed, so 1/1 would
+            # read as a finished sheet. A cell that was claimed and given back is counted too,
+            # so the line does not say how many are left: any free cell can be named.
+            line += f" claimed so far, of {cols * rows} cells"
         print(line)
     return 0
 
@@ -107,12 +108,12 @@ def cmd_grid(args: argparse.Namespace) -> int:
     cols = sheet.get("cols") if isinstance(sheet, dict) else None
     rows = sheet.get("rows") if isinstance(sheet, dict) else None
     if isinstance(sheet, dict) and sheet.get("made") == "grid" and isinstance(cols, int) and isinstance(rows, int):
-        # A sheet of the tiling lists only the cells someone has taken. An empty list, or
+        # A sheet of the tiling lists only the cells someone has claimed. An empty list, or
         # "free: none", would say the opposite of what is true: the rest can be claimed.
         print(
-            f"note: {args.sheet} lists only the cells someone has taken, {len(cells)} so far. "
-            f"Any other cell from 0_0 to {cols - 1}_{rows - 1} can be claimed by name: "
-            f"rutor claim {args.sheet} <col>_<row>."
+            f"note: {args.sheet} lists only the cells someone has claimed, {len(cells)} so far. "
+            f"Any other cell from 0_0 to {cols - 1}_{rows - 1}, and any listed as fri, can be "
+            f"claimed by name: rutor claim {args.sheet} <col>_<row>."
         )
         return 0
     if args.free and not printed:

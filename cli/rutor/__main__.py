@@ -59,12 +59,14 @@ def _open_pipes() -> None:
 
 
 def _quiet_torch() -> None:
-    """Keep torch from saying `triton not found` each time it is imported.
+    """Keep torch from saying two things each time it is imported.
 
-    Triton does not exist for Windows and nothing here uses it, but the line reads as a fault
-    to whoever follows the output. Naming a logger loads nothing: torch stays unimported.
+    `triton not found` and `Redirects are currently not supported in Windows or MacOs`: nothing
+    here uses either, but each line reads as a fault to whoever follows the output. Naming a
+    logger loads nothing: torch stays unimported.
     """
-    logging.getLogger("torch.utils.flop_counter").setLevel(logging.ERROR)
+    for name in ("torch.utils.flop_counter", "torch.distributed.elastic.multiprocessing.redirects"):
+        logging.getLogger(name).setLevel(logging.ERROR)
 
 
 def _reader_stopped() -> int:

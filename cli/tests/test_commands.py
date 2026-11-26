@@ -102,13 +102,13 @@ class CommandTests(_ServiceCase):
         }
         code, out, _err = self.run_cmd(["cities"])
         self.assertEqual(code, 0)
-        self.assertEqual(out, "sheet: se-n5557-e1412 open 0/1 taken, 2913 more can be claimed\n")
+        self.assertEqual(out, "sheet: se-n5557-e1412 open 0/1 claimed so far, of 2914 cells\n")
 
     def test_grid_on_a_sheet_of_the_tiling_never_reads_as_closed(self) -> None:
         self.open_sheet({"goteborg-norr/32_4": _cell(32, 4, "vantar", "klang")}, made="grid", cols=62, rows=47)
         note = (
-            "note: goteborg-norr lists only the cells someone has taken, 1 so far. "
-            "Any other cell from 0_0 to 61_46 can be claimed by name: rutor claim goteborg-norr <col>_<row>.\n"
+            "note: goteborg-norr lists only the cells someone has claimed, 1 so far. Any other cell "
+            "from 0_0 to 61_46, and any listed as fri, can be claimed by name: rutor claim goteborg-norr <col>_<row>.\n"
         )
         code, out, _err = self.run_cmd(["grid", "goteborg-norr"])
         self.assertEqual(code, 0)
