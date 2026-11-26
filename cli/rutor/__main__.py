@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from collections.abc import Callable, Sequence
@@ -57,6 +58,15 @@ def _open_pipes() -> None:
                 pass
 
 
+def _quiet_torch() -> None:
+    """Keep torch from saying `triton not found` each time it is imported.
+
+    Triton does not exist for Windows and nothing here uses it, but the line reads as a fault
+    to whoever follows the output. Naming a logger loads nothing: torch stays unimported.
+    """
+    logging.getLogger("torch.utils.flop_counter").setLevel(logging.ERROR)
+
+
 def _reader_stopped() -> int:
     """Whoever read the output stopped reading, as `| head` does. That is not a fault.
 
@@ -72,6 +82,7 @@ def _reader_stopped() -> int:
 
 def main(argv: list[str] | None = None, registrars: Sequence[Registrar] | None = None) -> int:
     _open_pipes()
+    _quiet_torch()
     parser = argparse.ArgumentParser(prog="rutor")
     parser.add_argument("--version", action="store_true", help="print the version and exit")
     sub = parser.add_subparsers(dest="command")

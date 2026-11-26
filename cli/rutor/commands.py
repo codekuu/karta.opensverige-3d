@@ -67,7 +67,13 @@ def cmd_cities(args: argparse.Namespace) -> int:
         return 0
     for sheet in _rows(_object(body, "object").get("sheets"), "sheets"):
         fields = _object(sheet, "sheet")
-        print(f"sheet: {fields.get('id')} {fields.get('state')} {fields.get('done')}/{fields.get('total')}")
+        line = f"sheet: {fields.get('id')} {fields.get('state')} {fields.get('done')}/{fields.get('total')}"
+        cols, rows, total = fields.get("cols"), fields.get("rows"), fields.get("total")
+        if fields.get("made") == "grid" and isinstance(cols, int) and isinstance(rows, int) and isinstance(total, int):
+            # A sheet of the tiling counts only the cells someone has taken, so 1/1 would read
+            # as a finished sheet. Every other cell of it can be named and claimed.
+            line += f" taken, {cols * rows - total} more can be claimed"
+        print(line)
     return 0
 
 
@@ -90,12 +96,25 @@ def cmd_grid(args: argparse.Namespace) -> int:
         print(json.dumps(body))
         return 0
     payload = _object(body, "object")
+    cells = _rows(payload.get("cells"), "cells")
     printed = 0
-    for cell in _rows(payload.get("cells"), "cells"):
+    for cell in cells:
         line = _cell_line(cell, args.free)
         if line is not None:
             print(line)
             printed += 1
+    sheet = payload.get("sheet")
+    cols = sheet.get("cols") if isinstance(sheet, dict) else None
+    rows = sheet.get("rows") if isinstance(sheet, dict) else None
+    if isinstance(sheet, dict) and sheet.get("made") == "grid" and isinstance(cols, int) and isinstance(rows, int):
+        # A sheet of the tiling lists only the cells someone has taken. An empty list, or
+        # "free: none", would say the opposite of what is true: the rest can be claimed.
+        print(
+            f"note: {args.sheet} lists only the cells someone has taken, {len(cells)} so far. "
+            f"Any other cell from 0_0 to {cols - 1}_{rows - 1} can be claimed by name: "
+            f"rutor claim {args.sheet} <col>_<row>."
+        )
+        return 0
     if args.free and not printed:
         # An empty answer reads like a failure. Every cell here is on the map or not offered.
         print(f"free: none on {args.sheet}")
@@ -631,7 +650,8 @@ def _se3_main() -> Callable[..., int]:
 def _report_pins() -> None:
     unset = [name for name, pin in pipeline.PINS.items() if not pin]
     if unset:
-        print("pin: unset " + ", ".join(unset))
+        # Said so that a reviewer can see it, and worded so that an agent does not stop at it.
+        print("pin: none set for " + ", ".join(unset) + ": nothing to compare, the redraw goes on")
     found: dict[str, str] = {}
     try:
         found["diffusers_version"] = importlib.metadata.version("diffusers")

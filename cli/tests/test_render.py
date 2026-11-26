@@ -693,7 +693,7 @@ class RenderTests(unittest.TestCase):
             _restore_pil(previous[0], previous[1])
         self.assertEqual(err, "")
         self.assertEqual(code, 0)
-        self.assertIn("pin: unset", out)
+        self.assertIn("pin: none set for", out)
         self.assertEqual(
             seen["prompt"],
             "Repaint this 3D map render as mndfstyle isometric pixel-art map of "

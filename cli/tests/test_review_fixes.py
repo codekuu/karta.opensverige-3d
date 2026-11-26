@@ -576,7 +576,10 @@ class PinTests(unittest.TestCase):
             redirect_stdout(stdout),
         ):
             commands._report_pins()
-        self.assertIn("pin: unset model_revision, lora_revision, diffusers_version", stdout.getvalue())
+        self.assertIn(
+            "pin: none set for model_revision, lora_revision, diffusers_version: nothing to compare, the redraw goes on",
+            stdout.getvalue(),
+        )
 
     def test_a_diffusers_pin_that_differs_is_exit_3(self) -> None:
         with (
