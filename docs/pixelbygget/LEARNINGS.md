@@ -2,6 +2,17 @@
 
 What we tried, what we measured and what we changed. Newest first. One entry per finding, with the number that decided it. Images, renders and raw logs stay outside the repository; this file keeps the conclusions.
 
+## 2026-11-27
+
+### The same test again, from main with the fixes in
+An agent built from a fresh clone of main at 695d98c on the test PC, twice: a named cell beside the flat one, and "build a cell in Lund".
+- **The flat cell was stopped and given back.** `se-n5557-e1412 33_4`: claimed, `flat: 0%` at the render, released as the line said, `locks: 0`. Nothing was uploaded.
+- **A place name was enough.** `rutor claim --plats Lund` said `found: Lund, Lunds kommun, Skåne län, Sverige` and took `se-n5572-e1312 47_30`. It passed the flat check and came out drawn, the cathedral in it. The human answered nothing between the sentence and the upload: the login from the day before still held, in a new clone.
+- **A cell that was given back is counted.** The sheet said `0/2 taken, 2912 more can be claimed` with one cell taken and one released. The service's `total` is the cells with a row. The lines now say `claimed so far, of 2914 cells`, and the note on `rutor grid` names the cells listed as `fri`.
+- **torch has a second line that reads as a fault,** `Redirects are currently not supported in Windows or MacOs`, from `torch.distributed.elastic.multiprocessing.redirects`. Quieted the same way as the first.
+- **Through a pipe the redraw printed hundreds of lines of bars for loading the model.** They are diffusers' and transformers' own; both have `disable_progress_bar`. They are off when standard error is not a terminal. The redraw of the same cell then printed 39 lines: the pin line, the windows, `redrawn:` and `check: ok`. The bars of the first download are huggingface_hub's and were left.
+- **Not tried, still:** a machine without Node, a Cesium token and the weights.
+
 ## 2026-11-26
 
 ### A flat cell is measured and stopped at the render

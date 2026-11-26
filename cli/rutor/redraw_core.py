@@ -6,6 +6,7 @@ pad, encode, denoise, decode and crop, without a cell, a claim or a file.
 
 from __future__ import annotations
 
+import importlib
 import sys
 
 from rutor.errors import environment
@@ -105,9 +106,27 @@ def preflight_message() -> str | None:
     del bitsandbytes
     return None
 
+def _quiet_loading_bars() -> None:
+    """Keep the bars for loading the model off a pipe.
+
+    Read through a pipe, as an agent or the app page reads, each tick of a bar is a line of
+    its own: hundreds of them around the few that say something. A person at a terminal keeps
+    them, and the bars of the first download are huggingface_hub's own and are left alone.
+    """
+    if sys.stderr.isatty():
+        return
+    for name in ("diffusers.utils.logging", "transformers.utils.logging"):
+        try:
+            getattr(importlib.import_module(name), "disable_progress_bar")()
+        except (ImportError, AttributeError):
+            continue
+
+
 def _load_pipe():
     import torch
     from diffusers import QwenImage21Pipeline
+
+    _quiet_loading_bars()
 
     # Safetensors only: a pickle file runs code when it is loaded, a safetensors file cannot.
     kwargs = {"low_cpu_mem_usage": True, "use_safetensors": True}

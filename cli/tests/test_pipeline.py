@@ -37,3 +37,35 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(pad_size(1536), 1536)
         self.assertEqual(len(get_views(1536, 1536)), 4)
         self.assertEqual(len(window_token_indices(1536, 1536, 0, 0, window=1024, scale=16)), 4096)
+
+
+class LoadingBarTests(unittest.TestCase):
+    """Read through a pipe, the bars for loading the model are hundreds of lines."""
+
+    def _run(self, terminal: bool) -> list[str]:
+        import sys
+        import types
+        from unittest.mock import patch
+
+        from rutor import redraw_core
+
+        asked: list[str] = []
+        fakes = {}
+        for name in ("diffusers.utils.logging", "transformers.utils.logging"):
+            module = types.ModuleType(name)
+            setattr(module, "disable_progress_bar", lambda name=name: asked.append(name))
+            fakes[name] = module
+
+        class _Stream:
+            def isatty(self) -> bool:
+                return terminal
+
+        with patch.dict(sys.modules, fakes), patch.object(redraw_core.sys, "stderr", _Stream()):
+            redraw_core._quiet_loading_bars()
+        return asked
+
+    def test_a_pipe_gets_no_loading_bars(self) -> None:
+        self.assertEqual(self._run(terminal=False), ["diffusers.utils.logging", "transformers.utils.logging"])
+
+    def test_a_person_at_a_terminal_keeps_them(self) -> None:
+        self.assertEqual(self._run(terminal=True), [])
