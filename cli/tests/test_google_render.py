@@ -304,3 +304,28 @@ class GoogleSourceInfoTests(ServiceCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RisingShareTests(unittest.TestCase):
+    """Telling a place with 3D buildings from a photo laid on flat ground."""
+
+    def test_flat_ground_has_nothing_rising(self) -> None:
+        self.assertEqual(google.rising_share([12.0] * 576), 0.0)
+
+    def test_a_gentle_slope_is_not_a_building(self) -> None:
+        # Half a metre a step each way is 4 % of slope at 16 m between the points. A steeper
+        # hill does count as rising, which errs towards drawing the cell.
+        slope = [0.5 * (i + j) for j in range(24) for i in range(24)]
+        self.assertEqual(google.rising_share(slope), 0.0)
+
+    def test_roofs_beside_streets_rise(self) -> None:
+        town = [20.0 if (i // 2 + j // 2) % 2 else 10.0 for j in range(24) for i in range(24)]
+        share = google.rising_share(town)
+        assert share is not None
+        self.assertAlmostEqual(share, 0.5)
+        self.assertGreater(share, google.FLAT_SHARE)
+
+    def test_what_was_not_measured_is_not_guessed(self) -> None:
+        for heights in (None, [], [1.0] * 575, [1.0] * 575 + [None], [1.0] * 575 + ["x"], [1.0] * 575 + [float("nan")]):
+            with self.subTest(heights=str(heights)[:20]):
+                self.assertIsNone(google.rising_share(heights))

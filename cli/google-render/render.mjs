@@ -171,6 +171,7 @@ async function main() {
       JSON.stringify({
         cesium: result.cesium,
         tiles: result.tiles,
+        heights: result.heights,
         gl,
         heading: result.heading.toFixed(3),
         pitch: result.pitch.toFixed(3),

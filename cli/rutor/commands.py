@@ -598,10 +598,35 @@ def cmd_render(args: argparse.Namespace) -> int:
     if kind == "google":
         for line in GOOGLE_NOTICE:
             print(f"note: {line}")
-    render_cell(sheet, col, row, out)
+    measured = render_cell(sheet, col, row, out)
     _write_source_info(args.sheet, kind, out)
+    if kind == "google" and sheet.get("made") == "grid" and not args.flat_ok:
+        _refuse_flat(args.sheet, f"{col}_{row}", measured, out)
     print(f"rendered: {args.sheet} {col}_{row} {out}")
     return 0
+
+
+def _refuse_flat(sheet_id: str, cell: str, measured: object, out: Path) -> None:
+    """Stop a cell of a new place where nothing stands up from the ground.
+
+    Google has 3D buildings in some places only. Elsewhere its tiles are a photo laid on the
+    ground, and the redraw of that is a smoothed photo, not a drawn town: the first cell an
+    agent built on its own, in 2026-11, was one. Open water and fields measure the same, so
+    this asks a person rather than deciding. A hand-made sheet is not asked: its cells were
+    picked from a map that is drawn already.
+    """
+    try:
+        share = float(measured.get("rising", "")) if isinstance(measured, dict) else None
+    except ValueError:
+        share = None
+    if share is None or share >= google.FLAT_SHARE:
+        return
+    raise check_failed(
+        f"flat: {share:.0%} of this cell rises above the ground. Either it is open water or fields, "
+        "or Google has no 3D buildings here and the houses are a photo on flat ground, which does not "
+        f"redraw into a drawn town. The picture is {out}. Give the cell back: rutor release {sheet_id} {cell}. "
+        "Only if a person has looked at the picture and wants it drawn: run the render again with --flat-ok."
+    )
 
 
 GOOGLE_NOTICE = (
@@ -992,6 +1017,11 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     render = sub.add_parser("render", help="render one cell to a source PNG")
     render.add_argument("sheet")
     render.add_argument("cell")
+    render.add_argument(
+        "--flat-ok",
+        action="store_true",
+        help="draw a cell of a new place although nothing in it rises above the ground",
+    )
     render.set_defaults(func=cmd_render)
 
     redraw = sub.add_parser("redraw", help="redraw a source PNG into pixel art")

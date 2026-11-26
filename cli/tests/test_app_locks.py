@@ -207,6 +207,10 @@ class WhatWentWrongTests(_Jobs):
     def test_a_used_up_quota_is_not_the_network(self) -> None:
         self.assertEqual(self._fails_with("render", ["error: the Cesium ion quota is used up for now (429)"], 4), "quota")
 
+    def test_a_flat_source_is_named_and_is_not_a_try_again(self) -> None:
+        said = "error: flat: 0% of this cell rises above the ground. Either it is open water or fields, or ..."
+        self.assertEqual(self._fails_with("render", [said], 5), "flat")
+
     def test_a_token_refused_in_the_middle_is_named(self) -> None:
         self.assertEqual(self._fails_with("render", ["error: Cesium ion refused the token (401)"], 3), "token")
 

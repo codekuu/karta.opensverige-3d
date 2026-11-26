@@ -48,6 +48,7 @@ const ORD = {
     old_app: "Appen är för gammal för kartbladet. Hämta den nya versionen.",
     quota: "Cesium tar inte emot fler hämtningar från ditt konto just nu. Försök igen senare.",
     token: "Cesium tog inte emot nyckeln. Byt nyckel i steg 4.",
+    flat: "Google har inga 3D-hus här, så rutan blir platt. Välj en annan plats.",
   },
   hamtning: {
     disk: "Disken blev full. Gör plats och tryck igen.",
@@ -572,7 +573,7 @@ function steg7(s) {
   el("rita-avbryt").disabled = upptagen;
   // No "try again" where trying again gets the same answer: the cell is someone else's, the
   // day's limit is reached, or the app is too old for the sheet.
-  visa("slut-igen", slut && !["taken", "daily", "old_app"].includes(j.problem));
+  visa("slut-igen", slut && !["taken", "daily", "old_app", "flat"].includes(j.problem));
   el("slut-igen").disabled = upptagen;
   // Nor another cell when the day's limit is reached: it would be drawn and then refused.
   // Nor when a lock from before stands in the way: it would stand in the way of that cell too.
