@@ -607,7 +607,28 @@ def _torch_missing() -> str | None:
     available = getattr(cuda, "is_available", None)
     if not callable(available) or not available():
         return _torch_build_wrong(torch) or "no CUDA device"
-    return None
+    return _no_kernels_for_card(torch)
+
+
+def _no_kernels_for_card(torch: object) -> str | None:
+    """A ROCm build of PyTorch that has no kernels for the AMD card it sees.
+
+    It still answers yes to is_available, and the first sign is "invalid device function" in the
+    middle of a redraw, after the lock and the downloads. The build's own list of targets says it
+    before: nothing here is guessed. A CUDA build is not asked, and one that cannot say is let be.
+    """
+    if not getattr(getattr(torch, "version", None), "hip", None):
+        return None
+    cuda = getattr(torch, "cuda", None)
+    try:
+        # gcnArchName carries feature flags after a colon, like gfx90a:sramecc+:xnack-.
+        arch = str(cuda.get_device_properties(0).gcnArchName).split(":")[0]
+        built = [str(name) for name in cuda.get_arch_list()]
+    except Exception:
+        return None
+    if not arch or not built or arch in built:
+        return None
+    return f"this ROCm build of PyTorch has no kernels for {arch}, the card here; it was built for {', '.join(built)}"
 
 
 # The PyTorch index for an AMD card: the build the redraw was tried with on Strix Halo.

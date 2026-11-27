@@ -233,7 +233,11 @@ class MachineTests(_Env):
             self.assertIn("no NVIDIA card", str(commands._gpu_missing()))
 
     def test_an_amd_card_counts_on_a_machine_without_an_nvidia_card(self) -> None:
-        with patch.object(commands, "_nvidia_cards", return_value=[]), patch.object(commands, "kfd_usable", return_value=True):
+        with (
+            patch("sys.platform", "linux"),
+            patch.object(commands, "_nvidia_cards", return_value=[]),
+            patch.object(commands, "kfd_usable", return_value=True),
+        ):
             with patch.object(commands, "_amd_cards", return_value=[("AMD gfx1151", 29437)]):
                 self.assertIsNone(commands._gpu_missing())
                 self.assertEqual(commands.gpu_card(), ("amd", "AMD gfx1151", 29437))
@@ -244,6 +248,7 @@ class MachineTests(_Env):
         # The card is listed to everyone. Without /dev/kfd PyTorch sees nothing, and that would
         # only show after 15 GB had been fetched.
         with (
+            patch("sys.platform", "linux"),
             patch.object(commands, "_nvidia_cards", return_value=[]),
             patch.object(commands, "_amd_cards", return_value=[("AMD gfx1151", 29437)]),
             patch.object(commands, "kfd_usable", return_value=False),
@@ -302,6 +307,40 @@ class MachineTests(_Env):
         for version, name in ((110501, "gfx1151"), (110000, "gfx1100"), (120001, "gfx1201"), (100300, "gfx1030"), (90402, "gfx942"), (90010, "gfx90a")):
             with self.subTest(version=version):
                 self.assertEqual(commands.gfx_name(version), name)
+
+    def test_an_amd_card_the_rocm_build_has_no_kernels_for_is_missing(self) -> None:
+        # The RX 6700 XT has 12 GB and is gfx1031, which the rocm7.2 wheel was not built for.
+        built = ["gfx1030", "gfx1100", "gfx1151"]
+
+        def rocm_build(arch: str, arch_list: object = None) -> SimpleNamespace:
+            def get_arch_list() -> list[str]:
+                if isinstance(arch_list, Exception):
+                    raise arch_list
+                return built if arch_list is None else arch_list  # type: ignore[return-value]
+
+            return SimpleNamespace(
+                version=SimpleNamespace(hip="7.2.53211", cuda=None),
+                cuda=SimpleNamespace(
+                    is_available=lambda: True,
+                    get_device_properties=lambda index: SimpleNamespace(gcnArchName=arch),
+                    get_arch_list=get_arch_list,
+                ),
+            )
+
+        problem = commands._no_kernels_for_card(rocm_build("gfx1031"))
+        self.assertIn("no kernels for gfx1031", str(problem))
+        self.assertIn("gfx1151", str(problem))
+        self.assertIsNone(commands._no_kernels_for_card(rocm_build("gfx1151")))
+        # The feature flags after the colon are not part of the target.
+        self.assertIsNone(commands._no_kernels_for_card(rocm_build("gfx1100:sramecc-:xnack-")))
+        # A build that cannot say is let be, and a CUDA build is not asked.
+        self.assertIsNone(commands._no_kernels_for_card(rocm_build("gfx1031", RuntimeError("no list"))))
+        self.assertIsNone(commands._no_kernels_for_card(rocm_build("gfx1031", [])))
+        cuda_build = SimpleNamespace(version=SimpleNamespace(hip=None, cuda="12.8"), cuda=None)
+        self.assertIsNone(commands._no_kernels_for_card(cuda_build))
+        # It is what check: torch says.
+        with patch.dict("sys.modules", {"torch": rocm_build("gfx1031")}):
+            self.assertIn("no kernels for gfx1031", str(commands._torch_missing()))
 
     def test_a_pytorch_for_the_other_vendor_is_named(self) -> None:
         cuda_build = SimpleNamespace(version=SimpleNamespace(hip=None, cuda="12.8"))
