@@ -4,6 +4,15 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-27
 
+### Ubuntu 24.04 keeps the renderer's Chrome from its sandbox
+The first Google render on the Strix Halo machine below, started by hand from a terminal, failed at once with `the Google render failed: TROUBLESHOOTING: https://pptr.dev/troubleshooting`.
+- **The cause was in a line rutor did not show.** Puppeteer's launch error has many lines, and rutor printed the last. Further up Chrome said `No usable sandbox!`. Ubuntu since 23.10 sets `kernel.apparmor_restrict_unprivileged_userns = 1`: a program makes user namespaces only when an AppArmor profile allows it, and the Chrome that `npm ci` fetches into `~/.cache/puppeteer` has none. `rutor render` now says what it means and points to the README.
+- **It worked from some shells and not others.** Started by a program that runs under a profile of its own that allows user namespaces, Chrome built its sandbox; started from the desktop's terminal, which is `unconfined`, it did not. `systemd-run --user` starts a process the way that terminal does, and reproduced the failure without a person.
+- **The fix is a profile for that one binary,** as Chromium's `apparmor-userns-restrictions.md` describes, shaped like Ubuntu's own `/etc/apparmor.d/chrome`. After it was loaded Chrome started from the user session, and `render.mjs` reached Cesium ion (a made-up token was refused with 401, as it should be). The README has the commands; they need sudo, so AGENTS.md hands them to the person.
+- **The renderer draws on the GPU here.** With the renderer's own flags (`--use-angle=gl-egl`) Chrome reported `ANGLE (AMD, Radeon 8060S Graphics (radeonsi strix_halo ACO), OpenGL ES 3.2)`. Without them, SwiftShader.
+- **npm 11.16 warns that Puppeteer's install script is not covered by `allowScripts`, and runs it anyway.** Into an empty `PUPPETEER_CACHE_DIR`, `npm ci` fetched Chrome 156.0.8078.47, the version Puppeteer 25.16.0 names. The warning needs nothing.
+- **Not tried here:** a whole Google render with a real token. That is the person's token, and it was theirs to run.
+
 ### An AMD APU draws a cell through ROCm
 On an AMD Ryzen AI Max+ 395 (Strix Halo, Radeon 8060S, `gfx1151`, 64 GB, Ubuntu with Linux 7.0, Python 3.14), from main at 09d2e67. `rutor preflight --machine` said `check: gpu missing` there before this change, and the README said AMD does not work.
 - **The redraw ran unchanged.** On the ROCm build PyTorch answers to `cuda`, so `pipe.to("cuda")`, the phase placement and `torch.cuda.empty_cache` need no edit. What changed is the machine check, the messages and the docs.

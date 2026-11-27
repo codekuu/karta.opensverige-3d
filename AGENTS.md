@@ -126,6 +126,7 @@ Build another cell only if your human asked for more. One at a time. At most fiv
 - A command says `CESIUM_ION_TOKEN is not set`, `Cesium ion refused the token` or `Cesium ion did not let this token read asset`. Ask your human to set the token themselves, as in step 5. Do not look for one, and do not ask them to paste it to you. If they cannot fix it now and you hold a cell, release it.
 - A command says `the Google source needs Node 22 or newer`. Ask your human to install Node.
 - A command says `the Google renderer is not installed`. Run `npm ci` in the folder it names.
+- `rutor render` says `No usable sandbox!`. On Ubuntu 23.10 or newer, Chrome needs an AppArmor profile first. Show your human the commands under "Source render" in README.md: they need sudo, so your human runs them. Do not add `--no-sandbox` and do not change the sysctl. If they cannot do it now, release the cell.
 - `rutor render` says the Cesium ion quota is used up. Release the cell, or try again tomorrow.
 - `rutor render` says `flat:` and exits 5. Nothing in the cell stands up from the ground: it is open water or fields, or Google has no 3D buildings there, and the houses are a photo on flat ground that does not redraw into a drawn town. Do not redraw it. Release the cell and tell your human, with the picture the line names. `--flat-ok` is for them to ask for after they have looked, not for you to add.
 - The service refuses the same step twice. Report the `error:` line. Do not loop.
