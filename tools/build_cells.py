@@ -644,9 +644,19 @@ def main(argv: list[str] | None = None) -> int:
                             raise Stop("it is past --until", normal=True)
                         continue
                     target, choose_next = found, False
-                say(f"--- {sheet} {cell_text(target) if target else '(the cell rutor claim --next picks)'} ---")
-                what, cell, detail = claim(sheet, target)
-                if what == "waiting":
+                if target is not None and target in ahead:
+                    # Drawn ahead already (a start cell given again, a line that runs into the
+                    # queue): it waits to be sent. Go on past it.
+                    say(f"{cell_text(target)} is drawn ahead already and waits to be sent; going on past it")
+                    tried.add(target)
+                    near = target
+                    what, cell, detail = "queued", None, ""
+                else:
+                    say(f"--- {sheet} {cell_text(target) if target else '(the cell rutor claim --next picks)'} ---")
+                    what, cell, detail = claim(sheet, target)
+                if what == "queued":
+                    pass
+                elif what == "waiting":
                     if target is not None and len(ahead) < args.ahead:
                         say(f"five of your cells wait for review: drawing {cell_text(target)} ahead, to send when one is reviewed")
                         cell = target
@@ -690,7 +700,8 @@ def main(argv: list[str] | None = None) -> int:
                         built.append(f"{cell_text(cell)} {detail}")
                         say(f"built: {sheet} {cell_text(cell)}, waiting for review")
                     else:
-                        ahead.append(cell)
+                        if cell not in ahead:
+                            ahead.append(cell)
                         save_ahead(sheet, ahead)
                         say(f"drawn ahead: {sheet} {cell_text(cell)}, sent when the service takes another ({len(ahead)} waiting to be sent)")
                 else:

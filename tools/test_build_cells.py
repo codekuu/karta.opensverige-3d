@@ -359,6 +359,19 @@ class BuildCellsTests(unittest.TestCase):
         self.assertFalse(releases(calls))
         self.assertIn("85_66 flat", out)
 
+    def test_a_start_cell_that_is_drawn_ahead_already_is_not_drawn_again(self):
+        wait = (2, "error: refused: too_many_waiting: Five of your cells are waiting for review.")
+        code, calls, out = self.run_cells(
+            {("claim", "71_11"): [wait] * 5, ("claim", "71_12"): [wait] * 5, ("claim", "75_15"): [wait] * 5, ("claim", "71_13"): [wait] * 5},
+            argv=("stockholm-norr", "71_11", "--ahead", "3"),
+            ahead=("75_15", "71_11"),
+            nap=False,
+        )
+        self.assertNotIn("71_11", [c.split()[2] for c in calls if c.startswith("render")])
+        self.assertIn("71_11 is drawn ahead already", out)
+        self.assertEqual([c.split()[2] for c in calls if c.startswith("render")], ["71_12"])
+        self.assertEqual(self.ahead_file.read_text().split(), ["75_15", "71_11", "71_12"])
+
     def test_the_next_run_sends_what_this_one_drew_ahead_first(self):
         code, calls, out = self.run_cells({}, argv=("stockholm-norr", "--count", "2"), ahead=("85_66", "85_67"))
         self.assertEqual(code, 0, out)
