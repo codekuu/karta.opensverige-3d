@@ -312,11 +312,51 @@ def cmd_claim(args: argparse.Namespace) -> int:
     # The claim says the source this rutor will draw from. On a sheet of the tiling the service
     # refuses a claim that names none: that is how it stops a rutor from before, which would
     # lock the cell and then not know how to draw it.
-    _status, claimed = api.post("/v1/claim", {"sheet": sheet_id, "col": col, "row": row, "kind": kind}, token)
+    try:
+        _status, claimed = api.post("/v1/claim", {"sheet": sheet_id, "col": col, "row": row, "kind": kind}, token)
+    except RutorError as exc:
+        if exc.code == 2 and exc.message.startswith("refused: taken"):
+            raise refused(_taken_message(sheet_id, col, row, exc.message)) from exc
+        raise
     expires = _object(claimed, "object").get("expires_at")
     print(f"claimed: {sheet_id} {col}_{row} expires {expires}")
     print(f"url: {cell_url(sheet_id, col, row)}")
     return 0
+
+
+# What holds a cell that cannot be claimed, in words: the service's own word for the state.
+_HELD = {
+    "last": "is locked by",
+    "vantar": "is built and waits for review, from",
+    "godkand": "is approved and waits to go on the map, from",
+    "live": "is on the map already, from",
+}
+
+
+def _taken_message(sheet_id: str, col: int, row: int, said: str) -> str:
+    """Say what holds a taken cell, and the next thing to try.
+
+    The service says only that someone holds it. Whose it is and in which state is on the
+    public grid, and a person who asked for a place wants a cell beside it, not a dead end.
+    If the grid cannot be read, what the service said stands.
+    """
+    try:
+        _status, body = api.get(f"/v1/grid/{sheet_id}", token=config.read_token())
+        cells = _rows(_object(body, "object").get("cells"), "cells")
+    except RutorError:
+        return said
+    for cell in cells:
+        if not isinstance(cell, list) or len(cell) < 3 or cell[0] != col or cell[1] != row:
+            continue
+        held = _HELD.get(str(cell[2]))
+        login = cell[3] if len(cell) > 3 else None
+        if held is None or not isinstance(login, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,39}", login):
+            break
+        return (
+            f"refused: taken: {sheet_id} {col}_{row} {held} {login}. "
+            f"For a free cell beside what is drawn there: rutor claim {sheet_id} --next."
+        )
+    return said
 
 
 def cmd_release(args: argparse.Namespace) -> int:

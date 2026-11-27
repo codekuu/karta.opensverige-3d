@@ -179,7 +179,7 @@ const MESSAGES = {
   outside: 'That cell lies outside the city and is not drawn.',
   too_many_locks: 'You already hold as many cells as you may. Finish or release one first.',
   too_many_waiting: 'Five of your cells are waiting for review. Take another when one has been reviewed.',
-  taken: 'Someone else holds that cell. Pick another.',
+  taken: 'That cell is taken: it is locked, waits for review or is on the map. Pick another.',
   being_removed: 'That cell is being taken off the map. Try again in an hour.',
   other_sheet: 'That ground belongs to another sheet.',
   no_height: 'The ground height of that place could not be read just now, so its sheet was not made. Try again in a minute.',

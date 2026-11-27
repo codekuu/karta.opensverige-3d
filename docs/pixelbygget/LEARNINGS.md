@@ -4,6 +4,16 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-27
 
+### A third run: the same place asked for again
+From a fresh clone of main at 4396626 on the test PC, with "build a cell in Lund" once more, now that Lund's cell waits for review.
+- **A place name gives the same cell every time.** `rutor claim --plats Lund` answered `place: se-n5572-e1312 47_30` and was refused `taken`. Nothing was locked. So the second person to ask for a town meets a refusal, not a cell.
+- **"Someone else holds that cell" was said about the asker's own cell.** The service says one sentence for locked, waiting, approved and live. The grid is public and has the state and the login, so `rutor claim` now reads it and says `se-n5572-e1312 47_30 is built and waits for review, from <login>`, and names `rutor claim <sheet> --next`. The service's sentence is reworded too, which shows after the next deploy.
+- **AGENTS.md had no line for a place whose cell is taken.** "If your human named it, tell them and ask" was written for a named cell. For a named place the agent now takes a free cell beside it and says which.
+- **`--next` on a sheet with one cell took the one up and to the left,** 46_29 beside 47_30: the station beside the cathedral. Built, checked and uploaded, 43 lines of output.
+- **A stored login had stopped working on two machines.** The Mac's from 2026-11-23 and the test PC's from before were refused `bad_token`. GitHub's rule for an OAuth app is ten tokens for one person, app and scope: an eleventh revokes an older one, first the oldest that was never used (docs.github.com, "Token expiration and revocation"). The test logins of one week were more than ten. AGENTS.md says so. Whether that is what ended these two was not shown.
+- **The login is per user on the machine, not per clone:** a fresh clone was logged in already.
+- **Not run here:** the service's tests, after the one changed sentence. No test names it.
+
 ### The same test again, from main with the fixes in
 An agent built from a fresh clone of main at 695d98c on the test PC, twice: a named cell beside the flat one, and "build a cell in Lund".
 - **The flat cell was stopped and given back.** `se-n5557-e1412 33_4`: claimed, `flat: 0%` at the render, released as the line said, `locks: 0`. Nothing was uploaded.
