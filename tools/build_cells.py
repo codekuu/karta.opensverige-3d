@@ -7,10 +7,16 @@
 
 Where it starts:
 - A cell a run on this machine claimed and did not finish (it was cut off, a power cut) is
-  finished first. A cell the account holds that no run here claimed stops the run: another
-  machine may be drawing it. One machine at a time.
+  finished first. A cell the account holds that no run here claimed is the other machine's,
+  and is left alone.
+
+Two machines on one login: start one with --part 1/2 and the other with --part 2/2. They split
+the sheet like a chessboard, so they never draw the same cell. A builder who is not trusted may
+hold one cell at a time; while the other machine holds it (too_many_locks), this one draws ahead,
+as it does while five cells wait for review, and sends when the service takes another.
 - Then the cell given, and the line from it (down unless --step says otherwise) until the line ends.
-- With no cell given, the cell `rutor claim --next` picks: a free cell beside one on the map.
+- With no cell given, on from the newest cell drawn ahead, else this login's newest cell on the
+  sheet. With neither, the cell `rutor claim --next` picks: a free cell beside one on the map.
 
 Then it goes on by itself: each next cell is a free cell beside something already drawn, the
 one nearest the cell it built last. So what it draws grows as one piece. It ends at --until,
@@ -22,8 +28,11 @@ does what AGENTS.md says where a person would otherwise be asked:
 - A taken cell is passed by. Nothing was locked.
 - A flat cell (open water, fields, no 3D buildings) is given back and passed by. Its picture is
   kept and named in the summary. It is never drawn with --flat-ok. Five in a row stop the run.
-- Five cells waiting for review (a builder who is not trusted yet): it holds no cell and asks
-  again every --review-wait minutes, until a review lets it go on.
+- Five cells waiting for review (a builder who is not trusted yet): it draws the next cells
+  ahead, up to --ahead of them, without claiming them. Before each new cell it asks whether the
+  service takes another, and if so claims and sends the oldest one drawn ahead. A cell someone
+  else claimed meanwhile is dropped. With --ahead full it holds no cell and asks again every
+  --review-wait minutes. What is drawn ahead is kept, and the next run sends it first.
 - 20 uploads in 24 hours: the drawn cell keeps its lock (48 hours) and the upload is tried again
   every hour.
 - A failed quality check, a missing piece on this machine or a refusal it does not know stops
@@ -252,7 +261,7 @@ def release(sheet: str, cell: Cell) -> None:
     unmark(sheet)
 
 
-def read_grid(sheet: str) -> tuple[list[Cell], set[Cell]]:
+def read_grid(sheet: str) -> tuple[list[Cell], set[Cell], dict]:
     """The cells that can be claimed and the cells that are drawn, as the public grid says now."""
     code, out = run_step("grid", sheet, "--json", quiet=True)
     if code != 0:
@@ -270,12 +279,21 @@ def read_grid(sheet: str) -> tuple[list[Cell], set[Cell]]:
         free = [(c, r) for c in range(cols) for r in range(rows) if states.get((c, r), "fri") == "fri"]
     else:
         free = [cell for cell, state in states.items() if state == "fri"]
-    return free, drawn
+    return free, drawn, body
 
 
 def beside(cell: Cell, cells: set[Cell]) -> bool:
     col, row = cell
     return any((col + dc, row + dr) in cells for dc in (-1, 0, 1) for dr in (-1, 0, 1) if dc or dr)
+
+
+# Two machines on one login: --part 1/2 and --part 2/2 split the sheet like a chessboard, so they
+# draw in the same area and never the same cell. None: every cell is this machine's.
+PART: tuple[int, int] | None = None
+
+
+def in_part(cell: Cell) -> bool:
+    return PART is None or (cell[0] + cell[1]) % PART[1] == PART[0] - 1
 
 
 def next_cell(free: list[Cell], drawn: set[Cell], near: Cell, tried: set[Cell]) -> Cell | None:
@@ -284,7 +302,7 @@ def next_cell(free: list[Cell], drawn: set[Cell], near: Cell, tried: set[Cell]) 
     Ties go to the row above, then the left. Cells this run has tried already are not taken again:
     the public grid can be a minute behind what this run did.
     """
-    left = [cell for cell in free if cell not in tried]
+    left = [cell for cell in free if cell not in tried and in_part(cell)]
     if not left:
         return None
     pool = [cell for cell in left if beside(cell, drawn)] or left
@@ -308,7 +326,8 @@ def claim(sheet: str, cell: Cell | None) -> tuple[str, Cell | None, str]:
     reason = refusal(out)
     if reason in PASS_BY:
         return "pass", cell, out.splitlines()[-1] if out else reason
-    if reason == "too_many_waiting":
+    if reason in ("too_many_waiting", "too_many_locks"):
+        # too_many_locks: the account's one cell is held, by this login's other machine.
         return "waiting", cell, reason
     if reason == "no_free_cell":
         return "none", cell, reason
@@ -316,54 +335,78 @@ def claim(sheet: str, cell: Cell | None) -> tuple[str, Cell | None, str]:
     raise Stop(f"the service refused {' '.join(args[1:])} ({reason or 'no reason given'}): {why}. Nothing was locked.")
 
 
-def build(sheet: str, cell: Cell, *, cheap: bool) -> tuple[str, str]:
-    """Render, redraw and send a cell this user holds. Returns (built|flat, detail). Raises Stop."""
+def draw(sheet: str, cell: Cell, *, cheap: bool, locked: bool) -> tuple[str, str]:
+    """Render and redraw a cell. Returns ("drawn", "") or ("flat", detail). Raises Stop.
+
+    locked: this user holds the cell, and a flat one is given back. A cell drawn ahead is held by
+    nobody: there is nothing to give back, and it is claimed only when it can be sent.
+    """
+    name = cell_text(cell)
+    code, out = run_step("render", sheet, name)
+    if code == 5 and "flat:" in out:
+        if locked:
+            release(sheet, cell)
+        return "flat", f"{'given back; ' if locked else ''}the picture is {ROOT / 'work' / sheet / f'{name}.src.png'}"
+    if code != 0:
+        raise Stop(f"rutor render {sheet} {name} exited {code}")
+    redraw = ["redraw", sheet, name] + (["--wait-for-cheap"] if cheap else [])
+    while True:
+        code, out = run_step(*redraw)
+        if code != 6:
+            break
+        now = datetime.now(timezone.utc)
+        until = cheap_hour(out) or now + timedelta(hours=1)
+        until = min(max(until, now), now + SE3_LONGEST_WAIT) + timedelta(minutes=1)
+        held = f"{name} stays locked" if locked else f"{name} is drawn ahead"
+        say(f"the SE3 price is high; {held}, waiting until {until.astimezone():%Y-%m-%d %H:%M}")
+        time.sleep((until - now).total_seconds())
+    if code == 5:
+        raise Stop(f"{name} failed the quality check (the check: lines above). It is not sent.")
+    if code != 0:
+        raise Stop(f"rutor redraw {sheet} {name} exited {code}")
+    return "drawn", ""
+
+
+def send(sheet: str, cell: Cell) -> str:
+    """Upload a drawn cell this user holds. Returns its url. A Stop here keeps the lock: the cell
+    may have reached the service, and it is drawn."""
+    name = cell_text(cell)
+    while True:
+        code, out = run_step("upload", sheet, name)
+        if not (code == 2 and refusal(out) == "daily_limit"):
+            break
+        say(f"20 uploads in 24 hours is the limit for a new builder; trying {name} again in an hour")
+        if not nap(UPLOAD_RETRY.total_seconds()):
+            raise Stop(
+                f"--until came while {name} waited to be sent. It keeps its lock for 48 hours: rutor upload {sheet} {name}",
+                keep_lock=True,
+                normal=True,
+            )
+    if code != 0:
+        raise Stop(
+            f"rutor upload {sheet} {name} exited {code}. It may have reached the service: "
+            f"rutor status, then rutor upload {sheet} {name} or rutor release {sheet} {name}",
+            keep_lock=True,
+        )
+    unmark(sheet)
+    url = re.search(r"^url: (\S+)", out, flags=re.MULTILINE)
+    return url.group(1) if url else ""
+
+
+def build(sheet: str, cell: Cell, *, cheap: bool, drawn_already: bool = False) -> tuple[str, str]:
+    """Draw and send a cell this user holds. Returns (built|flat, detail). Raises Stop.
+
+    drawn_already: the cell was drawn ahead and only waits to be sent.
+    """
     name = cell_text(cell)
     sending = False
     try:
-        code, out = run_step("render", sheet, name)
-        if code == 5 and "flat:" in out:
-            release(sheet, cell)
-            return "flat", f"given back; the picture is {ROOT / 'work' / sheet / f'{name}.src.png'}"
-        if code != 0:
-            raise Stop(f"rutor render {sheet} {name} exited {code}")
-
-        redraw = ["redraw", sheet, name] + (["--wait-for-cheap"] if cheap else [])
-        while True:
-            code, out = run_step(*redraw)
-            if code != 6:
-                break
-            now = datetime.now(timezone.utc)
-            until = cheap_hour(out) or now + timedelta(hours=1)
-            until = min(max(until, now), now + SE3_LONGEST_WAIT) + timedelta(minutes=1)
-            say(f"the SE3 price is high; {name} stays locked, waiting until {until.astimezone():%Y-%m-%d %H:%M}")
-            time.sleep((until - now).total_seconds())
-        if code == 5:
-            raise Stop(f"{name} failed the quality check (the check: lines above). It is not sent.")
-        if code != 0:
-            raise Stop(f"rutor redraw {sheet} {name} exited {code}")
-
+        if not drawn_already:
+            what, detail = draw(sheet, cell, cheap=cheap, locked=True)
+            if what == "flat":
+                return "flat", detail
         sending = True
-        while True:
-            code, out = run_step("upload", sheet, name)
-            if not (code == 2 and refusal(out) == "daily_limit"):
-                break
-            say(f"20 uploads in 24 hours is the limit for a new builder; trying {name} again in an hour")
-            if not nap(UPLOAD_RETRY.total_seconds()):
-                raise Stop(
-                    f"--until came while {name} waited to be sent. It keeps its lock for 48 hours: rutor upload {sheet} {name}",
-                    keep_lock=True,
-                    normal=True,
-                )
-        if code != 0:
-            raise Stop(
-                f"rutor upload {sheet} {name} exited {code}. It may have reached the service: "
-                f"rutor status, then rutor upload {sheet} {name} or rutor release {sheet} {name}",
-                keep_lock=True,
-            )
-        unmark(sheet)
-        url = re.search(r"^url: (\S+)", out, flags=re.MULTILINE)
-        return "built", url.group(1) if url else ""
+        return "built", send(sheet, cell)
     except Stop as stop:
         if not stop.keep_lock:
             release(sheet, cell)
@@ -377,10 +420,109 @@ def build(sheet: str, cell: Cell, *, cheap: bool) -> tuple[str, str]:
         raise
 
 
+# Cells drawn ahead of a claim, oldest first: drawn and checked while five cells waited for
+# review, to be claimed and sent as soon as the service takes another. Kept on disk, so the next
+# run sends what this one drew.
+AHEAD_FILE = "build_cells.ahead"
+
+
+def ahead_path(sheet: str) -> Path:
+    return ROOT / "work" / sheet / AHEAD_FILE
+
+
+def ready_to_send(sheet: str, cell: Cell) -> bool:
+    """The picture and a manifest that passed the check are both there."""
+    folder = ROOT / "work" / sheet
+    name = cell_text(cell)
+    try:
+        manifest = json.loads((folder / f"{name}.manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (folder / f"{name}.png").is_file() and isinstance(manifest, dict) and manifest.get("check") == "ok"
+
+
+def load_ahead(sheet: str) -> list[Cell]:
+    try:
+        lines = ahead_path(sheet).read_text(encoding="utf-8").split()
+    except OSError:
+        return []
+    cells: list[Cell] = []
+    for line in lines:
+        try:
+            cell = parse_cell(line)
+        except argparse.ArgumentTypeError:
+            continue
+        if cell not in cells and ready_to_send(sheet, cell):
+            cells.append(cell)
+    return cells
+
+
+def save_ahead(sheet: str, cells: list[Cell]) -> None:
+    path = ahead_path(sheet)
+    if not cells:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(cell_text(cell) + "\n" for cell in cells), encoding="utf-8")
+
+
+def send_ahead(sheet: str, ahead: list[Cell]) -> tuple[list[str], list[str]]:
+    """Claim and send cells drawn ahead, oldest first, for as long as the service takes them.
+
+    Returns (sent, passed by). A cell someone else claimed meanwhile is dropped from the queue.
+    """
+    sent: list[str] = []
+    passed: list[str] = []
+    for cell in list(ahead):
+        name = cell_text(cell)
+        say(f"--- {sheet} {name}: drawn ahead; can it be sent now? ---")
+        what, _cell, detail = claim(sheet, cell)
+        if what == "waiting":
+            say("not yet: five of your cells still wait for review")
+            break
+        if what != "claimed":
+            ahead.remove(cell)
+            save_ahead(sheet, ahead)
+            passed.append(f"{name} drawn ahead, but {detail}")
+            say(f"dropped: {sheet} {name}, drawn ahead, can no longer be claimed")
+            continue
+        what, url = build(sheet, cell, cheap=False, drawn_already=True)
+        ahead.remove(cell)
+        save_ahead(sheet, ahead)
+        sent.append(f"{name} {url}")
+        say(f"sent: {sheet} {name}, drawn ahead, now waiting for review")
+    return sent, passed
+
+
+def whoami() -> str:
+    code, out = run_step("whoami")
+    found = re.search(r"^login: (\S+)", out, flags=re.MULTILINE)
+    return found.group(1) if code == 0 and found else ""
+
+
+def latest_own_cell(sheet: str, login: str) -> Cell | None:
+    """The cell of this login on the sheet that changed last: where an earlier run left off."""
+    if not login:
+        return None
+    _free, _drawn, body = read_grid(sheet)
+    own = [c for c in body.get("cells", []) if len(c) > 4 and c[3] == login and str(c[2]) in DRAWN | {"last"}]
+    if not own:
+        return None
+    newest = max(own, key=lambda c: str(c[4] or ""))
+    return int(newest[0]), int(newest[1])
+
+
 def parse_cell(text: str) -> Cell:
     found = re.fullmatch(r"(\d+)_(\d+)", text)
     if not found:
         raise argparse.ArgumentTypeError(f"a cell is col_row, like 85_65: {text!r}")
+    return int(found.group(1)), int(found.group(2))
+
+
+def parse_part(text: str) -> tuple[int, int]:
+    found = re.fullmatch(r"(\d+)/(\d+)", text)
+    if not found or not 1 <= int(found.group(1)) <= int(found.group(2)):
+        raise argparse.ArgumentTypeError(f"--part is like 1/2: {text!r}")
     return int(found.group(1)), int(found.group(2))
 
 
@@ -397,16 +539,19 @@ def parse_until(text: str) -> datetime:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global LOG, DEADLINE
+    global LOG, DEADLINE, PART
     parser = argparse.ArgumentParser(description="Build cells one after another, by itself, until told to stop.")
     parser.add_argument("sheet")
-    parser.add_argument("cell", type=parse_cell, nargs="?", help="where to start, like 85_65 (default: where rutor claim --next would)")
+    parser.add_argument("cell", type=parse_cell, nargs="?", help="where to start, like 85_65 (default: on from your newest cell, or where rutor claim --next would)")
     parser.add_argument("--step", choices=sorted(STEPS), default="down", help="from the cell given, the way the first line goes (default down)")
     parser.add_argument("--until", type=parse_until, help="take no new cell after this local time, like 07:00")
-    parser.add_argument("--count", type=int, default=0, help="build at most this many cells (default: no limit)")
-    parser.add_argument("--review-wait", type=int, default=30, metavar="MIN", help="minutes between asks while five cells wait for review (default 30)")
+    parser.add_argument("--count", type=int, default=0, help="send at most this many cells (default: no limit)")
+    parser.add_argument("--ahead", type=int, default=5, metavar="N", help="while five cells wait for review, draw up to N more ahead, to send as reviews let them (default 5, 0 to only wait)")
+    parser.add_argument("--review-wait", type=int, default=30, metavar="MIN", help="minutes between asks while five cells wait for review and nothing is left to draw ahead (default 30)")
     parser.add_argument("--cheap", action="store_true", help="redraw only in a cheap SE3 hour, waiting with the lock held")
+    parser.add_argument("--part", type=parse_part, help="with two machines on one login: 1/2 on one, 2/2 on the other, so they never draw the same cell")
     args = parser.parse_args(argv)
+    PART = args.part
 
     LOG = Log(ROOT / "work" / "logs" / f"build_cells-{datetime.now():%Y%m%d-%H%M%S}.log")
     DEADLINE = args.until
@@ -418,6 +563,10 @@ def main(argv: list[str] | None = None) -> int:
     passed: list[str] = []
     tried: set[Cell] = set()
     mine: set[Cell] = set()
+    ahead: list[Cell] = load_ahead(sheet)
+    save_ahead(sheet, ahead)
+    tried |= set(ahead)
+    mine |= set(ahead)
     # The cell to claim next. None: let rutor claim --next pick.
     target: Cell | None = args.cell
     # Where the next free cell is looked for: the cell built last, or the start.
@@ -427,47 +576,90 @@ def main(argv: list[str] | None = None) -> int:
     flat_run = 0
     ended, normal = "", True
 
+    # The next cell is chosen when it is needed: after what was drawn ahead has had its chance.
+    choose_next = False
+
+    def next_target() -> Cell | None:
+        free, drawn, _body = read_grid(sheet)
+        assert near is not None
+        found = next_cell(free, drawn | mine, near, tried)
+        if found is not None:
+            say(f"next: {cell_text(found)}, the free cell beside the drawn ones nearest {cell_text(near)}")
+        return found
+
     try:
         code, _out = run_step("preflight", "--sheet", sheet)
         if code != 0:
             raise Stop("preflight has a line that says missing (above). Fix it first; nothing was claimed.")
         locks = held_locks()
-        if len(locks) > 1 or (locks and locks[0][0] != sheet):
-            held_text = ", ".join(f"{s} {cell_text(c)}" for s, c in locks)
-            raise Stop(f"you hold {held_text}. Finish or rutor release it first: one cell at a time.")
-        resume: Cell | None = locks[0][1] if locks else None
-        if resume is not None and marked(sheet) != resume:
-            raise Stop(
-                f"you hold {sheet} {cell_text(resume)}, but no run on this machine claimed it. Another machine may be "
-                f"building it: run one machine at a time. If none is, give it back: rutor release {sheet} {cell_text(resume)}"
-            )
+        here = marked(sheet)
+        resume: Cell | None = here if (sheet, here) in locks else None
+        for held_sheet, held_cell in locks:
+            if (held_sheet, held_cell) != (sheet, resume):
+                # Claimed by no run here: the other machine's. It is never drawn here.
+                say(f"{held_sheet} {cell_text(held_cell)} is held, but not by this machine: left to the other one")
+                if held_sheet == sheet:
+                    tried.add(held_cell)
         if resume is None:
             unmark(sheet)  # a mark with no lock behind it: the lock ran out, or was given back by hand
+        if ahead:
+            say(f"drawn ahead from before, to send first: {', '.join(cell_text(c) for c in ahead)}")
+        if args.cell is None:
+            # Go on from where the last run left off: its newest cell drawn ahead, else this
+            # login's newest cell on the sheet. With neither, rutor claim --next picks.
+            near = ahead[-1] if ahead else latest_own_cell(sheet, whoami())
+            if near is not None:
+                say(f"going on from {cell_text(near)}")
+                choose_next = True
 
         while True:
             if args.count and len(built) >= args.count:
-                raise Stop(f"{args.count} cells built, as asked", normal=True)
+                raise Stop(f"{args.count} cells sent, as asked", normal=True)
             if past_deadline():
                 raise Stop("it is past --until", normal=True)
 
             # After this cell, is the target done with? Not when a held cell went before it.
             target_done = True
-            cell: Cell | None
+            cell: Cell | None = None
+            drawn_ahead_now = False
             if resume is not None:
                 cell, resume = resume, None
                 target_done = target is None or cell == target
                 say(f"--- {sheet} {cell_text(cell)}: still yours from an earlier run, finished first ---")
             else:
+                # First what was drawn ahead, while the service takes it.
+                if ahead:
+                    sent_now, passed_now = send_ahead(sheet, ahead)
+                    built += sent_now
+                    passed += passed_now
+                    if args.count and len(built) >= args.count:
+                        continue
+                if choose_next:
+                    found = next_target()
+                    if found is None:
+                        if not ahead:
+                            raise Stop(f"no free cell is left on {sheet}", normal=True)
+                        say(f"no free cell is left to draw; {len(ahead)} drawn ahead still to send. Asking again in {args.review_wait} min.")
+                        if not nap(args.review_wait * 60):
+                            raise Stop("it is past --until", normal=True)
+                        continue
+                    target, choose_next = found, False
                 say(f"--- {sheet} {cell_text(target) if target else '(the cell rutor claim --next picks)'} ---")
                 what, cell, detail = claim(sheet, target)
                 if what == "waiting":
-                    say(f"five of your cells wait for review; asking again in {args.review_wait} min. Nothing is locked meanwhile.")
-                    if not nap(args.review_wait * 60):
-                        raise Stop("it is past --until; five cells still wait for review", normal=True)
-                    continue
-                if what == "none":
+                    if target is not None and len(ahead) < args.ahead:
+                        say(f"five of your cells wait for review: drawing {cell_text(target)} ahead, to send when one is reviewed")
+                        cell = target
+                        drawn_ahead_now = True
+                    else:
+                        full = f"{len(ahead)} drawn ahead already; " if ahead else ""
+                        say(f"five of your cells wait for review; {full}asking again in {args.review_wait} min. Nothing is locked meanwhile.")
+                        if not nap(args.review_wait * 60):
+                            raise Stop("it is past --until; five cells still wait for review", normal=True)
+                        continue
+                elif what == "none":
                     raise Stop(f"no cell is free on {sheet}", normal=True)
-                if what == "pass":
+                elif what == "pass":
                     if cell is None:
                         say("the cell rutor claim --next picked was taken meanwhile; asking again in a minute")
                         if not nap(60):
@@ -482,13 +674,25 @@ def main(argv: list[str] | None = None) -> int:
 
             if cell is not None:
                 tried.add(cell)
-                what, detail = build(sheet, cell, cheap=args.cheap)
-                if what == "built":
-                    built.append(f"{cell_text(cell)} {detail}")
+                if drawn_ahead_now:
+                    what, detail = draw(sheet, cell, cheap=args.cheap, locked=False)
+                elif cell in ahead:
+                    what, detail = build(sheet, cell, cheap=args.cheap, drawn_already=True)
+                    ahead.remove(cell)
+                    save_ahead(sheet, ahead)
+                else:
+                    what, detail = build(sheet, cell, cheap=args.cheap)
+                if what in ("built", "drawn"):
                     mine.add(cell)
                     near = cell
                     flat_run = 0
-                    say(f"built: {sheet} {cell_text(cell)}, waiting for review")
+                    if what == "built":
+                        built.append(f"{cell_text(cell)} {detail}")
+                        say(f"built: {sheet} {cell_text(cell)}, waiting for review")
+                    else:
+                        ahead.append(cell)
+                        save_ahead(sheet, ahead)
+                        say(f"drawn ahead: {sheet} {cell_text(cell)}, sent when the service takes another ({len(ahead)} waiting to be sent)")
                 else:
                     passed.append(f"{cell_text(cell)} flat: {detail}")
                     say(f"passed by: {sheet} {cell_text(cell)} (flat)")
@@ -503,6 +707,9 @@ def main(argv: list[str] | None = None) -> int:
             # Where next: along the first line while it lasts, then beside what is drawn.
             if line and target is not None:
                 step = (target[0] + line[0], target[1] + line[1])
+                # Past the other machine's cells: the one it holds, and with --part, its half.
+                while step[0] >= 0 and step[1] >= 0 and (step in tried or not in_part(step)):
+                    step = (step[0] + line[0], step[1] + line[1])
                 if step[0] >= 0 and step[1] >= 0:
                     target = step
                     continue
@@ -510,12 +717,7 @@ def main(argv: list[str] | None = None) -> int:
             if near is None:
                 target = None  # nothing built or tried near anything yet: rutor claim --next picks
                 continue
-            free, drawn = read_grid(sheet)
-            found = next_cell(free, drawn | mine, near, tried)
-            if found is None:
-                raise Stop(f"no free cell is left on {sheet}", normal=True)
-            target = found
-            say(f"next: {cell_text(found)}, the free cell beside the drawn ones nearest {cell_text(near)}")
+            choose_next = True
     except Stop as stop:
         ended, normal = str(stop), stop.normal
     except KeyboardInterrupt:
@@ -526,6 +728,8 @@ def main(argv: list[str] | None = None) -> int:
         say(f"built: {text}")
     for text in passed:
         say(f"passed by: {text}")
+    if ahead:
+        say(f"drawn ahead, not sent yet: {', '.join(cell_text(c) for c in ahead)}. The next run sends them first.")
     say(f"stopped: {ended}")
     if built:
         say("A person reviews each cell before it goes on the map. rutor status lists open locks only.")

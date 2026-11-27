@@ -34,10 +34,11 @@ def hand_grid(free, size=(144, 70), area=((80, 90), (60, 70)), drawn="live"):
 class Fake:
     """rutor as a table: (command, cell) -> list of (code, out), used in turn; default success."""
 
-    def __init__(self, table, status="locks: 0", grid=None):
+    def __init__(self, table, status="locks: 0", grid=None, login="codekuu"):
         self.table = {key: list(value) for key, value in table.items()}
         self.status = status
         self.grid = grid if grid is not None else hand_grid(set())
+        self.login = login
         self.calls = []
 
     def __call__(self, *args, quiet=False):
@@ -49,6 +50,8 @@ class Fake:
             return 0, self.status
         if command == "grid":
             return 0, json.dumps(self.grid)
+        if command == "whoami":
+            return 0, f"login: {self.login}\ntrusted: no\napproved: 0"
         cell = args[2]
         queue = self.table.get((command, cell))
         if queue:
@@ -76,9 +79,9 @@ def uploads(calls):
 
 
 class BuildCellsTests(unittest.TestCase):
-    def run_cells(self, table, argv=("stockholm-norr", "85_65", "--count", "1"), status="locks: 0", grid=None, nap=True, marked=None):
+    def run_cells(self, table, argv=("stockholm-norr", "85_65", "--count", "1"), status="locks: 0", grid=None, nap=True, marked=None, ahead=(), login="codekuu"):
         module = load()
-        fake = Fake(table, status, grid)
+        fake = Fake(table, status, grid, login)
         module.rutor = fake
         module.nap = lambda seconds: nap
         module.time.sleep = lambda seconds: None
@@ -87,9 +90,15 @@ class BuildCellsTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         module.ROOT = Path(tmp.name)
         self.mark = Path(tmp.name) / "work" / argv[0] / module.CLAIM_FILE
+        self.ahead_file = Path(tmp.name) / "work" / argv[0] / module.AHEAD_FILE
+        self.mark.parent.mkdir(parents=True, exist_ok=True)
         if marked:
-            self.mark.parent.mkdir(parents=True)
             self.mark.write_text(marked + "\n")
+        for name in ahead:
+            (self.mark.parent / f"{name}.png").write_bytes(b"png")
+            (self.mark.parent / f"{name}.manifest.json").write_text('{"check": "ok"}')
+        if ahead:
+            self.ahead_file.write_text("".join(f"{name}\n" for name in ahead))
         out = io.StringIO()
         with redirect_stdout(out):
             code = module.main(list(argv))
@@ -107,7 +116,7 @@ class BuildCellsTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(claims(calls), ["85_65", "85_66", "85_67", "85_68", "85_69", "85_70", "84_69", "86_68"])
         self.assertIn("next: 84_69, the free cell beside the drawn ones nearest 85_69", out)
-        self.assertIn("7 cells built, as asked", out)
+        self.assertIn("7 cells sent, as asked", out)
 
     def test_a_taken_and_a_flat_cell_on_the_line_are_passed_by_and_the_line_goes_on(self):
         code, calls, out = self.run_cells(
@@ -180,23 +189,43 @@ class BuildCellsTests(unittest.TestCase):
         self.assertEqual(claims(calls), ["85_66"])
         self.assertEqual(uploads(calls), ["85_65", "85_66"])
 
-    def test_a_lock_on_another_sheet_stops_before_anything(self):
+    def test_a_lock_on_another_sheet_is_left_alone(self):
         code, calls, out = self.run_cells({}, status="lock: goteborg-norr 12_3 expires x")
-        self.assertEqual(code, 1)
-        self.assertFalse([c for c in calls if c.split()[0] in ("claim", "render", "release")])
-        self.assertIn("you hold goteborg-norr 12_3", out)
-
+        self.assertEqual(code, 0, out)
+        self.assertIn("goteborg-norr 12_3 is held, but not by this machine", out)
+        self.assertNotIn("12_3", releases(calls))
 
     # ---- one machine at a time
 
     def test_a_lock_no_run_here_claimed_is_left_to_the_machine_that_holds_it(self):
-        code, calls, out = self.run_cells({}, status="lock: stockholm-norr 85_65 expires x")
-        self.assertEqual(code, 1)
-        self.assertFalse([c for c in calls if c.split()[0] in ("claim", "render", "release", "upload")])
-        self.assertIn("Another machine may be building it", out)
-        code, calls, out = self.run_cells({}, status="lock: stockholm-norr 85_65 expires x", marked="12_3")
-        self.assertEqual(code, 1)
-        self.assertFalse([c for c in calls if c.split()[0] in ("claim", "render", "release", "upload")])
+        # The other machine holds 85_66. This one never claims, draws or gives it back.
+        code, calls, out = self.run_cells({}, argv=("stockholm-norr", "85_65", "--count", "2"), status="lock: stockholm-norr 85_66 expires x")
+        self.assertEqual(code, 0, out)
+        self.assertIn("left to the other one", out)
+        self.assertNotIn("85_66", claims(calls) + releases(calls) + uploads(calls))
+        self.assertEqual(uploads(calls), ["85_65", "85_67"])
+
+    def test_while_the_other_machine_holds_the_one_cell_this_one_draws_ahead(self):
+        locks = '(2, "error: refused: too_many_locks: You already hold as many cells as you may.")'
+        code, calls, out = self.run_cells(
+            {("claim", "85_65"): [eval(locks), (0, "claimed: s 85_65 expires x")]},
+            argv=("stockholm-norr", "85_65", "--count", "1"),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertEqual(claims(calls), ["85_65", "85_65"])
+        self.assertEqual([c.split()[2] for c in calls if c.startswith("render")], ["85_65"])
+        self.assertEqual(uploads(calls), ["85_65"])
+
+    def test_two_parts_split_the_sheet_like_a_chessboard(self):
+        module = load()
+        free = [(c, r) for c in range(4) for r in range(4)]
+        module.PART = (1, 2)
+        one = {module.next_cell([cell], set(), (0, 0), set()) for cell in free} - {None}
+        module.PART = (2, 2)
+        two = {module.next_cell([cell], set(), (0, 0), set()) for cell in free} - {None}
+        self.assertEqual(len(one), 8)
+        self.assertEqual(len(two), 8)
+        self.assertFalse(one & two)
 
     def test_the_mark_is_cleared_when_the_cell_is_sent(self):
         # That it is written on the claim shows below, where the cell keeps its lock.
@@ -226,7 +255,7 @@ class BuildCellsTests(unittest.TestCase):
     def test_five_waiting_waits_and_asks_again_holding_nothing(self):
         code, calls, out = self.run_cells(
             {("claim", "85_66"): [(2, "refused: too_many_waiting: x"), (2, "refused: too_many_waiting: x"), (0, "claimed: s 85_66 expires x")]},
-            argv=("stockholm-norr", "85_65", "--count", "2"),
+            argv=("stockholm-norr", "85_65", "--count", "2", "--ahead", "0"),
         )
         self.assertEqual(code, 0, out)
         self.assertEqual(claims(calls), ["85_65", "85_66", "85_66", "85_66"])
@@ -234,7 +263,7 @@ class BuildCellsTests(unittest.TestCase):
         self.assertIn("asking again in 30 min", out)
 
     def test_until_ends_the_wait_for_review(self):
-        code, calls, out = self.run_cells({("claim", "85_66"): [(2, "refused: too_many_waiting: x")]}, argv=("stockholm-norr", "85_65"), nap=False)
+        code, calls, out = self.run_cells({("claim", "85_66"): [(2, "refused: too_many_waiting: x")]}, argv=("stockholm-norr", "85_65", "--ahead", "0"), nap=False)
         self.assertEqual(code, 0, out)
         self.assertIn("past --until; five cells still wait for review", out)
 
@@ -256,6 +285,119 @@ class BuildCellsTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(calls.count("redraw stockholm-norr 85_65 --wait-for-cheap"), 2)
         self.assertFalse(releases(calls))
+
+
+    # ---- drawing ahead while five wait for review
+
+    def renders(self, calls):
+        return [c.split()[2] for c in calls if c.startswith("render")]
+
+    def test_while_five_wait_it_draws_ahead_and_sends_each_when_a_slot_opens(self):
+        code, calls, out = self.run_cells(
+            {
+                ("claim", "85_66"): [(2, "error: refused: too_many_waiting: Five of your cells are waiting for review."), (2, "error: refused: too_many_waiting: Five of your cells are waiting for review."), (0, "claimed: s 85_66 expires x")],
+                ("claim", "85_67"): [(2, "error: refused: too_many_waiting: Five of your cells are waiting for review.")],
+            },
+            argv=("stockholm-norr", "85_65", "--count", "3"),
+        )
+        self.assertEqual(code, 0, out)
+        # 85_66 and 85_67 are drawn once each, ahead, and sent later without drawing again.
+        self.assertEqual(self.renders(calls), ["85_65", "85_66", "85_67"])
+        self.assertEqual(uploads(calls), ["85_65", "85_66", "85_67"])
+        self.assertEqual(claims(calls), ["85_65", "85_66", "85_66", "85_67", "85_66", "85_67"])
+        self.assertFalse(releases(calls))
+        self.assertIn("drawing 85_66 ahead", out)
+        self.assertIn("sent: stockholm-norr 85_66, drawn ahead", out)
+        self.assertFalse(self.ahead_file.exists())
+
+    def test_after_each_cell_drawn_ahead_it_asks_whether_one_can_be_sent(self):
+        code, calls, out = self.run_cells(
+            {("claim", "85_66"): [(2, "error: refused: too_many_waiting: Five of your cells are waiting for review.")] * 3, ("claim", "85_67"): [(2, "error: refused: too_many_waiting: Five of your cells are waiting for review.")], ("claim", "85_68"): [(2, "error: refused: too_many_waiting: Five of your cells are waiting for review.")]},
+            argv=("stockholm-norr", "85_65", "--count", "2", "--ahead", "2"),
+            nap=False,
+        )
+        # 85_66 is asked for before each new cell: after 85_66 was drawn, and after 85_67.
+        self.assertEqual(claims(calls), ["85_65", "85_66", "85_66", "85_67", "85_66", "85_68"])
+        self.assertEqual(self.renders(calls), ["85_65", "85_66", "85_67"])
+        self.assertIn("2 drawn ahead already", out)
+        self.assertEqual(self.ahead_file.read_text().split(), ["85_66", "85_67"])
+        self.assertIn("drawn ahead, not sent yet: 85_66, 85_67", out)
+
+    def test_a_full_queue_waits_without_drawing_more(self):
+        code, calls, out = self.run_cells(
+            {("claim", "85_66"): [(2, "error: refused: too_many_waiting: Five of your cells are waiting for review."), (2, "error: refused: too_many_waiting: Five of your cells are waiting for review."), (0, "claimed: s 85_66 expires x")], ("claim", "85_67"): [(2, "error: refused: too_many_waiting: Five of your cells are waiting for review.")]},
+            argv=("stockholm-norr", "85_65", "--count", "2", "--ahead", "1"),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.renders(calls), ["85_65", "85_66"])
+        self.assertEqual(uploads(calls), ["85_65", "85_66"])
+        self.assertIn("1 drawn ahead already; asking again in 30 min", out)
+
+    def test_a_cell_drawn_ahead_that_someone_claimed_is_dropped(self):
+        code, calls, out = self.run_cells(
+            {("claim", "85_66"): [(2, "error: refused: too_many_waiting: Five of your cells are waiting for review."), (2, "error: refused: taken: stockholm-norr 85_66 is locked by someone")]},
+            argv=("stockholm-norr", "85_65", "--count", "2"),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("85_66", uploads(calls))
+        self.assertIn("dropped: stockholm-norr 85_66", out)
+        self.assertEqual(uploads(calls), ["85_65", "85_67"])
+
+    def test_a_cell_drawn_ahead_is_never_given_back_or_sent_unclaimed(self):
+        code, calls, out = self.run_cells(
+            {("claim", "85_66"): [(2, "error: refused: too_many_waiting: Five of your cells are waiting for review.")], ("render", "85_66"): [(3, "error: Cesium ion quota is used up")]},
+            argv=("stockholm-norr", "85_65", "--count", "3"),
+        )
+        self.assertEqual(code, 1)
+        self.assertFalse(releases(calls))
+        self.assertEqual(uploads(calls), ["85_65"])
+        code, calls, out = self.run_cells(
+            {("claim", "85_66"): [(2, "error: refused: too_many_waiting: Five of your cells are waiting for review.")], ("render", "85_66"): [(5, "flat: 0% of this cell rises above the ground")], ("claim", "85_67"): [(2, "refused: no_cell: x")]},
+            argv=("stockholm-norr", "85_65", "--count", "2"),
+            grid=hand_grid(set()),
+        )
+        self.assertFalse(releases(calls))
+        self.assertIn("85_66 flat", out)
+
+    def test_the_next_run_sends_what_this_one_drew_ahead_first(self):
+        code, calls, out = self.run_cells({}, argv=("stockholm-norr", "--count", "2"), ahead=("85_66", "85_67"))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(claims(calls), ["85_66", "85_67"])
+        self.assertEqual(uploads(calls), ["85_66", "85_67"])
+        self.assertFalse(self.renders(calls))
+        self.assertIn("going on from 85_67", out)
+        self.assertFalse(self.ahead_file.exists())
+
+    def test_a_queued_cell_whose_files_are_gone_or_failed_is_forgotten(self):
+        module = load()
+        tmp = Path(tempfile.mkdtemp())
+        module.ROOT = tmp
+        folder = tmp / "work" / "s"
+        folder.mkdir(parents=True)
+        (folder / module.AHEAD_FILE).write_text("85_66\n85_67\n")
+        (folder / "85_67.png").write_bytes(b"png")
+        (folder / "85_67.manifest.json").write_text('{"check": "fail"}')
+        self.assertEqual(module.load_ahead("s"), [])
+
+    def test_a_held_cell_that_was_drawn_ahead_is_only_sent(self):
+        code, calls, out = self.run_cells(
+            {}, argv=("stockholm-norr", "--count", "1"), status="lock: stockholm-norr 85_66 expires x", marked="85_66", ahead=("85_66",)
+        )
+        self.assertEqual(code, 0, out)
+        self.assertFalse(self.renders(calls))
+        self.assertEqual(uploads(calls), ["85_66"])
+        self.assertFalse([c for c in calls if c.startswith("claim")])
+
+    def test_with_no_cell_it_goes_on_from_this_logins_newest_cell(self):
+        grid = hand_grid({(75, 15), (75, 14), (80, 61)}, area=((70, 90), (10, 70)))
+        for c in grid["cells"]:
+            if (c[0], c[1]) in ((75, 16), (75, 20)):
+                c[2], c[3] = "vantar", "codekuu"
+                c[4] = "2026-11-27T18:00:00Z" if c[1] == 16 else "2026-11-27T17:00:00Z"
+        code, calls, out = self.run_cells({}, argv=("stockholm-norr", "--count", "1"), grid=grid)
+        self.assertEqual(code, 0, out)
+        self.assertIn("going on from 75_16", out)
+        self.assertEqual(claims(calls), ["75_15"])
 
     # ---- stops
 
@@ -331,7 +473,7 @@ class BuildCellsTests(unittest.TestCase):
     def test_a_sheet_of_the_tiling_counts_every_cell_without_a_row_as_free(self):
         module = load()
         module.rutor = Fake({}, grid={"sheet": {"cols": 3, "rows": 2, "made": "grid"}, "cells": [[0, 0, "vantar", "x", ""], [1, 0, "fri", None, ""]]})
-        free, drawn = module.read_grid("se-n1-e1")
+        free, drawn, _body = module.read_grid("se-n1-e1")
         self.assertEqual(sorted(free), [(0, 1), (1, 0), (1, 1), (2, 0), (2, 1)])
         self.assertEqual(drawn, {(0, 0)})
 
