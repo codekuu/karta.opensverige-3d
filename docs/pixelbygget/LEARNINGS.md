@@ -4,6 +4,18 @@ What we tried, what we measured and what we changed. Newest first. One entry per
 
 ## 2026-11-27
 
+### An AMD APU draws a cell through ROCm
+On an AMD Ryzen AI Max+ 395 (Strix Halo, Radeon 8060S, `gfx1151`, 64 GB, Ubuntu with Linux 7.0, Python 3.14), from main at 09d2e67. `rutor preflight --machine` said `check: gpu missing` there before this change, and the README said AMD does not work.
+- **The redraw ran unchanged.** On the ROCm build PyTorch answers to `cuda`, so `pipe.to("cuda")`, the phase placement and `torch.cuda.empty_cache` need no edit. What changed is the machine check, the messages and the docs.
+- **PyTorch 2.14.1+rocm7.2 lists `gfx1151` in `torch.cuda.get_arch_list()`.** It saw 28.7 GiB, did 17 TFLOPS in a bf16 matmul, and ran flash and memory-efficient attention. No ROCm was installed on the system: the wheel carries its libraries, and the kernel's `amdgpu` driver was enough.
+- **bitsandbytes 0.50.2 from PyPI has `libbitsandbytes_rocm72.so` in it and loaded it.** NF4 on the GPU matched a dequantised reference within 0.3 %. It runs `rocminfo` at import to learn the architecture, prints two error lines when that is missing, and uses the answer nowhere.
+- **The card is found in the kernel's KFD table,** `/sys/class/kfd/kfd/topology/nodes`, which ROCm itself reads. It needs no PyTorch, so `--machine` stays light. On this APU the GPU node's memory bank is the GTT size, 30 867 931 136 bytes, the same 28.7 GiB PyTorch sees. The 4 GB the firmware sets aside as VRAM is not the number that counts.
+- **The table is readable by every user, `/dev/kfd` is not.** Here the desktop seat gave the account an ACL on it, without the `render` group. An SSH login would have seen the card and no GPU in PyTorch, 15 GB later. `--machine` now asks.
+- **A whole cell through a local service** (`service/scripts/local.sh`): `goteborg-norr 63_51`, claimed, rendered from open data, redrawn, `check: ok`, uploaded, `vantar`. The manifest says `"gpu": "Radeon 8060S Graphics"`, and the service took it.
+- **6 min 30 s for the redraw with the model cached:** about 25 s to start and load, 17 s to encode four windows, 42 s for each of the eight steps, about 10 s to decode. Peak resident memory 14.5 GB. The first run, which fetched the weights at about 125 MB/s, took 15 min, and its encode 2 min 40 s: the first use of each kernel. An RTX 5070 takes about two minutes.
+- **Two runs of the same cell gave the same PNG,** sha256 `6cb602ab…`, on this machine. Against an NVIDIA run of the same seed it has not been compared.
+- **Not tried:** a discrete AMD card, any other `gfx` target, Windows (AMD is asked only on Linux), a machine with 32 GB or less, where an APU's GPU memory and the redraw's own share one pool, and an upload to the real service.
+
 ### A third run: the same place asked for again
 From a fresh clone of main at 4396626 on the test PC, with "build a cell in Lund" once more, now that Lund's cell waits for review.
 - **A place name gives the same cell every time.** `rutor claim --plats Lund` answered `place: se-n5572-e1312 47_30` and was refused `taken`. Nothing was locked. So the second person to ask for a town meets a refusal, not a cell.

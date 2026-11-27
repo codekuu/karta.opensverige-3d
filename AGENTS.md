@@ -8,12 +8,12 @@ The commands are explained in [README.md](README.md), the rules in [CONTRIBUTING
 
 There are two kinds of work here.
 
-- **Build a map cell.** Your human's own NVIDIA card draws one cell the map does not have yet, as pixel art. What it asks of them is listed under "What you need" in README.md.
+- **Build a map cell.** Your human's own graphics card, NVIDIA or on Linux AMD, draws one cell the map does not have yet, as pixel art. What it asks of them is listed under "What you need" in README.md.
 - **Change the code.** The CLI, the renderer, the check, the service or the docs. It needs no GPU.
 
 If your human did not say which, check the machine (step 2) and then ask. Do not log in, accept terms or claim a cell before they answer.
 
-- No NVIDIA card: say so, and offer a code change. Issues labelled `good first issue` are a place to start.
+- No NVIDIA card, and no AMD card on Linux: say so, and offer a code change. Issues labelled `good first issue` are a place to start.
 - The machine passes: say so, and ask whether they want to build a cell.
 
 Safe to run while you wait: cloning, the light install, `rutor preflight --machine`, `rutor cities`, `rutor grid <sheet>` and the tests. None of them logs in, claims or uploads.
@@ -64,7 +64,7 @@ No yes, no login.
 ## 5. Install and log in
 
 1. Install the model stack. You have the clone and the virtualenv already, so of the README's setup block these two lines are left:
-   - `python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128`
+   - `python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128`. On an AMD card the index is `https://download.pytorch.org/whl/rocm7.2` instead; with the wrong build in, `check: torch` in step 5.5 says which one the card needs
    - `python -m pip install -r requirements.txt`
 
    These two lines download about 3 GB. The first redraw downloads about 12 GB of model weights.
