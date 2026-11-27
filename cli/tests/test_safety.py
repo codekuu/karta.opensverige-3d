@@ -333,6 +333,7 @@ class MachineTests(_Env):
         self.assertIsNone(commands._no_kernels_for_card(rocm_build("gfx1151")))
         # The feature flags after the colon are not part of the target.
         self.assertIsNone(commands._no_kernels_for_card(rocm_build("gfx1100:sramecc-:xnack-")))
+        self.assertIsNone(commands._no_kernels_for_card(rocm_build("gfx90a:sramecc+:xnack-", ["gfx90a:xnack-"])))
         # A build that cannot say is let be, and a CUDA build is not asked.
         self.assertIsNone(commands._no_kernels_for_card(rocm_build("gfx1031", RuntimeError("no list"))))
         self.assertIsNone(commands._no_kernels_for_card(rocm_build("gfx1031", [])))

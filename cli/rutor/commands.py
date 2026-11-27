@@ -623,7 +623,8 @@ def _no_kernels_for_card(torch: object) -> str | None:
     try:
         # gcnArchName carries feature flags after a colon, like gfx90a:sramecc+:xnack-.
         arch = str(cuda.get_device_properties(0).gcnArchName).split(":")[0]
-        built = [str(name) for name in cuda.get_arch_list()]
+        # A build's list can carry feature flags too, like gfx90a:xnack-. The target is what counts.
+        built = [str(name).split(":")[0] for name in cuda.get_arch_list()]
     except Exception:
         return None
     if not arch or not built or arch in built:

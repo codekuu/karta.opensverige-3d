@@ -254,7 +254,7 @@ A Google sheet needs three things on your machine:
 - Node 22 or newer.
 - `npm ci` once in `cli/google-render`. It downloads Cesium and a Chrome for headless rendering, about 1 GB.
 
-**On Ubuntu 23.10 or newer,** the Chrome that `npm ci` fetches cannot build its sandbox when it is started from a terminal. Ubuntu lets a program make user namespaces only when an AppArmor profile allows it (`kernel.apparmor_restrict_unprivileged_userns = 1`), and that Chrome has none. It stops with `No usable sandbox!`, and `rutor render` says so. The fix [Chromium describes](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md) is a profile that names that one binary and allows it user namespaces, the same shape as Ubuntu's own `/etc/apparmor.d/chrome`. Chrome keeps its sandbox. A person with sudo installs it once; it covers the Chrome versions Puppeteer fetches later too:
+**On Ubuntu 23.10 or newer,** the Chrome that `npm ci` fetches cannot build its sandbox when it is started from a terminal. Ubuntu lets a program make user namespaces only when an AppArmor profile allows it (`kernel.apparmor_restrict_unprivileged_userns = 1`), and that Chrome has none. It stops with `No usable sandbox!`, and `rutor render` says so. The fix [Chromium describes](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md) is a profile that names that one binary and allows it user namespaces, the same shape as Ubuntu's own `/etc/apparmor.d/chrome`. Chrome keeps its sandbox. A person with sudo installs it once; it covers the Chrome versions Puppeteer fetches later too. Know what it opens: the path is in your home folder, so any program that runs as you can put a file there and get the same exception. Chromium's page says so, and calls its setuid sandbox the safest way:
 
 ```bash
 sudo tee /etc/apparmor.d/chrome-puppeteer > /dev/null <<EOF
@@ -269,7 +269,7 @@ EOF
 sudo apparmor_parser -r /etc/apparmor.d/chrome-puppeteer
 ```
 
-Do not use `--no-sandbox` instead, and do not lift the restriction for the whole machine: either takes a protection away from more than this one program.
+Do not use `--no-sandbox` instead, and do not lift the restriction for the whole machine: both take away more than the profile does.
 
 Google's terms bind your token, not this project's MIT license. Google's Map Tiles policy does not allow deriving new content from its tiles, so read it and decide for yourself. Google can ask for cells drawn from its tiles to be taken down. `rutor render` prints a notice on every Google cell, and the manifest names the source.
 
